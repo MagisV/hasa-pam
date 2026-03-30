@@ -1,0 +1,13 @@
+.DS_Store
+
+# Julia local state
+LocalPreferences.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# Julia/CondaPkg managed environments
+.CondaPkg/
+
+# Generated outputs from the project scripts
+outputs/
