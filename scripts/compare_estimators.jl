@@ -30,41 +30,6 @@ function parse_cli(args)
 end
 
 parse_medium(s) = lowercase(s) == "water" ? WATER : lowercase(s) == "skull_in_water" ? SKULL_IN_WATER : error("Unknown medium: $s")
-parse_placement(s) = begin
-    norm = replace(lowercase(s), "-" => "_")
-    norm in ("auto", "fixed_transducer", "fixed_focus_depth") || error("Unknown placement mode: $s")
-    Symbol(norm)
-end
-
-function resolve_placement(opts, medium_type)
-    placement = parse_placement(opts["placement"])
-    requested_focus_depth = haskey(opts, "focus-depth-from-inner-skull-mm") ?
-        parse(Float64, opts["focus-depth-from-inner-skull-mm"]) * 1e-3 :
-        nothing
-
-    if placement == :fixed_transducer
-        isnothing(requested_focus_depth) || error("`--focus-depth-from-inner-skull-mm` is incompatible with `--placement=fixed_transducer`.")
-        return placement, nothing
-    end
-
-    if placement == :fixed_focus_depth
-        if !isnothing(requested_focus_depth)
-            return placement, requested_focus_depth
-        elseif medium_type == SKULL_IN_WATER
-            return placement, 30e-3
-        else
-            error("`--placement=fixed_focus_depth` requires `--focus-depth-from-inner-skull-mm` for this medium.")
-        end
-    end
-
-    if !isnothing(requested_focus_depth)
-        return :fixed_focus_depth, requested_focus_depth
-    elseif medium_type == SKULL_IN_WATER
-        return :fixed_focus_depth, 30e-3
-    else
-        return :fixed_transducer, nothing
-    end
-end
 
 slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
 
@@ -145,7 +110,14 @@ end
 
 opts = parse_cli(ARGS)
 medium_type = parse_medium(opts["medium"])
-placement_mode, focus_depth = resolve_placement(opts, medium_type)
+requested_focus_depth = haskey(opts, "focus-depth-from-inner-skull-mm") ?
+    parse(Float64, opts["focus-depth-from-inner-skull-mm"]) * 1e-3 :
+    nothing
+placement_mode, focus_depth = resolve_placement_mode(
+    opts["placement"],
+    medium_type;
+    focus_depth_from_inner_skull=requested_focus_depth,
+)
 out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
     opts["out-dir"]
 else

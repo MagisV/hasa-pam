@@ -79,6 +79,36 @@ end
     @test all(hasa_info[:amplitudes] .≈ 1.0)
 end
 
+@testset "Placement resolution" begin
+    mode, depth = resolve_placement_mode(:auto, SKULL_IN_WATER)
+    @test mode == :fixed_focus_depth
+    @test depth ≈ 30e-3
+
+    mode, depth = resolve_placement_mode(:auto, WATER)
+    @test mode == :fixed_transducer
+    @test isnothing(depth)
+
+    mode, depth = resolve_placement_mode(:fixed_transducer, SKULL_IN_WATER)
+    @test mode == :fixed_transducer
+    @test isnothing(depth)
+
+    mode, depth = resolve_placement_mode(:fixed_focus_depth, SKULL_IN_WATER)
+    @test mode == :fixed_focus_depth
+    @test depth ≈ 30e-3
+
+    mode, depth = resolve_placement_mode(:fixed_focus_depth, SKULL_IN_WATER; focus_depth_from_inner_skull=20e-3)
+    @test mode == :fixed_focus_depth
+    @test depth ≈ 20e-3
+
+    mode, depth = resolve_placement_mode(:auto, SKULL_IN_WATER; focus_depth_from_inner_skull=25e-3)
+    @test mode == :fixed_focus_depth
+    @test depth ≈ 25e-3
+
+    @test_throws ErrorException resolve_placement_mode(:fixed_transducer, SKULL_IN_WATER; focus_depth_from_inner_skull=20e-3)
+    @test_throws ErrorException resolve_placement_mode(:fixed_focus_depth, WATER)
+    @test_throws ErrorException resolve_placement_mode("bad_mode", WATER)
+end
+
 @testset "Phase unwrapping" begin
     truth = collect(range(0.0, 4π; length=17))
     wrapped = mod.(truth .+ π, 2π) .- π

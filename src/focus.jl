@@ -12,6 +12,46 @@ end
 @enum MediumType WATER SKULL_IN_WATER
 @enum Est GEOMETRIC HASA
 
+function parse_placement_mode(s::AbstractString)
+    norm = replace(lowercase(s), "-" => "_")
+    norm in ("auto", "fixed_transducer", "fixed_focus_depth") || error("Unknown placement mode: $s")
+    return Symbol(norm)
+end
+
+parse_placement_mode(s::Symbol) = parse_placement_mode(String(s))
+
+function resolve_placement_mode(
+    placement,
+    medium_type::MediumType;
+    focus_depth_from_inner_skull::Union{Nothing, Real}=nothing,
+)
+    placement_mode = placement isa Symbol ? parse_placement_mode(placement) : parse_placement_mode(String(placement))
+    requested_focus_depth = isnothing(focus_depth_from_inner_skull) ? nothing : Float64(focus_depth_from_inner_skull)
+
+    if placement_mode == :fixed_transducer
+        isnothing(requested_focus_depth) || error("`--focus-depth-from-inner-skull-mm` is incompatible with `--placement=fixed_transducer`.")
+        return placement_mode, nothing
+    end
+
+    if placement_mode == :fixed_focus_depth
+        if !isnothing(requested_focus_depth)
+            return placement_mode, requested_focus_depth
+        elseif medium_type == SKULL_IN_WATER
+            return placement_mode, 30e-3
+        else
+            error("`--placement=fixed_focus_depth` requires `--focus-depth-from-inner-skull-mm` for this medium.")
+        end
+    end
+
+    if !isnothing(requested_focus_depth)
+        return :fixed_focus_depth, requested_focus_depth
+    elseif medium_type == SKULL_IN_WATER
+        return :fixed_focus_depth, 30e-3
+    else
+        return :fixed_transducer, nothing
+    end
+end
+
 function KGrid2D(nx::Int, ny::Int, dx::Real, dy::Real; dt::Real, Nt::Integer)
     return KGrid2D(
         nx,

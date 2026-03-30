@@ -31,6 +31,7 @@ const DEFAULT_ROI_SIZE_XYZ = (705, 360, 450)
 export DEFAULT_CT_PATH, DEFAULT_ROI_INDEX_XYZ, DEFAULT_ROI_SIZE_XYZ
 export CTInfo, KGrid2D, SimulationConfig, SweepSettings, AnimationSettings, MediumType, Est
 export WATER, SKULL_IN_WATER, GEOMETRIC, HASA
+export parse_placement_mode, resolve_placement_mode
 export omega, Nx, Nz, Nt, Nx_hasa, target_index, Nz_active, active_col_range, set_z_focus!
 export load_roi_resample_xy, load_default_ct
 export hu_to_rho_c, find_skull_boundaries, skull_mask_from_c_columnwise
