@@ -17,6 +17,7 @@ function parse_cli(args)
         "lateral-cm" => "0.0",
         "aperture-cm" => "10.0",
         "medium" => "skull_in_water",
+        "placement" => "auto",
     )
 
     for arg in args
@@ -29,21 +30,50 @@ function parse_cli(args)
 end
 
 parse_medium(s) = lowercase(s) == "water" ? WATER : lowercase(s) == "skull_in_water" ? SKULL_IN_WATER : error("Unknown medium: $s")
+parse_placement(s) = begin
+    norm = replace(lowercase(s), "-" => "_")
+    norm in ("auto", "fixed_transducer", "fixed_focus_depth") || error("Unknown placement mode: $s")
+    Symbol(norm)
+end
 
-function default_focus_depth_m(opts, medium_type)
-    if haskey(opts, "focus-depth-from-inner-skull-mm")
-        return parse(Float64, opts["focus-depth-from-inner-skull-mm"]) * 1e-3
+function resolve_placement(opts, medium_type)
+    placement = parse_placement(opts["placement"])
+    requested_focus_depth = haskey(opts, "focus-depth-from-inner-skull-mm") ?
+        parse(Float64, opts["focus-depth-from-inner-skull-mm"]) * 1e-3 :
+        nothing
+
+    if placement == :fixed_transducer
+        isnothing(requested_focus_depth) || error("`--focus-depth-from-inner-skull-mm` is incompatible with `--placement=fixed_transducer`.")
+        return placement, nothing
     end
-    return medium_type == SKULL_IN_WATER ? 30e-3 : nothing
+
+    if placement == :fixed_focus_depth
+        if !isnothing(requested_focus_depth)
+            return placement, requested_focus_depth
+        elseif medium_type == SKULL_IN_WATER
+            return placement, 30e-3
+        else
+            error("`--placement=fixed_focus_depth` requires `--focus-depth-from-inner-skull-mm` for this medium.")
+        end
+    end
+
+    if !isnothing(requested_focus_depth)
+        return :fixed_focus_depth, requested_focus_depth
+    elseif medium_type == SKULL_IN_WATER
+        return :fixed_focus_depth, 30e-3
+    else
+        return :fixed_transducer, nothing
+    end
 end
 
 slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
 
-function default_output_dir(opts, focus_depth)
+function default_output_dir(opts, placement_mode, focus_depth)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     parts = String[
         "compare_estimators",
         lowercase(opts["medium"]),
+        String(placement_mode),
         "f$(slug_value(parse(Float64, opts["frequency-mhz"]); digits=2))mhz",
         "z$(slug_value(parse(Float64, opts["focal-cm"]); digits=1))cm",
         "x$(slug_value(parse(Float64, opts["lateral-cm"]); digits=1))cm",
@@ -115,11 +145,11 @@ end
 
 opts = parse_cli(ARGS)
 medium_type = parse_medium(opts["medium"])
-focus_depth = default_focus_depth_m(opts, medium_type)
+placement_mode, focus_depth = resolve_placement(opts, medium_type)
 out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
     opts["out-dir"]
 else
-    default_output_dir(opts, focus_depth)
+    default_output_dir(opts, placement_mode, focus_depth)
 end
 mkpath(out_dir)
 
@@ -158,6 +188,7 @@ summary = Dict(
     "ct_path" => opts["ct-path"],
     "slice_index" => parse(Int, opts["slice-index"]),
     "spacing_m" => spacing_m,
+    "placement_mode" => String(placement_mode),
     "geometric" => stats_geo,
     "hasa" => stats_hasa,
 )
