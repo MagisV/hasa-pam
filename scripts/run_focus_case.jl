@@ -3,6 +3,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
+using Dates
 using CairoMakie
 using JLD2
 using JSON3
@@ -18,7 +19,6 @@ function parse_cli(args)
         "aperture-cm" => "10.0",
         "estimator" => "hasa",
         "medium" => "skull_in_water",
-        "out-dir" => joinpath(pwd(), "outputs", "run_focus_case"),
     )
 
     for arg in args
@@ -38,6 +38,27 @@ function default_focus_depth_m(opts, medium_type)
         return parse(Float64, opts["focus-depth-from-inner-skull-mm"]) * 1e-3
     end
     return medium_type == SKULL_IN_WATER ? 30e-3 : nothing
+end
+
+slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
+
+function default_output_dir(opts, focus_depth)
+    timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
+    parts = String[
+        "run_focus",
+        lowercase(opts["estimator"]),
+        lowercase(opts["medium"]),
+        "f$(slug_value(parse(Float64, opts["frequency-mhz"]); digits=2))mhz",
+        "z$(slug_value(parse(Float64, opts["focal-cm"]); digits=1))cm",
+        "x$(slug_value(parse(Float64, opts["lateral-cm"]); digits=1))cm",
+        "ap$(slug_value(parse(Float64, opts["aperture-cm"]); digits=1))cm",
+        "slice$(parse(Int, opts["slice-index"]))",
+    ]
+    if !isnothing(focus_depth)
+        push!(parts, "fd$(slug_value(focus_depth * 1e3; digits=1))mm")
+    end
+    push!(parts, timestamp)
+    return joinpath(pwd(), "outputs", join(parts, "_"))
 end
 
 function target_mm(kgrid, cfg)
@@ -88,15 +109,19 @@ function save_pressure_plot(path::AbstractString, pressure, c_map, kgrid, cfg, s
 end
 
 opts = parse_cli(ARGS)
-out_dir = opts["out-dir"]
-mkpath(out_dir)
 medium_type = parse_medium(opts["medium"])
+focus_depth = default_focus_depth_m(opts, medium_type)
+out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
+    opts["out-dir"]
+else
+    default_output_dir(opts, focus_depth)
+end
+mkpath(out_dir)
 
 hu_vol, spacing_m = load_default_ct(ct_path=opts["ct-path"])
 ct_info = CTInfo(hu_vol, spacing_m)
 @info "Loaded CT volume" size=size(hu_vol) spacing_m spacing_info=ct_info
 
-focus_depth = default_focus_depth_m(opts, medium_type)
 cfg = SimulationConfig(
     fc=parse(Float64, opts["frequency-mhz"]) * 1e6,
     z_focus=parse(Float64, opts["focal-cm"]) * 1e-2,
@@ -116,6 +141,7 @@ stats, pressure, c_map, kgrid, cfg, hasa_info = run_focus_case(
 )
 
 summary = Dict(
+    "out_dir" => out_dir,
     "ct_path" => opts["ct-path"],
     "slice_index" => parse(Int, opts["slice-index"]),
     "spacing_m" => spacing_m,
