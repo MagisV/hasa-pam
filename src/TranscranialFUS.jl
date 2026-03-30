@@ -6,6 +6,10 @@ using FFTW
 using Interpolations
 import CairoMakie
 import CondaPkg
+if !haskey(ENV, "SSL_CERT_FILE") && isfile("/etc/ssl/cert.pem")
+    ENV["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
+end
+import PythonCall
 
 const DEFAULT_CT_PATH = normpath(
     joinpath(

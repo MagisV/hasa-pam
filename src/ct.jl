@@ -74,7 +74,7 @@ function _scan_dicom_series(dicom_dir::AbstractString)
 
     series_uid = first(sort!(collect(keys(uid_counts)); by=uid -> uid_counts[uid], rev=true))
     selected = filter(meta -> meta.series_uid == series_uid, metas)
-    sort!(selected; by=meta -> (meta.z_position_mm, meta.instance_number))
+    sort!(selected; by=meta -> (meta.instance_number, meta.z_position_mm))
     return selected
 end
 

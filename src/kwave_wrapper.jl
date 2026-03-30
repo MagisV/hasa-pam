@@ -1,25 +1,21 @@
-const _PYTHONCALL_PKGID = Base.PkgId(Base.UUID("6099a3de-0909-46bc-b1f4-468b9a2dfc0d"), "PythonCall")
-
-function _pythoncall_module()
-    Base.require(_PYTHONCALL_PKGID)
-    return Base.loaded_modules[_PYTHONCALL_PKGID]
-end
-
 function _kwave_modules()
-    pc = _pythoncall_module()
     CondaPkg.resolve()
+    py_os = PythonCall.pyimport("os")
+    if isfile("/etc/ssl/cert.pem")
+        py_os.environ["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
+    end
     return (
-        PythonCall=pc,
-        np=pc.pyimport("numpy"),
-        copy=pc.pyimport("copy"),
-        kgrid=pc.pyimport("kwave.kgrid"),
-        kmedium=pc.pyimport("kwave.kmedium"),
-        ksource=pc.pyimport("kwave.ksource"),
-        ksensor=pc.pyimport("kwave.ksensor"),
-        kspace=pc.pyimport("kwave.kspaceFirstOrder2D"),
-        simopts=pc.pyimport("kwave.options.simulation_options"),
-        execopts=pc.pyimport("kwave.options.simulation_execution_options"),
-        signals=pc.pyimport("kwave.utils.signals"),
+        PythonCall=PythonCall,
+        np=PythonCall.pyimport("numpy"),
+        copy=PythonCall.pyimport("copy"),
+        kgrid=PythonCall.pyimport("kwave.kgrid"),
+        kmedium=PythonCall.pyimport("kwave.kmedium"),
+        ksource=PythonCall.pyimport("kwave.ksource"),
+        ksensor=PythonCall.pyimport("kwave.ksensor"),
+        kspace=PythonCall.pyimport("kwave.kspaceFirstOrder2D"),
+        simopts=PythonCall.pyimport("kwave.options.simulation_options"),
+        execopts=PythonCall.pyimport("kwave.options.simulation_execution_options"),
+        signals=PythonCall.pyimport("kwave.utils.signals"),
     )
 end
 
@@ -40,8 +36,7 @@ function _normalize_record(record::Union{Symbol, AbstractString})
 end
 
 function _py_bool_matrix(np, rows::Int, cols::Int)
-    pc = _pythoncall_module()
-    return np.zeros((rows, cols), dtype=pc.pybuiltins.bool)
+    return np.zeros((rows, cols), dtype=PythonCall.pybuiltins.bool)
 end
 
 function _simulate_kwave(
@@ -71,9 +66,11 @@ function _simulate_kwave(
     py_kgrid.dt = kgrid.dt
     py_kgrid.Nt = nt
 
+    c_py = np.array(pc.Py(Float32.(c)), dtype=np.float32)
+    rho_py = np.array(pc.Py(Float32.(rho)), dtype=np.float32)
     medium = mods.kmedium.kWaveMedium(
-        sound_speed=pc.Py(Float32.(c)),
-        density=pc.Py(Float32.(rho)),
+        sound_speed=c_py,
+        density=rho_py,
     )
 
     source = mods.ksource.kSource()
@@ -83,33 +80,35 @@ function _simulate_kwave(
 
     int_delay = floor.(Int, tau ./ cfg.dt)
     frac_delay = Float64.(tau .- int_delay .* cfg.dt)
+    int_delay_py = np.array(pc.Py(Int64.(int_delay)), dtype=np.int64)
+    envelope_py = np.array(pc.Py(Int64[rise_fall, rise_fall]), dtype=np.int64)
 
     if use_envelope
         burst_py = mods.signals.tone_burst(
             sample_freq=1 / cfg.dt,
             signal_freq=cfg.fc,
             num_cycles=num_cycles,
-            envelope=pc.Py([rise_fall, rise_fall]),
-            signal_offset=pc.Py(int_delay),
+            envelope=envelope_py,
+            signal_offset=int_delay_py,
         )
     else
         burst_py = mods.signals.tone_burst(
             sample_freq=1 / cfg.dt,
             signal_freq=cfg.fc,
             num_cycles=num_cycles,
-            signal_offset=pc.Py(int_delay),
+            signal_offset=int_delay_py,
         )
     end
     burst = pc.pyconvert(Matrix{Float64}, burst_py)
     drive_weights = (1e5 .* Float64.(amplitudes) .* exp.(-1im .* omega(cfg) .* frac_delay))
     p_drive = real.(reshape(drive_weights, :, 1) .* burst)
-    source.p = pc.Py(p_drive)
+    source.p = np.array(pc.Py(p_drive), dtype=np.float64)
     source.p_frequency_ref = cfg.fc
     source.medium = medium
 
     sensor = mods.ksensor.kSensor()
     sensor.mask = np.ones((kgrid.Nx, kgrid.Ny), dtype=pc.pybuiltins.bool)
-    sensor.record = pc.Py([String(rec_symbol)])
+    sensor.record = pc.pybuiltins.list((String(rec_symbol),))
 
     sim_opts = mods.simopts.SimulationOptions(
         pml_inside=true,

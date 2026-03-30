@@ -144,16 +144,16 @@ _ifftshift_dim2(a::AbstractMatrix) = circshift(a, (0, -fld(size(a, 2), 2)))
 
 function _unwrap_phase(v::AbstractVector{<:Real}; discont::Real=π)
     out = collect(Float64, v)
-    offset = 0.0
-    for i in 2:length(out)
-        delta = out[i] - out[i - 1]
-        if delta > discont
-            offset -= 2π
-        elseif delta < -discont
-            offset += 2π
-        end
-        out[i] += offset
-    end
+    length(out) <= 1 && return out
+
+    deltas = diff(out)
+    deltas_mod = mod.(deltas .+ π, 2π) .- π
+    deltas_mod[(deltas_mod .== -π) .& (deltas .> 0)] .= π
+
+    phase_correction = deltas_mod .- deltas
+    phase_correction[abs.(deltas) .< Float64(discont)] .= 0.0
+
+    out[2:end] .+= cumsum(phase_correction)
     return out
 end
 

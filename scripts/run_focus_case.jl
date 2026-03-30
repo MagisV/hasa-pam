@@ -33,14 +33,56 @@ end
 parse_est(s) = lowercase(s) == "geometric" ? GEOMETRIC : lowercase(s) == "hasa" ? HASA : error("Unknown estimator: $s")
 parse_medium(s) = lowercase(s) == "water" ? WATER : lowercase(s) == "skull_in_water" ? SKULL_IN_WATER : error("Unknown medium: $s")
 
-function save_pressure_plot(path::AbstractString, pressure, kgrid, stats, title::AbstractString)
+function default_focus_depth_m(opts, medium_type)
+    if haskey(opts, "focus-depth-from-inner-skull-mm")
+        return parse(Float64, opts["focus-depth-from-inner-skull-mm"]) * 1e-3
+    end
+    return medium_type == SKULL_IN_WATER ? 30e-3 : nothing
+end
+
+function target_mm(kgrid, cfg)
+    x_tgt_mm = (kgrid.x_vec[cfg.trans_index] - cfg.z_focus) * 1e3
+    y_tgt_mm = (kgrid.y_vec[fld(kgrid.Ny, 2) + 1] + cfg.x_focus) * 1e3
+    return x_tgt_mm, y_tgt_mm
+end
+
+function overlay_skull!(ax, c_map, kgrid)
+    c_map === nothing && return nothing
+    skull_mask = skull_mask_from_c_columnwise(c_map; mask_outside=false)
+    any(skull_mask) || return nothing
+
+    overlay = fill(Float64(NaN), size(c_map))
+    overlay[skull_mask] .= Float64.(c_map[skull_mask]) ./ maximum(Float64.(c_map[skull_mask]))
+    return heatmap!(
+        ax,
+        kgrid.y_vec .* 1e3,
+        kgrid.x_vec .* 1e3,
+        overlay';
+        colormap=:grays,
+        alpha=0.35,
+        colorrange=(0, 1),
+        nan_color=CairoMakie.RGBAf(0, 0, 0, 0),
+    )
+end
+
+function save_pressure_plot(path::AbstractString, pressure, c_map, kgrid, cfg, stats, title::AbstractString)
     fig = Figure(size=(900, 600))
-    ax = Axis(fig[1, 1]; title=title, xlabel="Lateral position [mm]", ylabel="Axial position [mm]")
+    ax = Axis(
+        fig[1, 1];
+        title=title,
+        xlabel="Lateral position [mm]",
+        ylabel="Axial position [mm]",
+        aspect=DataAspect(),
+    )
     hm = heatmap!(ax, kgrid.y_vec .* 1e3, kgrid.x_vec .* 1e3, pressure'; colormap=:viridis)
+    overlay_skull!(ax, c_map, kgrid)
     Colorbar(fig[1, 2], hm; label="Pressure")
+
+    x_tgt_mm, y_tgt_mm = target_mm(kgrid, cfg)
+    scatter!(ax, [y_tgt_mm], [x_tgt_mm]; color=:red, marker=:x, markersize=16, strokewidth=2)
     if stats !== nothing
         peak_x, peak_y = stats[:peak_mm]
-        scatter!(ax, [peak_y], [peak_x]; color=:red, markersize=12)
+        scatter!(ax, [peak_y], [peak_x]; color=:white, marker=:circle, markersize=12, strokecolor=:white, strokewidth=2)
     end
     save(path, fig)
 end
@@ -48,12 +90,13 @@ end
 opts = parse_cli(ARGS)
 out_dir = opts["out-dir"]
 mkpath(out_dir)
+medium_type = parse_medium(opts["medium"])
 
 hu_vol, spacing_m = load_default_ct(ct_path=opts["ct-path"])
 ct_info = CTInfo(hu_vol, spacing_m)
 @info "Loaded CT volume" size=size(hu_vol) spacing_m spacing_info=ct_info
 
-focus_depth = haskey(opts, "focus-depth-from-inner-skull-mm") ? parse(Float64, opts["focus-depth-from-inner-skull-mm"]) * 1e-3 : nothing
+focus_depth = default_focus_depth_m(opts, medium_type)
 cfg = SimulationConfig(
     fc=parse(Float64, opts["frequency-mhz"]) * 1e6,
     z_focus=parse(Float64, opts["focal-cm"]) * 1e-2,
@@ -65,7 +108,7 @@ cfg = SimulationConfig(
 stats, pressure, c_map, kgrid, cfg, hasa_info = run_focus_case(
     hu_vol,
     cfg,
-    parse_medium(opts["medium"]),
+    medium_type,
     parse_est(opts["estimator"]),
     SweepSettings();
     slice_index=parse(Int, opts["slice-index"]),
@@ -98,7 +141,9 @@ if pressure !== nothing && ndims(pressure) == 2
     save_pressure_plot(
         joinpath(out_dir, "pressure.png"),
         pressure,
+        c_map,
         kgrid,
+        cfg,
         stats,
         "Focus Run: $(opts["estimator"]) in $(opts["medium"])",
     )
