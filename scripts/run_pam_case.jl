@@ -1,0 +1,368 @@
+#!/usr/bin/env julia
+
+using Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+
+using Dates
+using CairoMakie
+using JLD2
+using JSON3
+using TranscranialFUS
+
+function parse_cli(args)
+    opts = Dict{String, String}(
+        "sources-mm" => "30:0",
+        "frequency-mhz" => "0.4",
+        "amplitude-pa" => "5e4",
+        "num-cycles" => "4",
+        "axial-mm" => "60",
+        "transverse-mm" => "60",
+        "dx-mm" => "0.2",
+        "dz-mm" => "0.2",
+        "receiver-aperture-mm" => "50",
+        "t-max-us" => "60",
+        "dt-ns" => "40",
+        "zero-pad-factor" => "4",
+        "peak-suppression-radius-mm" => "2.0",
+        "success-tolerance-mm" => "1.0",
+        "aberrator" => "lens",
+        "ct-path" => DEFAULT_CT_PATH,
+        "slice-index" => "250",
+        "skull-transducer-distance-mm" => "30",
+        "bottom-margin-mm" => "10",
+        "hu-bone-thr" => "200",
+        "lens-depth-mm" => "12",
+        "lens-lateral-mm" => "0",
+        "lens-axial-radius-mm" => "3",
+        "lens-lateral-radius-mm" => "12",
+        "aberrator-c" => "1700",
+        "aberrator-rho" => "1150",
+        "use-gpu" => "false",
+    )
+
+    for arg in args
+        startswith(arg, "--") || error("Unsupported argument format: $arg")
+        parts = split(arg[3:end], "="; limit=2)
+        length(parts) == 2 || error("Arguments must use --name=value, got: $arg")
+        opts[parts[1]] = parts[2]
+    end
+    return opts
+end
+
+slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
+
+parse_bool(s::AbstractString) = lowercase(strip(s)) in ("1", "true", "yes", "on")
+
+function parse_float_list(spec::AbstractString)
+    isempty(strip(spec)) && return Float64[]
+    return [parse(Float64, strip(item)) for item in split(spec, ",") if !isempty(strip(item))]
+end
+
+function parse_aberrator(s::AbstractString)
+    value = Symbol(lowercase(strip(s)))
+    value in (:none, :lens, :skull) || error("Unknown aberrator: $s")
+    return value
+end
+
+function parse_receiver_aperture_mm(s::AbstractString)
+    value = lowercase(strip(s))
+    value in ("none", "full", "all") && return nothing
+    return parse(Float64, value) * 1e-3
+end
+
+function expand_source_values(values::Vector{Float64}, n::Int, default::Float64)
+    if isempty(values)
+        return fill(default, n)
+    elseif length(values) == 1
+        return fill(values[1], n)
+    elseif length(values) == n
+        return values
+    end
+    error("Source parameter list must have length 1 or match the number of sources ($n).")
+end
+
+function parse_sources(opts)
+    coord_tokens = [strip(token) for token in split(opts["sources-mm"], ",") if !isempty(strip(token))]
+    1 <= length(coord_tokens) <= 5 || error("Provide between 1 and 5 sources via --sources-mm=depth:lateral,...")
+
+    phases_deg = expand_source_values(
+        haskey(opts, "phases-deg") ? parse_float_list(opts["phases-deg"]) : Float64[],
+        length(coord_tokens),
+        0.0,
+    )
+    delays_us = expand_source_values(
+        haskey(opts, "delays-us") ? parse_float_list(opts["delays-us"]) : Float64[],
+        length(coord_tokens),
+        0.0,
+    )
+    amplitudes_pa = expand_source_values(
+        haskey(opts, "source-amplitudes-pa") ? parse_float_list(opts["source-amplitudes-pa"]) : Float64[],
+        length(coord_tokens),
+        parse(Float64, opts["amplitude-pa"]),
+    )
+    frequencies_mhz = expand_source_values(
+        haskey(opts, "source-frequencies-mhz") ? parse_float_list(opts["source-frequencies-mhz"]) : Float64[],
+        length(coord_tokens),
+        parse(Float64, opts["frequency-mhz"]),
+    )
+    num_cycles = parse(Int, opts["num-cycles"])
+
+    sources = PointSource2D[]
+    for (idx, token) in pairs(coord_tokens)
+        parts = split(token, ":"; limit=2)
+        length(parts) == 2 || error("Each source must be specified as depth_mm:lateral_mm, got: $token")
+        depth_mm = parse(Float64, strip(parts[1]))
+        lateral_mm = parse(Float64, strip(parts[2]))
+        push!(sources, PointSource2D(
+            depth=depth_mm * 1e-3,
+            lateral=lateral_mm * 1e-3,
+            frequency=frequencies_mhz[idx] * 1e6,
+            amplitude=amplitudes_pa[idx],
+            phase=phases_deg[idx] * π / 180,
+            delay=delays_us[idx] * 1e-6,
+            num_cycles=num_cycles,
+        ))
+    end
+    return sources
+end
+
+function default_output_dir(opts, sources, cfg)
+    timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
+    parts = String[
+        "run_pam",
+        lowercase(opts["aberrator"]),
+        "$(length(sources))src",
+        "f$(slug_value(parse(Float64, opts["frequency-mhz"]); digits=2))mhz",
+        "ax$(slug_value(cfg.axial_dim * 1e3; digits=0))mm",
+        "lat$(slug_value(cfg.transverse_dim * 1e3; digits=0))mm",
+        "dx$(slug_value(cfg.dx * 1e3; digits=2))mm",
+        timestamp,
+    ]
+    if lowercase(opts["aberrator"]) == "skull"
+        insert!(parts, length(parts), "slice" * opts["slice-index"])
+        insert!(parts, length(parts), "st$(slug_value(parse(Float64, opts["skull-transducer-distance-mm"]); digits=1))mm")
+    end
+    return joinpath(pwd(), "outputs", join(parts, "_"))
+end
+
+function map_db(map::AbstractMatrix{<:Real}, ref::Real)
+    safe_ref = max(Float64(ref), eps(Float64))
+    return 10 .* log10.(max.(Float64.(map), eps(Float64)) ./ safe_ref)
+end
+
+function source_pairs_mm(sources)
+    return [(src.depth * 1e3, src.lateral * 1e3) for src in sources]
+end
+
+function scatter_source_points!(ax, sources; color=:red, marker=:x, markersize=14, strokewidth=2)
+    truth = source_pairs_mm(sources)
+    scatter!(
+        ax,
+        last.(truth),
+        first.(truth);
+        color=color,
+        marker=marker,
+        markersize=markersize,
+        strokewidth=strokewidth,
+    )
+end
+
+function scatter_predicted_points!(ax, stats; color=:white, marker=:circle, markersize=12, strokewidth=2)
+    pred = stats[:predicted_mm]
+    scatter!(
+        ax,
+        last.(pred),
+        first.(pred);
+        color=color,
+        marker=marker,
+        markersize=markersize,
+        strokecolor=color,
+        strokewidth=strokewidth,
+    )
+end
+
+function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, sources, stats_geo, stats_hasa)
+    depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
+    lateral_mm = kgrid.y_vec .* 1e3
+    time_us = collect(0:(size(rf, 2) - 1)) .* cfg.dt .* 1e6
+    map_ref = max(maximum(Float64.(pam_geo)), maximum(Float64.(pam_hasa)), eps(Float64))
+    pam_geo_db = map_db(pam_geo, map_ref)
+    pam_hasa_db = map_db(pam_hasa, map_ref)
+
+    fig = Figure(size=(1500, 1000))
+
+    ax_medium = Axis(
+        fig[1, 1];
+        title="Simulation Medium",
+        xlabel="Lateral position [mm]",
+        ylabel="Depth below receiver [mm]",
+        aspect=DataAspect(),
+    )
+    hm_medium = heatmap!(ax_medium, lateral_mm, depth_mm, Float64.(c)'; colormap=:thermal)
+    hlines!(ax_medium, [0.0]; color=:white, linestyle=:dash)
+    scatter_source_points!(ax_medium, sources)
+    Colorbar(fig[1, 2], hm_medium; label="Sound speed [m/s]")
+
+    ax_rf = Axis(
+        fig[1, 3];
+        title="Recorded RF Data",
+        xlabel="Time [μs]",
+        ylabel="Lateral position [mm]",
+    )
+    hm_rf = heatmap!(ax_rf, time_us, lateral_mm, rf'; colormap=:balance)
+    Colorbar(fig[1, 4], hm_rf; label="Pressure [Pa]")
+
+    geo_title = "Geometric ASA | mean radial error = $(round(stats_geo[:mean_radial_error_mm]; digits=2)) mm"
+    ax_geo = Axis(
+        fig[2, 1];
+        title=geo_title,
+        xlabel="Lateral position [mm]",
+        ylabel="Depth below receiver [mm]",
+        aspect=DataAspect(),
+    )
+    hm_geo = heatmap!(ax_geo, lateral_mm, depth_mm, pam_geo_db'; colormap=:viridis, colorrange=(-30, 0))
+    hlines!(ax_geo, [0.0]; color=:white, linestyle=:dash)
+    scatter_source_points!(ax_geo, sources)
+    scatter_predicted_points!(ax_geo, stats_geo)
+
+    hasa_title = "HASA | mean radial error = $(round(stats_hasa[:mean_radial_error_mm]; digits=2)) mm"
+    ax_hasa = Axis(
+        fig[2, 3];
+        title=hasa_title,
+        xlabel="Lateral position [mm]",
+        ylabel="Depth below receiver [mm]",
+        aspect=DataAspect(),
+    )
+    hm_hasa = heatmap!(ax_hasa, lateral_mm, depth_mm, pam_hasa_db'; colormap=:viridis, colorrange=(-30, 0))
+    hlines!(ax_hasa, [0.0]; color=:white, linestyle=:dash)
+    scatter_source_points!(ax_hasa, sources)
+    scatter_predicted_points!(ax_hasa, stats_hasa)
+    Colorbar(fig[2, 4], hm_hasa; label="PAM intensity [dB]")
+
+    save(path, fig)
+end
+
+opts = parse_cli(ARGS)
+sources = parse_sources(opts)
+cfg = PAMConfig(
+    dx=parse(Float64, opts["dx-mm"]) * 1e-3,
+    dz=parse(Float64, opts["dz-mm"]) * 1e-3,
+    axial_dim=parse(Float64, opts["axial-mm"]) * 1e-3,
+    transverse_dim=parse(Float64, opts["transverse-mm"]) * 1e-3,
+    receiver_aperture=parse_receiver_aperture_mm(opts["receiver-aperture-mm"]),
+    t_max=parse(Float64, opts["t-max-us"]) * 1e-6,
+    dt=parse(Float64, opts["dt-ns"]) * 1e-9,
+    zero_pad_factor=parse(Int, opts["zero-pad-factor"]),
+    peak_suppression_radius=parse(Float64, opts["peak-suppression-radius-mm"]) * 1e-3,
+    success_tolerance=parse(Float64, opts["success-tolerance-mm"]) * 1e-3,
+)
+
+aberrator = parse_aberrator(opts["aberrator"])
+cfg = fit_pam_config(
+    cfg,
+    sources;
+    min_bottom_margin=parse(Float64, opts["bottom-margin-mm"]) * 1e-3,
+    reference_depth=aberrator == :skull ? parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3 : nothing,
+)
+out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
+    opts["out-dir"]
+else
+    default_output_dir(opts, sources, cfg)
+end
+mkpath(out_dir)
+
+c, rho, medium_info = make_pam_medium(
+    cfg;
+    aberrator=aberrator,
+    lens_center_depth=parse(Float64, opts["lens-depth-mm"]) * 1e-3,
+    lens_center_lateral=parse(Float64, opts["lens-lateral-mm"]) * 1e-3,
+    lens_axial_radius=parse(Float64, opts["lens-axial-radius-mm"]) * 1e-3,
+    lens_lateral_radius=parse(Float64, opts["lens-lateral-radius-mm"]) * 1e-3,
+    c_aberrator=parse(Float64, opts["aberrator-c"]),
+    rho_aberrator=parse(Float64, opts["aberrator-rho"]),
+    ct_path=opts["ct-path"],
+    slice_index=parse(Int, opts["slice-index"]),
+    skull_to_transducer=parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
+    hu_bone_thr=parse(Int, opts["hu-bone-thr"]),
+)
+
+medium_summary = Dict{String, Any}()
+for (key, value) in medium_info
+    key == :mask && continue
+    medium_summary[String(key)] = value
+end
+
+recon_frequencies = if haskey(opts, "recon-frequencies-mhz")
+    parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
+else
+    sort(unique(Float64[src.frequency for src in sources]))
+end
+
+results = run_pam_case(
+    c,
+    rho,
+    sources,
+    cfg;
+    frequencies=recon_frequencies,
+    use_gpu=parse_bool(opts["use-gpu"]),
+)
+
+save_overview(
+    joinpath(out_dir, "overview.png"),
+    c,
+    results[:rf],
+    results[:pam_geo],
+    results[:pam_hasa],
+    results[:kgrid],
+    cfg,
+    sources,
+    results[:stats_geo],
+    results[:stats_hasa],
+)
+
+summary = Dict(
+    "out_dir" => out_dir,
+    "sources" => [Dict(
+        "depth_m" => src.depth,
+        "lateral_m" => src.lateral,
+        "frequency_hz" => src.frequency,
+        "amplitude_pa" => src.amplitude,
+        "phase_rad" => src.phase,
+        "delay_s" => src.delay,
+        "num_cycles" => src.num_cycles,
+    ) for src in sources],
+    "config" => Dict(
+        "dx" => cfg.dx,
+        "dz" => cfg.dz,
+        "axial_dim" => cfg.axial_dim,
+        "transverse_dim" => cfg.transverse_dim,
+        "receiver_aperture" => cfg.receiver_aperture,
+        "t_max" => cfg.t_max,
+        "dt" => cfg.dt,
+        "c0" => cfg.c0,
+        "rho0" => cfg.rho0,
+        "PML_GUARD" => cfg.PML_GUARD,
+        "effective_pml_guard" => TranscranialFUS._pam_pml_guard(cfg),
+        "zero_pad_factor" => cfg.zero_pad_factor,
+        "peak_suppression_radius" => cfg.peak_suppression_radius,
+        "success_tolerance" => cfg.success_tolerance,
+        "bottom_margin" => parse(Float64, opts["bottom-margin-mm"]) * 1e-3,
+    ),
+    "medium" => medium_summary,
+    "reconstruction_frequencies_hz" => recon_frequencies,
+    "simulation" => Dict(
+        "receiver_row" => results[:simulation][:receiver_row],
+        "receiver_cols" => [first(results[:simulation][:receiver_cols]), last(results[:simulation][:receiver_cols])],
+        "source_indices" => [[row, col] for (row, col) in results[:simulation][:source_indices]],
+    ),
+    "geometric" => results[:stats_geo],
+    "hasa" => results[:stats_hasa],
+)
+
+open(joinpath(out_dir, "summary.json"), "w") do io
+    JSON3.pretty(io, summary)
+end
+
+@save joinpath(out_dir, "result.jld2") c rho cfg sources results medium_info
+
+println("Saved PAM outputs to $out_dir")

@@ -37,10 +37,13 @@ export load_roi_resample_xy, load_default_ct
 export hu_to_rho_c, find_skull_boundaries, skull_mask_from_c_columnwise
 export make_medium_fixed_distance_from_skull, make_medium_fixed_transducer, make_medium
 export plot_hasa_results, focus, analyse_focus_2d, run_focus_case, kwave_available
+export PointSource2D, PAMConfig, fit_pam_config, pam_Nx, pam_Ny, pam_Nt, pam_grid, receiver_row, receiver_col_range, depth_coordinates
+export make_pam_medium, source_grid_index, simulate_point_sources, reconstruct_pam, find_pam_peaks, analyse_pam_2d, run_pam_case, run_pam_sweep
 
 include("ct.jl")
 include("focus.jl")
 include("medium.jl")
+include("pam.jl")
 include("kwave_wrapper.jl")
 include("analysis.jl")
 

@@ -9,6 +9,56 @@ function synthetic_hu_volume(nslices::Int=5, rows::Int=80, cols::Int=60)
     return hu
 end
 
+function analytic_rf_for_point_source(cfg::PAMConfig, src::PointSource2D)
+    kgrid = pam_grid(cfg)
+    nt = pam_Nt(cfg)
+    rf = zeros(Float64, kgrid.Ny, nt)
+    duration = src.num_cycles / src.frequency
+    base_t = collect(0:(nt - 1)) .* cfg.dt
+
+    for j in 1:kgrid.Ny
+        distance = hypot(src.depth, kgrid.y_vec[j] - src.lateral)
+        arrival = src.delay + distance / cfg.c0
+        local_t = base_t .- arrival
+        active = findall((local_t .>= 0.0) .& (local_t .<= duration))
+        isempty(active) && continue
+        env = TranscranialFUS._tukey_window(length(active), 0.25)
+        rf[j, active] .= (src.amplitude / sqrt(max(distance, cfg.dx))) .* env .* sin.(2π .* src.frequency .* local_t[active] .+ src.phase)
+    end
+    return rf, kgrid
+end
+
+function fake_pam_sweep_runner(c, rho, sources, cfg; frequencies=nothing, use_gpu=false)
+    src = only(sources)
+    kgrid = pam_grid(cfg)
+    depth_mm = src.depth * 1e3
+    lateral_mm = src.lateral * 1e3
+    geo_error_mm = depth_mm / 100 + abs(lateral_mm) / 10
+    hasa_error_mm = geo_error_mm / 2
+
+    stats_geo = Dict{Symbol, Any}(
+        :predicted_mm => [(depth_mm, lateral_mm + geo_error_mm)],
+        :mean_radial_error_mm => geo_error_mm,
+        :mean_norm_peak_intensity => 0.6,
+    )
+    stats_hasa = Dict{Symbol, Any}(
+        :predicted_mm => [(depth_mm, lateral_mm + hasa_error_mm)],
+        :mean_radial_error_mm => hasa_error_mm,
+        :mean_norm_peak_intensity => 0.8,
+    )
+
+    return Dict{Symbol, Any}(
+        :rf => zeros(Float64, pam_Ny(cfg), pam_Nt(cfg)),
+        :kgrid => kgrid,
+        :simulation => Dict{Symbol, Any}(:receiver_row => receiver_row(cfg)),
+        :pam_geo => fill(geo_error_mm, pam_Nx(cfg), pam_Ny(cfg)),
+        :pam_hasa => fill(hasa_error_mm, pam_Nx(cfg), pam_Ny(cfg)),
+        :stats_geo => stats_geo,
+        :stats_hasa => stats_hasa,
+        :reconstruction_frequencies => isnothing(frequencies) ? [src.frequency] : collect(Float64.(frequencies)),
+    )
+end
+
 @testset "HU conversion" begin
     hu = Float32[-1000 0 300 1200]
     rho, c = hu_to_rho_c(hu)
@@ -134,6 +184,261 @@ end
     @test stats[:focal_area_mm2] > 0
 end
 
+@testset "PAM reconstruction in water" begin
+    cfg = PAMConfig(
+        dx=0.5e-3,
+        dz=0.5e-3,
+        axial_dim=0.04,
+        transverse_dim=0.03,
+        receiver_aperture=nothing,
+        t_max=40e-6,
+        dt=50e-9,
+        PML_GUARD=5,
+        zero_pad_factor=2,
+        peak_suppression_radius=1e-3,
+        success_tolerance=1.0e-3,
+    )
+    source = PointSource2D(depth=0.015, lateral=0.003, frequency=0.4e6, amplitude=1.0, num_cycles=5)
+    c, _, _ = make_pam_medium(cfg; aberrator=:none)
+    rf, kgrid = analytic_rf_for_point_source(cfg, source)
+
+    intensity, _, info = reconstruct_pam(rf, c, cfg; frequencies=[source.frequency], corrected=false)
+    stats = analyse_pam_2d(intensity, kgrid, cfg, [source])
+    intensity_hasa, _, info_hasa = reconstruct_pam(rf, c, cfg; frequencies=[source.frequency], corrected=true)
+    stats_hasa = analyse_pam_2d(intensity_hasa, kgrid, cfg, [source])
+
+    @test info[:corrected] == false
+    @test stats[:mean_radial_error_mm] < 1.0
+    @test stats[:success_rate] == 1.0
+    @test stats[:mean_norm_peak_intensity] > 0.5
+    @test info_hasa[:corrected] == true
+    @test stats_hasa[:mean_radial_error_mm] < 1.0
+    @test stats_hasa[:success_rate] == 1.0
+end
+
+@testset "PAM analysis metrics" begin
+    cfg = PAMConfig(
+        dx=0.5e-3,
+        dz=0.5e-3,
+        axial_dim=0.05,
+        transverse_dim=0.04,
+        receiver_aperture=nothing,
+        PML_GUARD=5,
+        peak_suppression_radius=2e-3,
+        success_tolerance=1.5e-3,
+    )
+    kgrid = pam_grid(cfg)
+    depth = depth_coordinates(kgrid, cfg)
+    lateral = kgrid.y_vec
+    sources = [
+        PointSource2D(depth=0.015, lateral=-0.004, frequency=0.4e6),
+        PointSource2D(depth=0.028, lateral=0.006, frequency=0.4e6),
+    ]
+
+    intensity = zeros(Float64, kgrid.Nx, kgrid.Ny)
+    σd = 0.8e-3
+    σl = 0.8e-3
+    for src in sources
+        for i in 1:kgrid.Nx, j in 1:kgrid.Ny
+            intensity[i, j] += exp(-((depth[i] - src.depth)^2 / (2σd^2) + (lateral[j] - src.lateral)^2 / (2σl^2)))
+        end
+    end
+
+    stats = analyse_pam_2d(intensity, kgrid, cfg, sources)
+    @test stats[:mean_radial_error_mm] < 0.6
+    @test stats[:num_success] == 2
+    @test length(stats[:axial_fwhm_mm]) == 2
+    @test all(stats[:axial_fwhm_mm] .> 0)
+    @test all(stats[:lateral_fwhm_mm] .> 0)
+end
+
+@testset "PAM sweep target presets" begin
+    preset, axial, lateral = TranscranialFUS._resolve_pam_sweep_targets(:paper)
+    @test preset == :paper
+    @test axial == [30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
+    @test lateral == [-20.0, -10.0, 0.0, 10.0, 20.0]
+
+    preset, axial, lateral = TranscranialFUS._resolve_pam_sweep_targets(:quick)
+    @test preset == :quick
+    @test axial == [40.0, 60.0, 80.0]
+    @test lateral == [-10.0, 0.0, 10.0]
+
+    preset, axial, lateral = TranscranialFUS._resolve_pam_sweep_targets(
+        :paper;
+        axial_targets_mm=[55.0, 35.0],
+        lateral_targets_mm=[10.0, -5.0, 0.0],
+    )
+    @test preset == :custom
+    @test axial == [35.0, 55.0]
+    @test lateral == [-5.0, 0.0, 10.0]
+
+    @test_throws ErrorException TranscranialFUS._resolve_pam_sweep_targets(:custom)
+    @test_throws ErrorException TranscranialFUS._resolve_pam_sweep_targets(:paper; axial_targets_mm=[40.0])
+end
+
+@testset "PAM sweep example selection" begin
+    targets = vec([
+        PointSource2D(depth=axial_mm * 1e-3, lateral=lateral_mm * 1e-3, frequency=1e6)
+        for axial_mm in (40.0, 60.0, 80.0), lateral_mm in (-10.0, 0.0, 10.0)
+    ])
+    examples = TranscranialFUS._default_pam_sweep_examples(targets)
+    @test examples == [(40.0, 0.0), (60.0, 0.0), (80.0, 0.0)]
+end
+
+@testset "PAM sweep aggregation" begin
+    cfg = PAMConfig(
+        dx=1e-3,
+        dz=1e-3,
+        axial_dim=0.09,
+        transverse_dim=0.05,
+        receiver_aperture=0.03,
+        t_max=20e-6,
+        dt=100e-9,
+    )
+    targets = vec([
+        PointSource2D(depth=axial_mm * 1e-3, lateral=lateral_mm * 1e-3, frequency=1e6)
+        for axial_mm in (40.0, 60.0), lateral_mm in (-10.0, 0.0, 10.0)
+    ])
+    c, rho, _ = make_pam_medium(cfg; aberrator=:none)
+    sweep = run_pam_sweep(
+        c,
+        rho,
+        targets,
+        cfg;
+        frequencies=[1e6],
+        example_targets_mm=[(40.0, 0.0), (60.0, 0.0)],
+        runner=fake_pam_sweep_runner,
+    )
+
+    @test sweep[:axial_targets_mm] == [40.0, 60.0]
+    @test sweep[:lateral_targets_mm] == [-10.0, 0.0, 10.0]
+    @test size(sweep[:geo_error_mm]) == (2, 3)
+    @test size(sweep[:hasa_error_mm]) == (2, 3)
+    @test sweep[:geo_error_mm][1, 1] ≈ 1.4
+    @test sweep[:geo_error_mm][2, 3] ≈ 1.6
+    @test sweep[:hasa_error_mm][1, 2] ≈ 0.2
+    @test length(sweep[:cases]) == 6
+    @test length(sweep[:example_cases]) == 2
+    @test sweep[:example_targets_mm] == [(40.0, 0.0), (60.0, 0.0)]
+end
+
+@testset "PAM external PML sizing" begin
+    cfg_fine = PAMConfig(dx=0.2e-3, dz=0.2e-3, axial_dim=0.03, transverse_dim=0.03)
+    cfg_coarse = PAMConfig(dx=0.5e-3, dz=0.5e-3, axial_dim=0.03, transverse_dim=0.03)
+
+    @test TranscranialFUS._pam_pml_guard(cfg_fine) == 20
+    @test TranscranialFUS._pam_pml_guard(cfg_coarse) == 8
+    @test receiver_row(cfg_coarse) == 1
+
+    kgrid = pam_grid(cfg_coarse)
+    src = PointSource2D(depth=0.015, lateral=0.003, frequency=0.4e6)
+    row, _ = source_grid_index(src, cfg_coarse, kgrid)
+    @test row == 31
+    @test row <= pam_Nx(cfg_coarse)
+end
+
+@testset "PAM skull sweep setup" begin
+    base_cfg = PAMConfig(dx=1e-3, dz=1e-3, axial_dim=0.04, transverse_dim=0.06)
+    targets = [
+        PointSource2D(depth=axial_mm * 1e-3, lateral=0.0, frequency=1e6)
+        for axial_mm in (40.0, 60.0, 80.0)
+    ]
+    fitted_cfg = fit_pam_config(
+        base_cfg,
+        targets;
+        min_bottom_margin=5e-3,
+        reference_depth=30e-3,
+    )
+    hu_vol = synthetic_hu_volume()
+    c, _, info = make_pam_medium(
+        fitted_cfg;
+        aberrator=:skull,
+        hu_vol=hu_vol,
+        spacing_m=(1e-3, 1e-3, 1e-3),
+        slice_index=2,
+        skull_to_transducer=30e-3,
+        hu_bone_thr=200,
+    )
+
+    @test info[:outer_row] == receiver_row(fitted_cfg) + 30
+    @test info[:outer_row] < info[:inner_row]
+    for src in targets
+        row, col = source_grid_index(src, fitted_cfg, pam_grid(fitted_cfg))
+        @test row > info[:inner_row]
+        @test row <= pam_Nx(fitted_cfg)
+        @test c[row, col] ≈ fitted_cfg.c0
+    end
+end
+
+@testset "PAM skull target filtering" begin
+    cfg = PAMConfig(dx=1e-3, dz=1e-3, axial_dim=0.09, transverse_dim=0.06)
+    hu_vol = synthetic_hu_volume()
+    c, _, info = make_pam_medium(
+        cfg;
+        aberrator=:skull,
+        hu_vol=hu_vol,
+        spacing_m=(1e-3, 1e-3, 1e-3),
+        slice_index=2,
+        skull_to_transducer=30e-3,
+        hu_bone_thr=200,
+    )
+
+    targets = PointSource2D[
+        PointSource2D(depth=(info[:inner_row] - 2) * 1e-3, lateral=0.0, frequency=1e6),
+        PointSource2D(depth=(info[:inner_row] + 5) * 1e-3, lateral=0.0, frequency=1e6),
+        PointSource2D(depth=(info[:inner_row] + 8) * 1e-3, lateral=25e-3, frequency=1e6),
+    ]
+
+    valid_targets, dropped_targets, cavity_start_rows = TranscranialFUS._filter_pam_targets_in_skull_cavity(
+        c,
+        cfg,
+        targets;
+        min_margin=1e-3,
+    )
+
+    @test length(valid_targets) == 1
+    @test only(valid_targets).lateral ≈ 0.0
+    @test length(dropped_targets) == 2
+    @test Set(drop[:reason] for drop in dropped_targets) == Set((:too_shallow_for_cavity, :no_skull_above))
+    center_col = source_grid_index(only(valid_targets), cfg, pam_grid(cfg))[2]
+    @test cavity_start_rows[center_col] == info[:inner_row] + 2
+end
+
+@testset "PAM config fitting and skull placement" begin
+    base_cfg = PAMConfig(dx=1e-3, dz=1e-3, axial_dim=0.03, transverse_dim=0.06)
+    sources = [PointSource2D(depth=0.04, lateral=0.0)]
+    fitted_cfg = fit_pam_config(
+        base_cfg,
+        sources;
+        min_bottom_margin=5e-3,
+        reference_depth=30e-3,
+    )
+
+    @test pam_Nx(fitted_cfg) == 46
+    @test fitted_cfg.axial_dim ≈ 46e-3
+
+    hu_vol = synthetic_hu_volume()
+    c, rho, info = make_pam_medium(
+        fitted_cfg;
+        aberrator=:skull,
+        hu_vol=hu_vol,
+        spacing_m=(1e-3, 1e-3, 1e-3),
+        slice_index=2,
+        skull_to_transducer=30e-3,
+        hu_bone_thr=200,
+    )
+
+    @test size(c) == (pam_Nx(fitted_cfg), pam_Ny(fitted_cfg))
+    @test size(rho) == size(c)
+    @test info[:outer_row] == receiver_row(fitted_cfg) + 30
+    @test info[:outer_row] < info[:inner_row]
+    @test maximum(c[info[:outer_row]:info[:inner_row], :]) > fitted_cfg.c0
+
+    source_row, source_col = source_grid_index(first(sources), fitted_cfg, pam_grid(fitted_cfg))
+    @test c[source_row, source_col] ≈ fitted_cfg.c0
+    @test all(c[(source_row + 1):end, source_col] .≈ fitted_cfg.c0)
+end
+
 @testset "k-Wave smoke tests" begin
     if get(ENV, "TRANSCRANIALFUS_RUN_KWAVE_TESTS", "0") == "1" && kwave_available()
         cfg = SimulationConfig(
@@ -158,6 +463,51 @@ end
         @test size(p_ts, 1) == Nx(cfg)
         @test size(p_ts, 2) == Nz(cfg)
         @test size(p_ts, 3) == Nt(cfg)
+
+        pam_cfg = PAMConfig(
+            dx=0.5e-3,
+            dz=0.5e-3,
+            axial_dim=0.03,
+            transverse_dim=0.03,
+            receiver_aperture=0.03,
+            PML_GUARD=20,
+            t_max=30e-6,
+            dt=50e-9,
+            zero_pad_factor=2,
+            peak_suppression_radius=1.0e-3,
+            success_tolerance=1.5e-3,
+        )
+        c_pam, rho_pam, _ = make_pam_medium(pam_cfg; aberrator=:none)
+        sources = [PointSource2D(depth=0.015, lateral=0.003, frequency=0.4e6, amplitude=5e4, num_cycles=4)]
+        rf, kgrid_pam, sim_info = simulate_point_sources(c_pam, rho_pam, sources, pam_cfg)
+        @test size(rf) == (pam_Ny(pam_cfg), pam_Nt(pam_cfg))
+        @test sim_info[:receiver_row] == receiver_row(pam_cfg)
+        @test sim_info[:receiver_row] == 1
+
+        pam_map, _, pam_info = reconstruct_pam(rf, c_pam, pam_cfg; frequencies=[0.4e6], corrected=false)
+        pam_stats = analyse_pam_2d(pam_map, kgrid_pam, pam_cfg, sources)
+        @test pam_info[:corrected] == false
+        @test pam_stats[:mean_radial_error_mm] <= 1.5
+
+        sweep_sources = [
+            PointSource2D(depth=0.012, lateral=-0.003, frequency=0.4e6, amplitude=5e4, num_cycles=4),
+            PointSource2D(depth=0.012, lateral=0.003, frequency=0.4e6, amplitude=5e4, num_cycles=4),
+            PointSource2D(depth=0.018, lateral=-0.003, frequency=0.4e6, amplitude=5e4, num_cycles=4),
+            PointSource2D(depth=0.018, lateral=0.003, frequency=0.4e6, amplitude=5e4, num_cycles=4),
+        ]
+        sweep_results = run_pam_sweep(
+            c_pam,
+            rho_pam,
+            sweep_sources,
+            pam_cfg;
+            frequencies=[0.4e6],
+            example_targets_mm=[(12.0, -3.0), (12.0, 3.0), (18.0, 0.0 + 3.0)],
+        )
+        @test size(sweep_results[:geo_error_mm]) == (2, 2)
+        @test size(sweep_results[:hasa_error_mm]) == (2, 2)
+        @test all(isfinite.(vec(sweep_results[:geo_error_mm])))
+        @test all(isfinite.(vec(sweep_results[:hasa_error_mm])))
+        @test length(sweep_results[:cases]) == 4
     else
         @info "Skipping k-Wave smoke tests. Set TRANSCRANIALFUS_RUN_KWAVE_TESTS=1 to enable them."
     end

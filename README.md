@@ -16,10 +16,12 @@ Benchmark sweeps, pickle-driven figure sections, and animation sections are inte
 - `src/ct.jl`: DICOM loading, ROI crop, XY resampling, `CTInfo`
 - `src/medium.jl`: HU conversion, skull masking, and medium construction
 - `src/focus.jl`: configs, enums, plotting, and `focus`
+- `src/pam.jl`: passive acoustic mapping configs, source models, reconstruction, and metrics
 - `src/kwave_wrapper.jl`: thin `k-wave-python` bridge
 - `src/analysis.jl`: `analyse_focus_2d` and `run_focus_case`
 - `scripts/run_focus_case.jl`: run one water or skull case
 - `scripts/compare_estimators.jl`: compare geometric and HASA
+- `scripts/run_pam_case.jl`: simulate point emitters and reconstruct them with geometric ASA and HASA PAM
 
 ## Environment
 
@@ -134,6 +136,91 @@ julia --project=. scripts/compare_estimators.jl --medium=skull_in_water --slice-
 ```
 
 Both scripts write results into an `outputs/` subdirectory by default. The default directory name is generated from the placement mode, main run parameters, and a timestamp; `--out-dir=...` overrides it.
+
+## Passive Acoustic Mapping
+
+The project also includes a 2D passive acoustic mapping workflow built around a simple point-emitter model:
+
+- up to 5 point sources specified by `depth_mm:lateral_mm`
+- outward propagation simulated with `k-wave-python`
+- geometric ASA reconstruction and corrected HASA reconstruction on the same RF data
+- localization and image-quality metrics based on the HASA paper:
+  axial, lateral, and radial localization error; axial and lateral FWHM; normalized peak intensity
+
+For now the propagation medium is deliberately simple:
+
+- `--aberrator=none` for homogeneous water
+- `--aberrator=lens` for a simple elliptical speed perturbation between the array and the sources
+- `--aberrator=skull` to place a CT-derived cranium into the PAM grid
+
+The default PAM grid is intentionally finer than the fast focus smoke tests. In practice the passive reconstruction is sensitive to spatial resolution; the default `0.2 mm` spacing is the intended starting point for meaningful localization.
+
+When `--aberrator=skull` is used:
+
+- the receiver/transducer stays at the top of the physical grid
+- the outer skull surface is aligned to `--skull-transducer-distance-mm` below the transducer, default `30 mm`
+- source coordinates in `--sources-mm=depth:lateral,...` remain defined relative to the transducer, not relative to the skull
+- the axial grid is automatically extended to fit the deepest source plus `--bottom-margin-mm`
+
+Single-source example with a simple aberrator:
+
+```bash
+julia --project=. scripts/run_pam_case.jl \
+  --sources-mm=30:0 \
+  --aberrator=lens
+```
+
+Three simultaneous sources:
+
+```bash
+julia --project=. scripts/run_pam_case.jl \
+  --sources-mm=25:-6,32:0,40:8 \
+  --aberrator=lens
+```
+
+Homogeneous-water baseline:
+
+```bash
+julia --project=. scripts/run_pam_case.jl \
+  --sources-mm=30:0 \
+  --aberrator=none
+```
+
+Single-source transcranial example with the cranium placed `30 mm` below the transducer:
+
+```bash
+julia --project=. scripts/run_pam_case.jl \
+  --sources-mm=50:0 \
+  --aberrator=skull \
+  --slice-index=250 \
+  --skull-transducer-distance-mm=30
+```
+
+Shift the skull slice and move the emitter laterally:
+
+```bash
+julia --project=. scripts/run_pam_case.jl \
+  --sources-mm=45:6 \
+  --aberrator=skull \
+  --slice-index=230 \
+  --skull-transducer-distance-mm=25
+```
+
+You can also perturb the emitter timing and phase:
+
+```bash
+julia --project=. scripts/run_pam_case.jl \
+  --sources-mm=25:-6,32:0,40:8 \
+  --phases-deg=0,90,180 \
+  --delays-us=0,2,4 \
+  --aberrator=lens
+```
+
+Each PAM run writes:
+
+- `overview.png`: medium, RF data, and side-by-side geometric/HASA reconstructions
+- `summary.json`: reconstruction metrics and run metadata
+- `result.jld2`: raw arrays and Julia structs for follow-up analysis
 
 ## Tests
 
