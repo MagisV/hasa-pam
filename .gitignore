@@ -6,6 +6,8 @@ LocalPreferences.toml
 *.jl.*.cov
 *.jl.mem
 
+.tmp_pdfenv
+
 # Julia/CondaPkg managed environments
 .CondaPkg/
 
