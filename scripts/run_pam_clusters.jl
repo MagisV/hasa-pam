@@ -13,7 +13,7 @@ using TranscranialFUS
 function parse_cli(args)
     opts = Dict{String, String}(
         "clusters-mm" => "30:0",
-        "fundamental-mhz" => "0.4",
+        "fundamental-mhz" => "0.5",
         "amplitude-pa" => "1.0",
         "n-bubbles" => "10",
         "harmonics" => "2,3",
@@ -187,6 +187,7 @@ end
 function default_output_dir(opts, clusters, cfg)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     parts = String[
+        timestamp,
         "run_pam_clusters",
         lowercase(opts["aberrator"]),
         "$(length(clusters))cl",
@@ -195,7 +196,6 @@ function default_output_dir(opts, clusters, cfg)
         lowercase(opts["phase-mode"]),
         "ax$(slug_value(cfg.axial_dim * 1e3; digits=0))mm",
         "lat$(slug_value(cfg.transverse_dim * 1e3; digits=0))mm",
-        timestamp,
     ]
     if lowercase(opts["aberrator"]) == "skull"
         insert!(parts, length(parts), "slice" * opts["slice-index"])

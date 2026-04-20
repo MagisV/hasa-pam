@@ -62,7 +62,7 @@ end
 
 function fit_pam_config(
     cfg::PAMConfig,
-    sources::AbstractVector{PointSource2D};
+    sources::AbstractVector{<:EmissionSource2D};
     min_bottom_margin::Real=10e-3,
     reference_depth::Union{Nothing, Real}=nothing,
 )

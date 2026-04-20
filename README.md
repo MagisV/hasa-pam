@@ -266,6 +266,18 @@ julia --project=. scripts/run_pam_case.jl \
   --aberrator=lens
 ```
 
+With a skull and three point sources placed inside:
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=45:-6,54:0,59:8 \
+  --fundamental-mhz=0.5 \
+  --harmonics=2,3 \
+  --harmonic-amplitudes=1.0,0.6 \
+  --gate-us=50 \
+  --phase-mode=geometric \
+  --aberrator=skull
+```
+
 `run_pam_case.jl` writes:
 
 - `overview.png`
