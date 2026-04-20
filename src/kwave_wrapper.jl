@@ -158,11 +158,11 @@ end
 function simulate_point_sources(
     c::AbstractMatrix{<:Real},
     rho::AbstractMatrix{<:Real},
-    sources::AbstractVector{PointSource2D},
+    sources::AbstractVector{<:EmissionSource2D},
     cfg::PAMConfig;
     use_gpu::Bool=false,
 )
-    isempty(sources) && error("At least one point source is required.")
+    isempty(sources) && error("At least one emission source is required.")
 
     nx, ny = size(c)
     size(rho) == size(c) || error("Density map must have the same size as the sound-speed map.")
@@ -194,13 +194,17 @@ function simulate_point_sources(
     source_indices = Tuple{Int, Int}[]
     for (idx, ((row, col), src)) in pairs(indexed_sources)
         src_mask[row - 1, col - 1] = true
-        source_signals[idx, :] .= _tone_burst_signal(nt, cfg.dt, src)
+        source_signals[idx, :] .= _source_signal(nt, cfg.dt, src)
         push!(source_indices, (row, col))
     end
     source.p_mask = src_mask
     source.p = np.array(pc.Py(source_signals), dtype=np.float64)
     source.medium = medium
-    unique_freqs = unique(Float64[last(entry).frequency for entry in indexed_sources])
+    all_freqs = Float64[]
+    for (_, src) in indexed_sources
+        append!(all_freqs, _emission_frequencies(src))
+    end
+    unique_freqs = unique(all_freqs)
     if length(unique_freqs) == 1
         source.p_frequency_ref = unique_freqs[1]
     end

@@ -1,4 +1,6 @@
-Base.@kwdef struct PointSource2D
+abstract type EmissionSource2D end
+
+Base.@kwdef struct PointSource2D <: EmissionSource2D
     depth::Float64
     lateral::Float64
     frequency::Float64 = 8e5
@@ -7,6 +9,23 @@ Base.@kwdef struct PointSource2D
     delay::Float64 = 0.0
     num_cycles::Int = 5
 end
+
+Base.@kwdef struct BubbleCluster2D <: EmissionSource2D
+    depth::Float64
+    lateral::Float64
+    fundamental::Float64 = 5e5
+    amplitude::Float64 = 1.0
+    n_bubbles::Float64 = 1.0
+    harmonics::Vector{Int} = [2, 3]
+    harmonic_amplitudes::Vector{Float64} = [1.0, 0.6]
+    harmonic_phases::Vector{Float64} = [0.0, 0.0]
+    gate_duration::Float64 = 50e-6
+    taper_ratio::Float64 = 0.25
+    delay::Float64 = 0.0
+end
+
+_emission_frequencies(src::PointSource2D) = Float64[src.frequency]
+_emission_frequencies(src::BubbleCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
 
 Base.@kwdef struct PAMConfig
     dx::Float64 = 0.2e-3
@@ -305,11 +324,41 @@ function _tone_burst_signal(nt::Int, dt::Real, src::PointSource2D; taper_ratio::
     return signal
 end
 
-function source_grid_index(src::PointSource2D, cfg::PAMConfig, kgrid::KGrid2D)
-    src.depth >= 0.0 || error("Point source depth must be >= 0.")
+function _cluster_emission_signal(nt::Int, dt::Real, src::BubbleCluster2D)
+    length(src.harmonics) == length(src.harmonic_amplitudes) ||
+        error("BubbleCluster2D: harmonics and harmonic_amplitudes must have equal length.")
+    length(src.harmonics) == length(src.harmonic_phases) ||
+        error("BubbleCluster2D: harmonics and harmonic_phases must have equal length.")
+
+    signal = zeros(Float64, nt)
+    samples = collect(0:(nt - 1))
+    t = samples .* Float64(dt) .- src.delay
+    active = findall((t .>= 0.0) .& (t .<= src.gate_duration))
+    isempty(active) && return signal
+
+    envelope = _tukey_window(length(active), src.taper_ratio)
+    total_amp = src.amplitude * src.n_bubbles
+    t_active = t[active]
+
+    accumulator = zeros(Float64, length(active))
+    @inbounds for i in eachindex(src.harmonics)
+        n = src.harmonics[i]
+        αn = src.harmonic_amplitudes[i]
+        φn = src.harmonic_phases[i]
+        accumulator .+= αn .* cos.(2π .* n .* src.fundamental .* t_active .+ φn)
+    end
+    signal[active] .= total_amp .* envelope .* accumulator
+    return signal
+end
+
+_source_signal(nt::Int, dt::Real, src::PointSource2D) = _tone_burst_signal(nt, dt, src)
+_source_signal(nt::Int, dt::Real, src::BubbleCluster2D) = _cluster_emission_signal(nt, dt, src)
+
+function source_grid_index(src::EmissionSource2D, cfg::PAMConfig, kgrid::KGrid2D)
+    src.depth >= 0.0 || error("Source depth must be >= 0.")
     row = receiver_row(cfg) + round(Int, src.depth / cfg.dx)
     col = argmin(abs.(kgrid.y_vec .- src.lateral))
-    1 <= row <= kgrid.Nx || error("Point source depth $(src.depth) m lies outside the computational grid.")
+    1 <= row <= kgrid.Nx || error("Source depth $(src.depth) m lies outside the computational grid.")
     return row, col
 end
 
@@ -350,7 +399,12 @@ function _fft_wavenumbers(n::Int, spacing::Real)
     return collect(start_val:end_val) .* dk ./ n
 end
 
-function _select_frequency_bins(rf::AbstractMatrix{<:Real}, dt::Real, frequencies)
+function _select_frequency_bins(
+    rf::AbstractMatrix{<:Real},
+    dt::Real,
+    frequencies;
+    bandwidth::Real=0.0,
+)
     nt = size(rf, 2)
     freq_axis = collect(0:(nt - 1)) ./ (nt * Float64(dt))
     pos_bins = 2:(fld(nt, 2) + 1)  # positive frequencies, excluding DC
@@ -364,12 +418,24 @@ function _select_frequency_bins(rf::AbstractMatrix{<:Real}, dt::Real, frequencie
 
     bins = Int[]
     resolved_freqs = Float64[]
+    half_bw = Float64(bandwidth) / 2
     for freq in frequencies
-        idx = argmin(abs.(freq_axis[pos_bins] .- Float64(freq)))
-        bin = pos_bins[idx]
-        if bin ∉ bins
-            push!(bins, bin)
-            push!(resolved_freqs, freq_axis[bin])
+        f = Float64(freq)
+        if half_bw > 0
+            for bin in pos_bins
+                fb = freq_axis[bin]
+                if fb >= f - half_bw && fb <= f + half_bw && bin ∉ bins
+                    push!(bins, bin)
+                    push!(resolved_freqs, fb)
+                end
+            end
+        else
+            idx = argmin(abs.(freq_axis[pos_bins] .- f))
+            bin = pos_bins[idx]
+            if bin ∉ bins
+                push!(bins, bin)
+                push!(resolved_freqs, freq_axis[bin])
+            end
         end
     end
     return resolved_freqs, bins
@@ -489,13 +555,13 @@ function analyse_pam_2d(
     intensity::AbstractMatrix{<:Real},
     kgrid::KGrid2D,
     cfg::PAMConfig,
-    sources::AbstractVector{PointSource2D};
+    sources::AbstractVector{<:EmissionSource2D};
     n_peaks::Union{Nothing, Integer}=nothing,
     success_tolerance::Real=cfg.success_tolerance,
     suppression_radius::Real=cfg.peak_suppression_radius,
 )
     n_truth = length(sources)
-    n_truth > 0 || error("At least one point source is required for PAM analysis.")
+    n_truth > 0 || error("At least one emission source is required for PAM analysis.")
     n_find = isnothing(n_peaks) ? n_truth : Int(n_peaks)
     peaks = find_pam_peaks(intensity, kgrid, cfg; n_peaks=n_find, suppression_radius=suppression_radius)
     length(peaks) == n_truth || error("Expected to recover $n_truth peaks, found $(length(peaks)).")
@@ -564,6 +630,7 @@ function reconstruct_pam(
     c::AbstractMatrix{<:Real},
     cfg::PAMConfig;
     frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    bandwidth::Real=0.0,
     corrected::Bool=true,
 )
     nx, ny = size(c)
@@ -573,7 +640,7 @@ function reconstruct_pam(
     rr = receiver_row(cfg)
     rr <= nx || error("Receiver row lies outside the computational grid.")
 
-    selected_freqs, selected_bins = _select_frequency_bins(rf, cfg.dt, frequencies)
+    selected_freqs, selected_bins = _select_frequency_bins(rf, cfg.dt, frequencies; bandwidth=bandwidth)
     rf_fft = fft(Float64.(rf), 2)
     padded_ny = cfg.zero_pad_factor > 1 ? cfg.zero_pad_factor * ny : ny
     _, crop_range = _zero_pad_receiver_rf(rf, padded_ny)
@@ -631,6 +698,7 @@ function reconstruct_pam(
     info = Dict{Symbol, Any}(
         :frequencies => selected_freqs,
         :frequency_bins => selected_bins,
+        :bandwidth => Float64(bandwidth),
         :corrected => corrected,
         :receiver_row => rr,
         :crop_range => crop_range,
@@ -638,18 +706,27 @@ function reconstruct_pam(
     return intensity, kgrid, info
 end
 
+function _default_recon_frequencies(sources::AbstractVector{<:EmissionSource2D})
+    all_freqs = Float64[]
+    for src in sources
+        append!(all_freqs, _emission_frequencies(src))
+    end
+    return sort(unique(all_freqs))
+end
+
 function run_pam_case(
     c::AbstractMatrix{<:Real},
     rho::AbstractMatrix{<:Real},
-    sources::AbstractVector{PointSource2D},
+    sources::AbstractVector{<:EmissionSource2D},
     cfg::PAMConfig;
     frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    bandwidth::Real=0.0,
     use_gpu::Bool=false,
 )
-    recon_freqs = isnothing(frequencies) ? sort(unique(Float64[src.frequency for src in sources])) : Float64.(frequencies)
+    recon_freqs = isnothing(frequencies) ? _default_recon_frequencies(sources) : Float64.(frequencies)
     rf, kgrid, sim_info = simulate_point_sources(c, rho, sources, cfg; use_gpu=use_gpu)
-    pam_geo, _, geo_info = reconstruct_pam(rf, c, cfg; frequencies=recon_freqs, corrected=false)
-    pam_hasa, _, hasa_info = reconstruct_pam(rf, c, cfg; frequencies=recon_freqs, corrected=true)
+    pam_geo, _, geo_info = reconstruct_pam(rf, c, cfg; frequencies=recon_freqs, bandwidth=bandwidth, corrected=false)
+    pam_hasa, _, hasa_info = reconstruct_pam(rf, c, cfg; frequencies=recon_freqs, bandwidth=bandwidth, corrected=true)
 
     stats_geo = analyse_pam_2d(pam_geo, kgrid, cfg, sources)
     stats_hasa = analyse_pam_2d(pam_hasa, kgrid, cfg, sources)

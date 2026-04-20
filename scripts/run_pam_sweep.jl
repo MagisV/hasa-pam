@@ -105,13 +105,13 @@ end
 function default_output_dir(opts, sweep_preset, cfg)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     parts = String[
+        timestamp,
         "run_pam_sweep",
         lowercase(opts["aberrator"]),
         String(sweep_preset),
         "f$(slug_value(parse(Float64, opts["frequency-mhz"]); digits=2))mhz",
         "ap$(isnothing(cfg.receiver_aperture) ? "full" : slug_value(cfg.receiver_aperture * 1e3; digits=1) * "mm")",
         "dx$(slug_value(cfg.dx * 1e3; digits=2))mm",
-        timestamp,
     ]
     if lowercase(opts["aberrator"]) == "skull"
         insert!(parts, length(parts), "slice" * opts["slice-index"])

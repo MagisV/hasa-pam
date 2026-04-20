@@ -12,21 +12,25 @@ using TranscranialFUS
 
 function parse_cli(args)
     opts = Dict{String, String}(
-        "sources-mm" => "30:0",
-        "frequency-mhz" => "0.4",
-        "amplitude-pa" => "5e4",
-        "num-cycles" => "4",
+        "clusters-mm" => "30:0",
+        "fundamental-mhz" => "0.4",
+        "amplitude-pa" => "1.0",
+        "n-bubbles" => "10",
+        "harmonics" => "2,3",
+        "harmonic-amplitudes" => "1.0,0.6",
+        "gate-us" => "50",
+        "taper-ratio" => "0.25",
         "axial-mm" => "60",
         "transverse-mm" => "60",
         "dx-mm" => "0.2",
         "dz-mm" => "0.2",
         "receiver-aperture-mm" => "50",
-        "t-max-us" => "60",
-        "dt-ns" => "40",
+        "t-max-us" => "80",
+        "dt-ns" => "20",
         "zero-pad-factor" => "4",
-        "peak-suppression-radius-mm" => "2.0",
-        "success-tolerance-mm" => "1.0",
-        "aberrator" => "lens",
+        "peak-suppression-radius-mm" => "8.0",
+        "success-tolerance-mm" => "1.5",
+        "aberrator" => "none",
         "ct-path" => DEFAULT_CT_PATH,
         "slice-index" => "250",
         "skull-transducer-distance-mm" => "30",
@@ -39,10 +43,12 @@ function parse_cli(args)
         "aberrator-c" => "1700",
         "aberrator-rho" => "1150",
         "use-gpu" => "false",
-        "recon-bandwidth-khz" => "0",
-        "phase-mode" => "coherent",
+        "recon-bandwidth-khz" => "20",
+        "phase-mode" => "geometric",
         "phase-jitter-rad" => "0.2",
         "random-seed" => "0",
+        "transducer-mm" => "-30:0",
+        "delays-us" => "0",
     )
 
     for arg in args
@@ -55,12 +61,16 @@ function parse_cli(args)
 end
 
 slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
-
 parse_bool(s::AbstractString) = lowercase(strip(s)) in ("1", "true", "yes", "on")
 
 function parse_float_list(spec::AbstractString)
     isempty(strip(spec)) && return Float64[]
     return [parse(Float64, strip(item)) for item in split(spec, ",") if !isempty(strip(item))]
+end
+
+function parse_int_list(spec::AbstractString)
+    isempty(strip(spec)) && return Int[]
+    return [parse(Int, strip(item)) for item in split(spec, ",") if !isempty(strip(item))]
 end
 
 function parse_aberrator(s::AbstractString)
@@ -75,87 +85,117 @@ function parse_receiver_aperture_mm(s::AbstractString)
     return parse(Float64, value) * 1e-3
 end
 
-function expand_source_values(values::Vector{Float64}, n::Int, default::Float64)
-    if isempty(values)
-        return fill(default, n)
-    elseif length(values) == 1
-        return fill(values[1], n)
-    elseif length(values) == n
-        return values
-    end
-    error("Source parameter list must have length 1 or match the number of sources ($n).")
+function parse_transducer_mm(s::AbstractString)
+    parts = split(strip(s), ":"; limit=2)
+    length(parts) == 2 || error("--transducer-mm must be depth_mm:lateral_mm, got: $s")
+    return parse(Float64, strip(parts[1])) * 1e-3, parse(Float64, strip(parts[2])) * 1e-3
 end
 
-function parse_sources(opts)
-    coord_tokens = [strip(token) for token in split(opts["sources-mm"], ",") if !isempty(strip(token))]
-    1 <= length(coord_tokens) <= 5 || error("Provide between 1 and 5 sources via --sources-mm=depth:lateral,...")
+function expand_cluster_values(values::Vector{Float64}, n::Int, default::Float64)
+    isempty(values) && return fill(default, n)
+    length(values) == 1 && return fill(values[1], n)
+    length(values) == n && return values
+    error("Per-cluster parameter list must have length 1 or match the number of clusters ($n).")
+end
 
-    phases_deg = expand_source_values(
-        haskey(opts, "phases-deg") ? parse_float_list(opts["phases-deg"]) : Float64[],
-        length(coord_tokens),
-        0.0,
-    )
-    delays_us = expand_source_values(
-        haskey(opts, "delays-us") ? parse_float_list(opts["delays-us"]) : Float64[],
-        length(coord_tokens),
-        0.0,
-    )
-    amplitudes_pa = expand_source_values(
-        haskey(opts, "source-amplitudes-pa") ? parse_float_list(opts["source-amplitudes-pa"]) : Float64[],
-        length(coord_tokens),
-        parse(Float64, opts["amplitude-pa"]),
-    )
-    frequencies_mhz = expand_source_values(
-        haskey(opts, "source-frequencies-mhz") ? parse_float_list(opts["source-frequencies-mhz"]) : Float64[],
-        length(coord_tokens),
-        parse(Float64, opts["frequency-mhz"]),
-    )
-    num_cycles = parse(Int, opts["num-cycles"])
+function geometric_drive_phase(depth::Real, lateral::Real, tx_depth::Real, tx_lateral::Real, n::Int, f0::Real, c0::Real)
+    d = hypot(depth - tx_depth, lateral - tx_lateral)
+    return -2π * n * f0 * d / c0
+end
 
+function parse_clusters(opts, c0::Real)
+    coord_tokens = [strip(token) for token in split(opts["clusters-mm"], ",") if !isempty(strip(token))]
+    1 <= length(coord_tokens) <= 10 || error("Provide between 1 and 10 clusters via --clusters-mm=depth:lateral,...")
+
+    f0 = parse(Float64, opts["fundamental-mhz"]) * 1e6
+    harmonics = parse_int_list(opts["harmonics"])
+    isempty(harmonics) && error("--harmonics must be a non-empty integer list.")
+    harmonic_amplitudes = parse_float_list(opts["harmonic-amplitudes"])
+    length(harmonic_amplitudes) == length(harmonics) ||
+        error("--harmonic-amplitudes must have the same length as --harmonics ($(length(harmonics))).")
+
+    gate = parse(Float64, opts["gate-us"]) * 1e-6
+    taper = parse(Float64, opts["taper-ratio"])
+    per_bubble_amp = parse(Float64, opts["amplitude-pa"])
+
+    n_clusters = length(coord_tokens)
+    n_bubbles_per = expand_cluster_values(parse_float_list(opts["n-bubbles"]), n_clusters, 10.0)
+    delays_us = expand_cluster_values(parse_float_list(opts["delays-us"]), n_clusters, 0.0)
+
+    tx_depth, tx_lateral = parse_transducer_mm(opts["transducer-mm"])
     phase_mode = lowercase(strip(opts["phase-mode"]))
-    if phase_mode == "coherent"
-        # use --phases-deg as provided
-    elseif phase_mode == "random"
+    phase_mode in ("coherent", "geometric", "random", "jittered") ||
+        error("Unknown phase-mode: $phase_mode (expected coherent|geometric|random|jittered).")
+    phase_rng_used = phase_mode in ("random", "jittered")
+    if phase_rng_used
         Random.seed!(parse(Int, opts["random-seed"]))
-        phases_deg = rand(length(coord_tokens)) .* 360.0
-    elseif phase_mode == "jittered"
-        Random.seed!(parse(Int, opts["random-seed"]))
-        jitter_rad = parse(Float64, opts["phase-jitter-rad"])
-        phases_deg = phases_deg .+ randn(length(coord_tokens)) .* (jitter_rad * 180 / π)
-    else
-        error("Unknown phase-mode: $phase_mode (expected: coherent|random|jittered)")
     end
+    jitter_rad = parse(Float64, opts["phase-jitter-rad"])
 
-    sources = PointSource2D[]
+    clusters = BubbleCluster2D[]
     for (idx, token) in pairs(coord_tokens)
         parts = split(token, ":"; limit=2)
-        length(parts) == 2 || error("Each source must be specified as depth_mm:lateral_mm, got: $token")
-        depth_mm = parse(Float64, strip(parts[1]))
-        lateral_mm = parse(Float64, strip(parts[2]))
-        push!(sources, PointSource2D(
-            depth=depth_mm * 1e-3,
-            lateral=lateral_mm * 1e-3,
-            frequency=frequencies_mhz[idx] * 1e6,
-            amplitude=amplitudes_pa[idx],
-            phase=phases_deg[idx] * π / 180,
+        length(parts) == 2 || error("Each cluster must be specified as depth_mm:lateral_mm, got: $token")
+        depth_m = parse(Float64, strip(parts[1])) * 1e-3
+        lateral_m = parse(Float64, strip(parts[2])) * 1e-3
+
+        phases = Vector{Float64}(undef, length(harmonics))
+        for (h_idx, n) in pairs(harmonics)
+            base = if phase_mode in ("geometric", "jittered")
+                geometric_drive_phase(depth_m, lateral_m, tx_depth, tx_lateral, n, f0, c0)
+            elseif phase_mode == "random"
+                2π * rand()
+            else
+                0.0
+            end
+            if phase_mode == "jittered"
+                base += randn() * jitter_rad
+            end
+            phases[h_idx] = base
+        end
+
+        push!(clusters, BubbleCluster2D(
+            depth=depth_m,
+            lateral=lateral_m,
+            fundamental=f0,
+            amplitude=per_bubble_amp,
+            n_bubbles=n_bubbles_per[idx],
+            harmonics=copy(harmonics),
+            harmonic_amplitudes=copy(harmonic_amplitudes),
+            harmonic_phases=phases,
+            gate_duration=gate,
+            taper_ratio=taper,
             delay=delays_us[idx] * 1e-6,
-            num_cycles=num_cycles,
         ))
     end
-    return sources
+
+    meta = Dict{String, Any}(
+        "phase_mode" => phase_mode,
+        "fundamental_hz" => f0,
+        "harmonics" => harmonics,
+        "harmonic_amplitudes" => harmonic_amplitudes,
+        "gate_duration_s" => gate,
+        "transducer_m" => (tx_depth, tx_lateral),
+        "phase_jitter_rad" => jitter_rad,
+        "random_seed" => parse(Int, opts["random-seed"]),
+        "n_bubbles_per_cluster" => n_bubbles_per,
+        "delays_s" => delays_us .* 1e-6,
+    )
+    return clusters, meta
 end
 
-function default_output_dir(opts, sources, cfg)
+function default_output_dir(opts, clusters, cfg)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     parts = String[
-        timestamp,
-        "run_pam",
+        "run_pam_clusters",
         lowercase(opts["aberrator"]),
-        "$(length(sources))src",
-        "f$(slug_value(parse(Float64, opts["frequency-mhz"]); digits=2))mhz",
+        "$(length(clusters))cl",
+        "f$(slug_value(parse(Float64, opts["fundamental-mhz"]); digits=2))mhz",
+        "h$(replace(opts["harmonics"], "," => ""))",
+        lowercase(opts["phase-mode"]),
         "ax$(slug_value(cfg.axial_dim * 1e3; digits=0))mm",
         "lat$(slug_value(cfg.transverse_dim * 1e3; digits=0))mm",
-        "dx$(slug_value(cfg.dx * 1e3; digits=2))mm"
+        timestamp,
     ]
     if lowercase(opts["aberrator"]) == "skull"
         insert!(parts, length(parts), "slice" * opts["slice-index"])
@@ -169,38 +209,18 @@ function map_db(map::AbstractMatrix{<:Real}, ref::Real)
     return 10 .* log10.(max.(Float64.(map), eps(Float64)) ./ safe_ref)
 end
 
-function source_pairs_mm(sources)
-    return [(src.depth * 1e3, src.lateral * 1e3) for src in sources]
-end
-
-function scatter_source_points!(ax, sources; color=:red, marker=:x, markersize=14, strokewidth=2)
-    truth = source_pairs_mm(sources)
-    scatter!(
-        ax,
-        last.(truth),
-        first.(truth);
-        color=color,
-        marker=marker,
-        markersize=markersize,
-        strokewidth=strokewidth,
-    )
+function scatter_cluster_points!(ax, clusters; color=:red, marker=:x, markersize=14, strokewidth=2)
+    depths_mm = [cl.depth * 1e3 for cl in clusters]
+    laterals_mm = [cl.lateral * 1e3 for cl in clusters]
+    scatter!(ax, laterals_mm, depths_mm; color=color, marker=marker, markersize=markersize, strokewidth=strokewidth)
 end
 
 function scatter_predicted_points!(ax, stats; color=:white, marker=:circle, markersize=12, strokewidth=2)
     pred = stats[:predicted_mm]
-    scatter!(
-        ax,
-        last.(pred),
-        first.(pred);
-        color=color,
-        marker=marker,
-        markersize=markersize,
-        strokecolor=color,
-        strokewidth=strokewidth,
-    )
+    scatter!(ax, last.(pred), first.(pred); color=color, marker=marker, markersize=markersize, strokecolor=color, strokewidth=strokewidth)
 end
 
-function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, sources, stats_geo, stats_hasa)
+function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, clusters, stats_geo, stats_hasa)
     depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
     lateral_mm = kgrid.y_vec .* 1e3
     time_us = collect(0:(size(rf, 2) - 1)) .* cfg.dt .* 1e6
@@ -209,61 +229,37 @@ function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, sources, stat
     pam_hasa_db = map_db(pam_hasa, map_ref)
 
     fig = Figure(size=(1500, 1000))
-
-    ax_medium = Axis(
-        fig[1, 1];
-        title="Simulation Medium",
-        xlabel="Lateral position [mm]",
-        ylabel="Depth below receiver [mm]",
-        aspect=DataAspect(),
-    )
+    ax_medium = Axis(fig[1, 1]; title="Simulation Medium", xlabel="Lateral [mm]", ylabel="Depth [mm]", aspect=DataAspect())
     hm_medium = heatmap!(ax_medium, lateral_mm, depth_mm, Float64.(c)'; colormap=:thermal)
     hlines!(ax_medium, [0.0]; color=:white, linestyle=:dash)
-    scatter_source_points!(ax_medium, sources)
-    Colorbar(fig[1, 2], hm_medium; label="Sound speed [m/s]")
+    scatter_cluster_points!(ax_medium, clusters)
+    Colorbar(fig[1, 2], hm_medium; label="c [m/s]")
 
-    ax_rf = Axis(
-        fig[1, 3];
-        title="Recorded RF Data",
-        xlabel="Time [μs]",
-        ylabel="Lateral position [mm]",
-    )
+    ax_rf = Axis(fig[1, 3]; title="Recorded RF", xlabel="Time [μs]", ylabel="Lateral [mm]")
     hm_rf = heatmap!(ax_rf, time_us, lateral_mm, rf'; colormap=:balance)
     Colorbar(fig[1, 4], hm_rf; label="Pressure [Pa]")
 
-    geo_title = "Geometric ASA | mean radial error = $(round(stats_geo[:mean_radial_error_mm]; digits=2)) mm"
-    ax_geo = Axis(
-        fig[2, 1];
-        title=geo_title,
-        xlabel="Lateral position [mm]",
-        ylabel="Depth below receiver [mm]",
-        aspect=DataAspect(),
-    )
+    ax_geo = Axis(fig[2, 1]; title="Geometric ASA | err = $(round(stats_geo[:mean_radial_error_mm]; digits=2)) mm",
+                  xlabel="Lateral [mm]", ylabel="Depth [mm]", aspect=DataAspect())
     hm_geo = heatmap!(ax_geo, lateral_mm, depth_mm, pam_geo_db'; colormap=:viridis, colorrange=(-30, 0))
     hlines!(ax_geo, [0.0]; color=:white, linestyle=:dash)
-    scatter_source_points!(ax_geo, sources)
+    scatter_cluster_points!(ax_geo, clusters)
     scatter_predicted_points!(ax_geo, stats_geo)
 
-    hasa_title = "HASA | mean radial error = $(round(stats_hasa[:mean_radial_error_mm]; digits=2)) mm"
-    ax_hasa = Axis(
-        fig[2, 3];
-        title=hasa_title,
-        xlabel="Lateral position [mm]",
-        ylabel="Depth below receiver [mm]",
-        aspect=DataAspect(),
-    )
+    ax_hasa = Axis(fig[2, 3]; title="HASA | err = $(round(stats_hasa[:mean_radial_error_mm]; digits=2)) mm",
+                   xlabel="Lateral [mm]", ylabel="Depth [mm]", aspect=DataAspect())
     hm_hasa = heatmap!(ax_hasa, lateral_mm, depth_mm, pam_hasa_db'; colormap=:viridis, colorrange=(-30, 0))
     hlines!(ax_hasa, [0.0]; color=:white, linestyle=:dash)
-    scatter_source_points!(ax_hasa, sources)
+    scatter_cluster_points!(ax_hasa, clusters)
     scatter_predicted_points!(ax_hasa, stats_hasa)
-    Colorbar(fig[2, 4], hm_hasa; label="PAM intensity [dB]")
+    Colorbar(fig[2, 4], hm_hasa; label="Intensity [dB]")
 
     save(path, fig)
 end
 
 opts = parse_cli(ARGS)
-sources = parse_sources(opts)
-cfg = PAMConfig(
+
+cfg_base = PAMConfig(
     dx=parse(Float64, opts["dx-mm"]) * 1e-3,
     dz=parse(Float64, opts["dz-mm"]) * 1e-3,
     axial_dim=parse(Float64, opts["axial-mm"]) * 1e-3,
@@ -276,17 +272,20 @@ cfg = PAMConfig(
     success_tolerance=parse(Float64, opts["success-tolerance-mm"]) * 1e-3,
 )
 
+clusters, cluster_meta = parse_clusters(opts, cfg_base.c0)
+
 aberrator = parse_aberrator(opts["aberrator"])
 cfg = fit_pam_config(
-    cfg,
-    sources;
+    cfg_base,
+    clusters;
     min_bottom_margin=parse(Float64, opts["bottom-margin-mm"]) * 1e-3,
     reference_depth=aberrator == :skull ? parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3 : nothing,
 )
+
 out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
     opts["out-dir"]
 else
-    default_output_dir(opts, sources, cfg)
+    default_output_dir(opts, clusters, cfg)
 end
 mkpath(out_dir)
 
@@ -311,18 +310,17 @@ for (key, value) in medium_info
     medium_summary[String(key)] = value
 end
 
-recon_frequencies = if haskey(opts, "recon-frequencies-mhz")
+recon_frequencies = if haskey(opts, "recon-frequencies-mhz") && !isempty(strip(opts["recon-frequencies-mhz"]))
     parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
 else
-    sort(unique(Float64[src.frequency for src in sources]))
+    sort(unique(Float64[n * cluster_meta["fundamental_hz"] for n in cluster_meta["harmonics"]]))
 end
-
 recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
 
 results = run_pam_case(
     c,
     rho,
-    sources,
+    clusters,
     cfg;
     frequencies=recon_frequencies,
     bandwidth=recon_bandwidth_hz,
@@ -331,28 +329,25 @@ results = run_pam_case(
 
 save_overview(
     joinpath(out_dir, "overview.png"),
-    c,
-    results[:rf],
-    results[:pam_geo],
-    results[:pam_hasa],
-    results[:kgrid],
-    cfg,
-    sources,
-    results[:stats_geo],
-    results[:stats_hasa],
+    c, results[:rf], results[:pam_geo], results[:pam_hasa],
+    results[:kgrid], cfg, clusters, results[:stats_geo], results[:stats_hasa],
 )
 
 summary = Dict(
     "out_dir" => out_dir,
-    "sources" => [Dict(
-        "depth_m" => src.depth,
-        "lateral_m" => src.lateral,
-        "frequency_hz" => src.frequency,
-        "amplitude_pa" => src.amplitude,
-        "phase_rad" => src.phase,
-        "delay_s" => src.delay,
-        "num_cycles" => src.num_cycles,
-    ) for src in sources],
+    "clusters" => [Dict(
+        "depth_m" => cl.depth,
+        "lateral_m" => cl.lateral,
+        "fundamental_hz" => cl.fundamental,
+        "amplitude_pa" => cl.amplitude,
+        "n_bubbles" => cl.n_bubbles,
+        "harmonics" => cl.harmonics,
+        "harmonic_amplitudes" => cl.harmonic_amplitudes,
+        "harmonic_phases_rad" => cl.harmonic_phases,
+        "gate_duration_s" => cl.gate_duration,
+        "delay_s" => cl.delay,
+    ) for cl in clusters],
+    "emission_meta" => cluster_meta,
     "config" => Dict(
         "dx" => cfg.dx,
         "dz" => cfg.dz,
@@ -363,8 +358,6 @@ summary = Dict(
         "dt" => cfg.dt,
         "c0" => cfg.c0,
         "rho0" => cfg.rho0,
-        "PML_GUARD" => cfg.PML_GUARD,
-        "effective_pml_guard" => TranscranialFUS._pam_pml_guard(cfg),
         "zero_pad_factor" => cfg.zero_pad_factor,
         "peak_suppression_radius" => cfg.peak_suppression_radius,
         "success_tolerance" => cfg.success_tolerance,
@@ -373,8 +366,6 @@ summary = Dict(
     "medium" => medium_summary,
     "reconstruction_frequencies_hz" => recon_frequencies,
     "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
-    "phase_mode" => lowercase(strip(opts["phase-mode"])),
-    "random_seed" => parse(Int, opts["random-seed"]),
     "simulation" => Dict(
         "receiver_row" => results[:simulation][:receiver_row],
         "receiver_cols" => [first(results[:simulation][:receiver_cols]), last(results[:simulation][:receiver_cols])],
@@ -388,6 +379,6 @@ open(joinpath(out_dir, "summary.json"), "w") do io
     JSON3.pretty(io, summary)
 end
 
-@save joinpath(out_dir, "result.jld2") c rho cfg sources results medium_info
+@save joinpath(out_dir, "result.jld2") c rho cfg clusters results medium_info
 
-println("Saved PAM outputs to $out_dir")
+println("Saved PAM cluster outputs to $out_dir")
