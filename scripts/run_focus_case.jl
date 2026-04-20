@@ -39,6 +39,7 @@ slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)),
 function default_output_dir(opts, placement_mode, focus_depth)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     parts = String[
+        timestamp,
         "run_focus",
         lowercase(opts["estimator"]),
         lowercase(opts["medium"]),
@@ -52,7 +53,6 @@ function default_output_dir(opts, placement_mode, focus_depth)
     if !isnothing(focus_depth)
         push!(parts, "fd$(slug_value(focus_depth * 1e3; digits=1))mm")
     end
-    push!(parts, timestamp)
     return joinpath(pwd(), "outputs", join(parts, "_"))
 end
 
