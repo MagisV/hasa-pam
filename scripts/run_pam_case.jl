@@ -43,6 +43,10 @@ function parse_cli(args)
         "phase-mode" => "coherent",
         "phase-jitter-rad" => "0.2",
         "random-seed" => "0",
+        "peak-method" => "argmax",
+        "clean-loop-gain" => "0.1",
+        "clean-max-iter" => "500",
+        "clean-threshold-ratio" => "0.01",
     )
 
     for arg in args
@@ -318,6 +322,8 @@ else
 end
 
 recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
+peak_method = Symbol(lowercase(strip(opts["peak-method"])))
+peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
 
 results = run_pam_case(
     c,
@@ -327,6 +333,10 @@ results = run_pam_case(
     frequencies=recon_frequencies,
     bandwidth=recon_bandwidth_hz,
     use_gpu=parse_bool(opts["use-gpu"]),
+    peak_method=peak_method,
+    clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
+    clean_max_iter=parse(Int, opts["clean-max-iter"]),
+    clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
 )
 
 save_overview(
@@ -375,6 +385,10 @@ summary = Dict(
     "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
     "phase_mode" => lowercase(strip(opts["phase-mode"])),
     "random_seed" => parse(Int, opts["random-seed"]),
+    "peak_method" => String(peak_method),
+    "clean_loop_gain" => parse(Float64, opts["clean-loop-gain"]),
+    "clean_max_iter" => parse(Int, opts["clean-max-iter"]),
+    "clean_threshold_ratio" => parse(Float64, opts["clean-threshold-ratio"]),
     "simulation" => Dict(
         "receiver_row" => results[:simulation][:receiver_row],
         "receiver_cols" => [first(results[:simulation][:receiver_cols]), last(results[:simulation][:receiver_cols])],

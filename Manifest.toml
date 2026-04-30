@@ -2,7 +2,7 @@
 
 julia_version = "1.12.2"
 manifest_format = "2.0"
-project_hash = "b0e2d77549caeae7ddda62cf407b01dfd77aa2e5"
+project_hash = "9554427f37b4cfdcbc2e079a0b80dbae1e29d4dd"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -1444,7 +1444,7 @@ uuid = "3bb67fe8-82b1-5028-8e26-92a6c54297fa"
 version = "0.11.3"
 
 [[deps.TranscranialFUS]]
-deps = ["CairoMakie", "CondaPkg", "DICOM", "FFTW", "Interpolations", "JLD2", "JSON3", "PythonCall", "Statistics"]
+deps = ["CairoMakie", "CondaPkg", "DICOM", "FFTW", "Interpolations", "JLD2", "JSON3", "PythonCall", "Random", "Statistics"]
 path = "."
 uuid = "a2de8f33-df8e-4198-bbcc-8a183cd2f9f0"
 version = "0.1.0"

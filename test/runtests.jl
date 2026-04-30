@@ -1,4 +1,5 @@
 using Test
+using Random
 using TranscranialFUS
 
 function synthetic_hu_volume(nslices::Int=5, rows::Int=80, cols::Int=60)
@@ -250,6 +251,110 @@ end
     @test length(stats[:axial_fwhm_mm]) == 2
     @test all(stats[:axial_fwhm_mm] .> 0)
     @test all(stats[:lateral_fwhm_mm] .> 0)
+end
+
+@testset "Vascular bubble clusters" begin
+    rng = Random.MersenneTwister(42)
+    clusters, meta = make_vascular_bubble_clusters(
+        [(0.03, 0.0)];
+        root_length=8e-3,
+        branch_levels=1,
+        source_spacing=1e-3,
+        position_jitter=0.0,
+        min_separation=0.0,
+        max_sources_per_anchor=20,
+        lateral_bounds=(-0.02, 0.02),
+        rng=rng,
+    )
+
+    @test length(clusters) > 8
+    @test length(clusters) <= 20
+    @test meta[:cluster_model] == :vascular
+    @test meta[:source_count_by_anchor] == [length(clusters)]
+    @test maximum(src.depth for src in clusters) > minimum(src.depth for src in clusters)
+    @test maximum(abs(src.lateral) for src in clusters) > 0
+end
+
+@testset "PAM detection metrics" begin
+    cfg = PAMConfig(
+        dx=0.5e-3,
+        dz=0.5e-3,
+        axial_dim=0.05,
+        transverse_dim=0.04,
+        receiver_aperture=nothing,
+        PML_GUARD=5,
+        success_tolerance=1.0e-3,
+    )
+    kgrid = pam_grid(cfg)
+    sources = [
+        PointSource2D(depth=0.015, lateral=-0.004, frequency=0.4e6),
+        PointSource2D(depth=0.028, lateral=0.006, frequency=0.4e6),
+    ]
+    intensity = zeros(Float64, kgrid.Nx, kgrid.Ny)
+    row1, col1 = source_grid_index(sources[1], cfg, kgrid)
+    row_false, col_false = source_grid_index(PointSource2D(depth=0.038, lateral=-0.012), cfg, kgrid)
+    intensity[row1, col1] = 1.0
+    intensity[row_false, col_false] = 0.8
+
+    stats = analyse_pam_detection_2d(
+        intensity,
+        kgrid,
+        cfg,
+        sources;
+        truth_radius=1.0e-3,
+        threshold_ratio=0.5,
+    )
+
+    @test 0 < stats[:precision] < 1
+    @test 0 < stats[:recall] < 1
+    @test stats[:false_positive_pixels] > 0
+    @test stats[:false_negative_pixels] > 0
+    @test stats[:spurious_prediction_components] == 1
+end
+
+@testset "CLEAN peak detection" begin
+    # Two sources whose focal shoulders overlap: argmax with a suppression
+    # radius smaller than the focus picks sidelobes of one source instead of
+    # the second source. CLEAN should find both.
+    cfg = PAMConfig(
+        dx=0.5e-3,
+        dz=0.5e-3,
+        axial_dim=0.05,
+        transverse_dim=0.04,
+        receiver_aperture=40e-3,
+        PML_GUARD=5,
+        peak_suppression_radius=1e-3,   # smaller than focus FWHM
+        success_tolerance=2e-3,
+    )
+    kgrid = pam_grid(cfg)
+    depth = depth_coordinates(kgrid, cfg)
+    lateral = kgrid.y_vec
+    truths = [
+        PointSource2D(depth=0.02, lateral=-0.003, frequency=0.4e6),
+        PointSource2D(depth=0.02, lateral=0.003, frequency=0.4e6),
+    ]
+    intensity = zeros(Float64, kgrid.Nx, kgrid.Ny)
+    σd = 3e-3  # broad axial focus to break argmax
+    σl = 2e-3
+    # unequal amplitudes to mimic a real coherent-interference scene
+    amps = (1.0, 0.7)
+    for (src, amp) in zip(truths, amps)
+        for i in 1:kgrid.Nx, j in 1:kgrid.Ny
+            intensity[i, j] += amp * exp(-((depth[i] - src.depth)^2 / (2σd^2) + (lateral[j] - src.lateral)^2 / (2σl^2)))
+        end
+    end
+
+    stats_argmax = analyse_pam_2d(intensity, kgrid, cfg, truths; peak_method=:argmax)
+    stats_clean = analyse_pam_2d(
+        intensity, kgrid, cfg, truths;
+        peak_method=:clean,
+        frequencies=[0.4e6],
+        clean_psf_axial_fwhm=2.355 * σd,
+        clean_psf_lateral_fwhm=2.355 * σl,
+    )
+
+    @test stats_clean[:mean_radial_error_mm] < stats_argmax[:mean_radial_error_mm]
+    @test stats_clean[:num_success] == 2
 end
 
 @testset "PAM sweep target presets" begin

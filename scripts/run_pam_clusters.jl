@@ -49,6 +49,22 @@ function parse_cli(args)
         "random-seed" => "0",
         "transducer-mm" => "-30:0",
         "delays-us" => "0",
+        "cluster-model" => "vascular",
+        "vascular-length-mm" => "12",
+        "vascular-branch-levels" => "2",
+        "vascular-branch-angle-deg" => "30",
+        "vascular-branch-scale" => "0.65",
+        "vascular-source-spacing-mm" => "0.8",
+        "vascular-position-jitter-mm" => "0.15",
+        "vascular-min-separation-mm" => "0.3",
+        "vascular-max-sources-per-anchor" => "0",
+        "vascular-radius-mm" => "1.0",
+        "analysis-mode" => "auto",
+        "detection-threshold-ratio" => "0.2",
+        "peak-method" => "argmax",
+        "clean-loop-gain" => "0.1",
+        "clean-max-iter" => "500",
+        "clean-threshold-ratio" => "0.01",
     )
 
     for arg in args
@@ -79,6 +95,19 @@ function parse_aberrator(s::AbstractString)
     return value
 end
 
+function parse_cluster_model(s::AbstractString)
+    value = Symbol(lowercase(strip(s)))
+    value in (:point, :vascular) || error("--cluster-model must be point or vascular, got: $s")
+    return value
+end
+
+function parse_analysis_mode(s::AbstractString, cluster_model::Symbol)
+    value = Symbol(lowercase(strip(s)))
+    value == :auto && return cluster_model == :vascular ? :detection : :localization
+    value in (:localization, :detection) || error("--analysis-mode must be auto, localization, or detection, got: $s")
+    return value
+end
+
 function parse_receiver_aperture_mm(s::AbstractString)
     value = lowercase(strip(s))
     value in ("none", "full", "all") && return nothing
@@ -103,10 +132,11 @@ function geometric_drive_phase(depth::Real, lateral::Real, tx_depth::Real, tx_la
     return -2π * n * f0 * d / c0
 end
 
-function parse_clusters(opts, c0::Real)
+function parse_clusters(opts, cfg::PAMConfig)
     coord_tokens = [strip(token) for token in split(opts["clusters-mm"], ",") if !isempty(strip(token))]
-    1 <= length(coord_tokens) <= 10 || error("Provide between 1 and 10 clusters via --clusters-mm=depth:lateral,...")
+    1 <= length(coord_tokens) <= 10 || error("Provide between 1 and 10 cluster anchors via --clusters-mm=depth:lateral,...")
 
+    cluster_model = parse_cluster_model(opts["cluster-model"])
     f0 = parse(Float64, opts["fundamental-mhz"]) * 1e6
     harmonics = parse_int_list(opts["harmonics"])
     isempty(harmonics) && error("--harmonics must be a non-empty integer list.")
@@ -126,50 +156,97 @@ function parse_clusters(opts, c0::Real)
     phase_mode = lowercase(strip(opts["phase-mode"]))
     phase_mode in ("coherent", "geometric", "random", "jittered") ||
         error("Unknown phase-mode: $phase_mode (expected coherent|geometric|random|jittered).")
-    phase_rng_used = phase_mode in ("random", "jittered")
-    if phase_rng_used
-        Random.seed!(parse(Int, opts["random-seed"]))
-    end
+    rng = Random.MersenneTwister(parse(Int, opts["random-seed"]))
     jitter_rad = parse(Float64, opts["phase-jitter-rad"])
 
-    clusters = BubbleCluster2D[]
-    for (idx, token) in pairs(coord_tokens)
+    anchors = Tuple{Float64, Float64}[]
+    for token in coord_tokens
         parts = split(token, ":"; limit=2)
-        length(parts) == 2 || error("Each cluster must be specified as depth_mm:lateral_mm, got: $token")
-        depth_m = parse(Float64, strip(parts[1])) * 1e-3
-        lateral_m = parse(Float64, strip(parts[2])) * 1e-3
+        length(parts) == 2 || error("Each cluster anchor must be specified as depth_mm:lateral_mm, got: $token")
+        push!(anchors, (parse(Float64, strip(parts[1])) * 1e-3, parse(Float64, strip(parts[2])) * 1e-3))
+    end
 
-        phases = Vector{Float64}(undef, length(harmonics))
-        for (h_idx, n) in pairs(harmonics)
-            base = if phase_mode in ("geometric", "jittered")
-                geometric_drive_phase(depth_m, lateral_m, tx_depth, tx_lateral, n, f0, c0)
-            elseif phase_mode == "random"
-                2π * rand()
-            else
-                0.0
-            end
-            if phase_mode == "jittered"
-                base += randn() * jitter_rad
-            end
-            phases[h_idx] = base
+    clusters = BubbleCluster2D[]
+    vascular_meta_by_anchor = Dict{String, Any}[]
+
+    if cluster_model == :vascular
+        max_sources_per_anchor_raw = parse(Int, opts["vascular-max-sources-per-anchor"])
+        max_sources_per_anchor = max_sources_per_anchor_raw <= 0 ? nothing : max_sources_per_anchor_raw
+        for (idx, anchor) in pairs(anchors)
+            anchor_clusters, anchor_meta = make_vascular_bubble_clusters(
+                [anchor];
+                root_length=parse(Float64, opts["vascular-length-mm"]) * 1e-3,
+                branch_levels=parse(Int, opts["vascular-branch-levels"]),
+                branch_angle=deg2rad(parse(Float64, opts["vascular-branch-angle-deg"])),
+                branch_scale=parse(Float64, opts["vascular-branch-scale"]),
+                source_spacing=parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
+                position_jitter=parse(Float64, opts["vascular-position-jitter-mm"]) * 1e-3,
+                min_separation=parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
+                max_sources_per_anchor=max_sources_per_anchor,
+                depth_bounds=(0.0, Inf),
+                lateral_bounds=(-cfg.transverse_dim / 2, cfg.transverse_dim / 2),
+                fundamental=f0,
+                amplitude=per_bubble_amp,
+                n_bubbles=n_bubbles_per[idx],
+                harmonics=harmonics,
+                harmonic_amplitudes=harmonic_amplitudes,
+                gate_duration=gate,
+                taper_ratio=taper,
+                delay=delays_us[idx] * 1e-6,
+                phase_mode=Symbol(phase_mode),
+                phase_jitter=jitter_rad,
+                transducer_depth=tx_depth,
+                transducer_lateral=tx_lateral,
+                c0=cfg.c0,
+                rng=rng,
+            )
+            append!(clusters, anchor_clusters)
+            push!(vascular_meta_by_anchor, Dict(
+                "anchor_m" => collect(anchor),
+                "source_count" => length(anchor_clusters),
+                "segments_m" => [collect(segment) for segment in anchor_meta[:segments]],
+            ))
         end
+    else
+        for (idx, anchor) in pairs(anchors)
+            depth_m, lateral_m = anchor
 
-        push!(clusters, BubbleCluster2D(
-            depth=depth_m,
-            lateral=lateral_m,
-            fundamental=f0,
-            amplitude=per_bubble_amp,
-            n_bubbles=n_bubbles_per[idx],
-            harmonics=copy(harmonics),
-            harmonic_amplitudes=copy(harmonic_amplitudes),
-            harmonic_phases=phases,
-            gate_duration=gate,
-            taper_ratio=taper,
-            delay=delays_us[idx] * 1e-6,
-        ))
+            phases = Vector{Float64}(undef, length(harmonics))
+            for (h_idx, n) in pairs(harmonics)
+                base = if phase_mode in ("geometric", "jittered")
+                    geometric_drive_phase(depth_m, lateral_m, tx_depth, tx_lateral, n, f0, cfg.c0)
+                elseif phase_mode == "random"
+                    2π * rand(rng)
+                else
+                    0.0
+                end
+                if phase_mode == "jittered"
+                    base += randn(rng) * jitter_rad
+                end
+                phases[h_idx] = base
+            end
+
+            push!(clusters, BubbleCluster2D(
+                depth=depth_m,
+                lateral=lateral_m,
+                fundamental=f0,
+                amplitude=per_bubble_amp,
+                n_bubbles=n_bubbles_per[idx],
+                harmonics=copy(harmonics),
+                harmonic_amplitudes=copy(harmonic_amplitudes),
+                harmonic_phases=phases,
+                gate_duration=gate,
+                taper_ratio=taper,
+                delay=delays_us[idx] * 1e-6,
+            ))
+        end
     end
 
     meta = Dict{String, Any}(
+        "cluster_model" => String(cluster_model),
+        "anchor_clusters_m" => [collect(anchor) for anchor in anchors],
+        "n_anchor_clusters" => length(anchors),
+        "n_emission_sources" => length(clusters),
         "phase_mode" => phase_mode,
         "fundamental_hz" => f0,
         "harmonics" => harmonics,
@@ -181,16 +258,32 @@ function parse_clusters(opts, c0::Real)
         "n_bubbles_per_cluster" => n_bubbles_per,
         "delays_s" => delays_us .* 1e-6,
     )
+    if cluster_model == :vascular
+        meta["vascular"] = Dict(
+            "length_m" => parse(Float64, opts["vascular-length-mm"]) * 1e-3,
+            "branch_levels" => parse(Int, opts["vascular-branch-levels"]),
+            "branch_angle_rad" => deg2rad(parse(Float64, opts["vascular-branch-angle-deg"])),
+            "branch_scale" => parse(Float64, opts["vascular-branch-scale"]),
+            "source_spacing_m" => parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
+            "position_jitter_m" => parse(Float64, opts["vascular-position-jitter-mm"]) * 1e-3,
+            "min_separation_m" => parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
+            "max_sources_per_anchor" => parse(Int, opts["vascular-max-sources-per-anchor"]),
+            "truth_radius_m" => parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
+            "anchors" => vascular_meta_by_anchor,
+        )
+    end
     return clusters, meta
 end
 
-function default_output_dir(opts, clusters, cfg)
+function default_output_dir(opts, clusters, cfg, cluster_meta)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     parts = String[
         timestamp,
         "run_pam_clusters",
         lowercase(opts["aberrator"]),
-        "$(length(clusters))cl",
+        lowercase(cluster_meta["cluster_model"]),
+        "$(cluster_meta["n_anchor_clusters"])anchors",
+        "$(length(clusters))src",
         "f$(slug_value(parse(Float64, opts["fundamental-mhz"]); digits=2))mhz",
         "h$(replace(opts["harmonics"], "," => ""))",
         lowercase(opts["phase-mode"]),
@@ -209,15 +302,30 @@ function map_db(map::AbstractMatrix{<:Real}, ref::Real)
     return 10 .* log10.(max.(Float64.(map), eps(Float64)) ./ safe_ref)
 end
 
-function scatter_cluster_points!(ax, clusters; color=:red, marker=:x, markersize=14, strokewidth=2)
+function scatter_cluster_points!(ax, clusters; color=:red, marker=nothing, markersize=nothing, strokewidth=2)
     depths_mm = [cl.depth * 1e3 for cl in clusters]
     laterals_mm = [cl.lateral * 1e3 for cl in clusters]
+    marker = isnothing(marker) ? (length(clusters) > 20 ? :circle : :x) : marker
+    markersize = isnothing(markersize) ? (length(clusters) > 20 ? 4 : 14) : markersize
     scatter!(ax, laterals_mm, depths_mm; color=color, marker=marker, markersize=markersize, strokewidth=strokewidth)
 end
 
 function scatter_predicted_points!(ax, stats; color=:white, marker=:circle, markersize=12, strokewidth=2)
+    haskey(stats, :predicted_mm) || return nothing
     pred = stats[:predicted_mm]
     scatter!(ax, last.(pred), first.(pred); color=color, marker=marker, markersize=markersize, strokecolor=color, strokewidth=strokewidth)
+end
+
+function pam_stats_title(label, stats)
+    if haskey(stats, :mean_radial_error_mm)
+        return "$label | err = $(round(stats[:mean_radial_error_mm]; digits=2)) mm"
+    elseif haskey(stats, :precision)
+        precision = round(stats[:precision]; digits=2)
+        recall = round(stats[:recall]; digits=2)
+        f1 = round(stats[:f1]; digits=2)
+        return "$label | P=$(precision), R=$(recall), F1=$(f1)"
+    end
+    return label
 end
 
 function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, clusters, stats_geo, stats_hasa)
@@ -239,14 +347,14 @@ function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, clusters, sta
     hm_rf = heatmap!(ax_rf, time_us, lateral_mm, rf'; colormap=:balance)
     Colorbar(fig[1, 4], hm_rf; label="Pressure [Pa]")
 
-    ax_geo = Axis(fig[2, 1]; title="Geometric ASA | err = $(round(stats_geo[:mean_radial_error_mm]; digits=2)) mm",
+    ax_geo = Axis(fig[2, 1]; title=pam_stats_title("Geometric ASA", stats_geo),
                   xlabel="Lateral [mm]", ylabel="Depth [mm]", aspect=DataAspect())
     hm_geo = heatmap!(ax_geo, lateral_mm, depth_mm, pam_geo_db'; colormap=:viridis, colorrange=(-30, 0))
     hlines!(ax_geo, [0.0]; color=:white, linestyle=:dash)
     scatter_cluster_points!(ax_geo, clusters)
     scatter_predicted_points!(ax_geo, stats_geo)
 
-    ax_hasa = Axis(fig[2, 3]; title="HASA | err = $(round(stats_hasa[:mean_radial_error_mm]; digits=2)) mm",
+    ax_hasa = Axis(fig[2, 3]; title=pam_stats_title("HASA", stats_hasa),
                    xlabel="Lateral [mm]", ylabel="Depth [mm]", aspect=DataAspect())
     hm_hasa = heatmap!(ax_hasa, lateral_mm, depth_mm, pam_hasa_db'; colormap=:viridis, colorrange=(-30, 0))
     hlines!(ax_hasa, [0.0]; color=:white, linestyle=:dash)
@@ -254,6 +362,159 @@ function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, clusters, sta
     scatter_predicted_points!(ax_hasa, stats_hasa)
     Colorbar(fig[2, 4], hm_hasa; label="Intensity [dB]")
 
+    save(path, fig)
+end
+
+function cluster_points_mm(clusters)
+    return [cl.lateral * 1e3 for cl in clusters], [cl.depth * 1e3 for cl in clusters]
+end
+
+function mask_points_mm(mask::BitMatrix, kgrid, cfg; max_points::Int=2500)
+    idxs = findall(mask)
+    isempty(idxs) && return Float64[], Float64[]
+
+    stride = max(1, ceil(Int, length(idxs) / max_points))
+    sampled = idxs[1:stride:end]
+    depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
+    lateral_mm = kgrid.y_vec .* 1e3
+    return [lateral_mm[idx[2]] for idx in sampled], [depth_mm[idx[1]] for idx in sampled]
+end
+
+function nearest_detection_errors_mm(mask::BitMatrix, kgrid, cfg, clusters)
+    pred_lateral_mm, pred_depth_mm = mask_points_mm(mask, kgrid, cfg; max_points=typemax(Int))
+    isempty(pred_lateral_mm) && return Float64[], Float64[]
+
+    lateral_errors = Float64[]
+    depth_errors = Float64[]
+    for cl in clusters
+        truth_lateral = cl.lateral * 1e3
+        truth_depth = cl.depth * 1e3
+        best_idx = argmin((pred_lateral_mm .- truth_lateral) .^ 2 .+ (pred_depth_mm .- truth_depth) .^ 2)
+        push!(lateral_errors, pred_lateral_mm[best_idx] - truth_lateral)
+        push!(depth_errors, pred_depth_mm[best_idx] - truth_depth)
+    end
+    return lateral_errors, depth_errors
+end
+
+function pam_panel_limits(clusters, datasets...)
+    truth_lat, truth_depth = cluster_points_mm(clusters)
+    all_lat = copy(truth_lat)
+    all_depth = copy(truth_depth)
+    for (lat, depth) in datasets
+        append!(all_lat, lat)
+        append!(all_depth, depth)
+    end
+
+    x_pad = max(2.0, 0.12 * max(maximum(all_lat) - minimum(all_lat), 1.0))
+    y_pad = max(2.0, 0.12 * max(maximum(all_depth) - minimum(all_depth), 1.0))
+    return (
+        floor(minimum(all_lat) - x_pad),
+        ceil(maximum(all_lat) + x_pad),
+        floor(minimum(all_depth) - y_pad),
+        ceil(maximum(all_depth) + y_pad),
+    )
+end
+
+function add_paper_style_panel!(
+    fig,
+    row::Int,
+    title::AbstractString,
+    intensity,
+    kgrid,
+    cfg,
+    clusters;
+    color,
+    threshold_ratio::Real,
+    limits,
+    show_xlabel::Bool,
+)
+    mask = threshold_pam_map(intensity, cfg; threshold_ratio=threshold_ratio)
+    pred_lat, pred_depth = mask_points_mm(mask, kgrid, cfg)
+    truth_lat, truth_depth = cluster_points_mm(clusters)
+
+    ax = Axis(
+        fig[row, 1];
+        xlabel=show_xlabel ? "Lateral Distance [mm]" : "",
+        ylabel=row == 1 ? "Axial Distance [mm]" : "",
+        yreversed=true,
+        xgridvisible=false,
+        ygridvisible=false,
+        xticks=WilkinsonTicks(3),
+        yticks=WilkinsonTicks(3),
+    )
+    hidespines!(ax, :t, :r)
+    xlims!(ax, limits[1], limits[2])
+    ylims!(ax, limits[3], limits[4])
+
+    scatter!(ax, truth_lat, truth_depth; color=(:gray45, 0.75), markersize=5, marker=:rect)
+    scatter!(ax, pred_lat, pred_depth; color=(color, 0.85), markersize=6, marker=:circle)
+    text!(ax, 0.92, 0.86; text=title, space=:relative, align=(:right, :center), color=color, fontsize=30)
+
+    lat_err, depth_err = nearest_detection_errors_mm(mask, kgrid, cfg, clusters)
+    inset = Axis(
+        fig[row, 1];
+        width=90,
+        height=115,
+        halign=:left,
+        valign=:top,
+        tellwidth=false,
+        tellheight=false,
+        yreversed=true,
+        title=row == 1 ? "Error" : "",
+        titlesize=20,
+        xgridvisible=false,
+        ygridvisible=false,
+        backgroundcolor=(:white, 0.9),
+    )
+    hidespines!(inset, :t, :r)
+    hidedecorations!(inset; grid=false)
+    xlims!(inset, -10, 10)
+    ylims!(inset, -10, 10)
+    vlines!(inset, [0.0]; color=:gray65, linewidth=1)
+    hlines!(inset, [0.0]; color=:gray65, linewidth=1)
+    scatter!(inset, lat_err, depth_err; color=(color, 0.85), markersize=3.5)
+    if row == 1
+        text!(ax, 0.23, 0.69; text="1 cm", space=:relative, align=(:left, :center), color=:black, fontsize=24)
+    end
+
+    return pred_lat, pred_depth
+end
+
+function save_paper_style_detection(path, pam_geo, pam_hasa, kgrid, cfg, clusters; threshold_ratio::Real)
+    geo_mask = threshold_pam_map(pam_geo, cfg; threshold_ratio=threshold_ratio)
+    hasa_mask = threshold_pam_map(pam_hasa, cfg; threshold_ratio=threshold_ratio)
+    geo_points = mask_points_mm(geo_mask, kgrid, cfg)
+    hasa_points = mask_points_mm(hasa_mask, kgrid, cfg)
+    limits = pam_panel_limits(clusters, geo_points, hasa_points)
+
+    fig = Figure(size=(760, 760), fontsize=24)
+    add_paper_style_panel!(
+        fig,
+        1,
+        "Uncorrected",
+        pam_geo,
+        kgrid,
+        cfg,
+        clusters;
+        color=RGBf(0.55, 0.0, 0.34),
+        threshold_ratio=threshold_ratio,
+        limits=limits,
+        show_xlabel=false,
+    )
+    add_paper_style_panel!(
+        fig,
+        2,
+        "Corrected",
+        pam_hasa,
+        kgrid,
+        cfg,
+        clusters;
+        color=RGBf(1.0, 0.28, 0.04),
+        threshold_ratio=threshold_ratio,
+        limits=limits,
+        show_xlabel=true,
+    )
+    rowgap!(fig.layout, 8)
     save(path, fig)
 end
 
@@ -272,7 +533,7 @@ cfg_base = PAMConfig(
     success_tolerance=parse(Float64, opts["success-tolerance-mm"]) * 1e-3,
 )
 
-clusters, cluster_meta = parse_clusters(opts, cfg_base.c0)
+clusters, cluster_meta = parse_clusters(opts, cfg_base)
 
 aberrator = parse_aberrator(opts["aberrator"])
 cfg = fit_pam_config(
@@ -285,7 +546,7 @@ cfg = fit_pam_config(
 out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
     opts["out-dir"]
 else
-    default_output_dir(opts, clusters, cfg)
+    default_output_dir(opts, clusters, cfg, cluster_meta)
 end
 mkpath(out_dir)
 
@@ -316,6 +577,9 @@ else
     sort(unique(Float64[n * cluster_meta["fundamental_hz"] for n in cluster_meta["harmonics"]]))
 end
 recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
+analysis_mode = parse_analysis_mode(opts["analysis-mode"], parse_cluster_model(opts["cluster-model"]))
+peak_method = Symbol(lowercase(strip(opts["peak-method"])))
+peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
 
 results = run_pam_case(
     c,
@@ -325,6 +589,13 @@ results = run_pam_case(
     frequencies=recon_frequencies,
     bandwidth=recon_bandwidth_hz,
     use_gpu=parse_bool(opts["use-gpu"]),
+    analysis_mode=analysis_mode,
+    peak_method=peak_method,
+    clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
+    clean_max_iter=parse(Int, opts["clean-max-iter"]),
+    clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
+    detection_truth_radius=parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
+    detection_threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
 )
 
 save_overview(
@@ -333,8 +604,20 @@ save_overview(
     results[:kgrid], cfg, clusters, results[:stats_geo], results[:stats_hasa],
 )
 
+paper_style_path = joinpath(out_dir, "paper_style.png")
+save_paper_style_detection(
+    paper_style_path,
+    results[:pam_geo],
+    results[:pam_hasa],
+    results[:kgrid],
+    cfg,
+    clusters;
+    threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
+)
+
 summary = Dict(
     "out_dir" => out_dir,
+    "paper_style_figure" => paper_style_path,
     "clusters" => [Dict(
         "depth_m" => cl.depth,
         "lateral_m" => cl.lateral,
@@ -366,6 +649,13 @@ summary = Dict(
     "medium" => medium_summary,
     "reconstruction_frequencies_hz" => recon_frequencies,
     "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
+    "analysis_mode" => String(analysis_mode),
+    "detection_truth_radius_m" => parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
+    "detection_threshold_ratio" => parse(Float64, opts["detection-threshold-ratio"]),
+    "peak_method" => String(peak_method),
+    "clean_loop_gain" => parse(Float64, opts["clean-loop-gain"]),
+    "clean_max_iter" => parse(Int, opts["clean-max-iter"]),
+    "clean_threshold_ratio" => parse(Float64, opts["clean-threshold-ratio"]),
     "simulation" => Dict(
         "receiver_row" => results[:simulation][:receiver_row],
         "receiver_cols" => [first(results[:simulation][:receiver_cols]), last(results[:simulation][:receiver_cols])],

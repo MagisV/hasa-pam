@@ -27,6 +27,282 @@ end
 _emission_frequencies(src::PointSource2D) = Float64[src.frequency]
 _emission_frequencies(src::BubbleCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
 
+function _geometric_drive_phase(
+    depth::Real,
+    lateral::Real,
+    tx_depth::Real,
+    tx_lateral::Real,
+    harmonic::Integer,
+    fundamental::Real,
+    c0::Real,
+)
+    distance = hypot(Float64(depth) - Float64(tx_depth), Float64(lateral) - Float64(tx_lateral))
+    return -2π * Int(harmonic) * Float64(fundamental) * distance / Float64(c0)
+end
+
+function _normalize_cluster_phase_mode(phase_mode)
+    mode = Symbol(lowercase(string(phase_mode)))
+    mode in (:coherent, :geometric, :random, :jittered) ||
+        error("Unknown phase_mode: $phase_mode (expected coherent, geometric, random, or jittered).")
+    return mode
+end
+
+function _cluster_harmonic_phases(
+    depth::Real,
+    lateral::Real,
+    harmonics::AbstractVector{<:Integer},
+    fundamental::Real,
+    c0::Real,
+    phase_mode::Symbol,
+    tx_depth::Real,
+    tx_lateral::Real,
+    phase_jitter::Real,
+    rng::Random.AbstractRNG,
+)
+    phases = Vector{Float64}(undef, length(harmonics))
+    for (idx, harmonic) in pairs(harmonics)
+        base = if phase_mode in (:geometric, :jittered)
+            _geometric_drive_phase(depth, lateral, tx_depth, tx_lateral, harmonic, fundamental, c0)
+        elseif phase_mode == :random
+            2π * rand(rng)
+        else
+            0.0
+        end
+        if phase_mode == :jittered
+            base += randn(rng) * Float64(phase_jitter)
+        end
+        phases[idx] = base
+    end
+    return phases
+end
+
+function _vascular_tree_segments(
+    anchor_depth::Real,
+    anchor_lateral::Real;
+    root_length::Real,
+    branch_levels::Integer,
+    branch_angle::Real,
+    branch_scale::Real,
+)
+    root_half = Float64(root_length) / 2
+    root = (
+        Float64(anchor_depth) - root_half,
+        Float64(anchor_lateral),
+        Float64(anchor_depth) + root_half,
+        Float64(anchor_lateral),
+    )
+    segments = [root]
+    active = [root]
+
+    for _ in 1:Int(branch_levels)
+        next_active = typeof(root)[]
+        for segment in active
+            d0, l0, d1, l1 = segment
+            vd = d1 - d0
+            vl = l1 - l0
+            parent_len = hypot(vd, vl)
+            parent_len > eps(Float64) || continue
+            base_angle = atan(vl, vd)
+            child_len = parent_len * Float64(branch_scale)
+
+            for (side, t) in zip((-1.0, 1.0), (0.35, 0.65))
+                branch_depth = d0 + t * vd
+                branch_lateral = l0 + t * vl
+                angle = base_angle + side * Float64(branch_angle)
+                child = (
+                    branch_depth,
+                    branch_lateral,
+                    branch_depth + child_len * cos(angle),
+                    branch_lateral + child_len * sin(angle),
+                )
+                push!(segments, child)
+                push!(next_active, child)
+            end
+        end
+        active = next_active
+    end
+
+    return segments
+end
+
+function _within_bounds(point::Tuple{Float64, Float64}, depth_bounds, lateral_bounds)
+    depth, lateral = point
+    return depth_bounds[1] <= depth <= depth_bounds[2] &&
+           lateral_bounds[1] <= lateral <= lateral_bounds[2]
+end
+
+function _far_enough(point::Tuple{Float64, Float64}, points::AbstractVector{<:Tuple}, min_separation::Real)
+    sep = Float64(min_separation)
+    sep <= 0 && return true
+    for other in points
+        hypot(point[1] - other[1], point[2] - other[2]) >= sep || return false
+    end
+    return true
+end
+
+function _sample_vascular_segments(
+    segments::AbstractVector{<:Tuple};
+    source_spacing::Real,
+    position_jitter::Real,
+    min_separation::Real,
+    depth_bounds::Tuple{<:Real, <:Real},
+    lateral_bounds::Tuple{<:Real, <:Real},
+    max_sources::Union{Nothing, Integer},
+    rng::Random.AbstractRNG,
+)
+    spacing = Float64(source_spacing)
+    spacing > 0 || error("source_spacing must be positive.")
+
+    points = Tuple{Float64, Float64}[]
+    for segment in segments
+        d0, l0, d1, l1 = segment
+        seg_len = hypot(d1 - d0, l1 - l0)
+        seg_len > eps(Float64) || continue
+        n = max(2, ceil(Int, seg_len / spacing) + 1)
+        for idx in 1:n
+            t = n == 1 ? 0.0 : (idx - 1) / (n - 1)
+            depth = d0 + t * (d1 - d0)
+            lateral = l0 + t * (l1 - l0)
+            if position_jitter > 0
+                jitter = Float64(position_jitter)
+                depth += randn(rng) * jitter
+                lateral += randn(rng) * jitter
+            end
+            point = (depth, lateral)
+            _within_bounds(point, depth_bounds, lateral_bounds) || continue
+            _far_enough(point, points, min_separation) || continue
+            push!(points, point)
+        end
+    end
+
+    if !isnothing(max_sources) && length(points) > Int(max_sources)
+        maxn = Int(max_sources)
+        maxn > 0 || error("max_sources must be positive when provided.")
+        keep = unique(round.(Int, range(1, length(points); length=maxn)))
+        points = points[keep]
+    end
+
+    return points
+end
+
+"""
+    make_vascular_bubble_clusters(anchors; kwargs...)
+
+Generate many small `BubbleCluster2D` emitters along a deterministic branching
+2D vessel-like tree rooted at each `(depth, lateral)` anchor. This is intended
+for aggregate simulations where the truth is a spatial activity region rather
+than a small number of named point targets.
+"""
+function make_vascular_bubble_clusters(
+    anchors::AbstractVector{<:Tuple};
+    root_length::Real=12e-3,
+    branch_levels::Integer=2,
+    branch_angle::Real=30π / 180,
+    branch_scale::Real=0.65,
+    source_spacing::Real=0.8e-3,
+    position_jitter::Real=0.15e-3,
+    min_separation::Real=0.3e-3,
+    max_sources_per_anchor::Union{Nothing, Integer}=nothing,
+    depth_bounds::Tuple{<:Real, <:Real}=(0.0, Inf),
+    lateral_bounds::Tuple{<:Real, <:Real}=(-Inf, Inf),
+    fundamental::Real=5e5,
+    amplitude::Real=1.0,
+    n_bubbles::Real=1.0,
+    harmonics::AbstractVector{<:Integer}=[2, 3],
+    harmonic_amplitudes::AbstractVector{<:Real}=[1.0, 0.6],
+    gate_duration::Real=50e-6,
+    taper_ratio::Real=0.25,
+    delay::Real=0.0,
+    phase_mode=:geometric,
+    phase_jitter::Real=0.2,
+    transducer_depth::Real=-30e-3,
+    transducer_lateral::Real=0.0,
+    c0::Real=1500.0,
+    rng::Random.AbstractRNG=Random.default_rng(),
+)
+    isempty(anchors) && error("At least one vascular anchor is required.")
+    harmonics_i = Int.(harmonics)
+    isempty(harmonics_i) && error("harmonics must be non-empty.")
+    harmonic_amplitudes_f = Float64.(harmonic_amplitudes)
+    length(harmonic_amplitudes_f) == length(harmonics_i) ||
+        error("harmonic_amplitudes must have the same length as harmonics.")
+    mode = _normalize_cluster_phase_mode(phase_mode)
+
+    clusters = BubbleCluster2D[]
+    all_segments = Tuple{Float64, Float64, Float64, Float64}[]
+    source_count_by_anchor = Int[]
+    anchor_pairs = [(Float64(anchor[1]), Float64(anchor[2])) for anchor in anchors]
+
+    for (anchor_depth, anchor_lateral) in anchor_pairs
+        segments = _vascular_tree_segments(
+            anchor_depth,
+            anchor_lateral;
+            root_length=root_length,
+            branch_levels=branch_levels,
+            branch_angle=branch_angle,
+            branch_scale=branch_scale,
+        )
+        append!(all_segments, segments)
+        points = _sample_vascular_segments(
+            segments;
+            source_spacing=source_spacing,
+            position_jitter=position_jitter,
+            min_separation=min_separation,
+            depth_bounds=(Float64(depth_bounds[1]), Float64(depth_bounds[2])),
+            lateral_bounds=(Float64(lateral_bounds[1]), Float64(lateral_bounds[2])),
+            max_sources=max_sources_per_anchor,
+            rng=rng,
+        )
+        push!(source_count_by_anchor, length(points))
+
+        for (depth, lateral) in points
+            phases = _cluster_harmonic_phases(
+                depth,
+                lateral,
+                harmonics_i,
+                fundamental,
+                c0,
+                mode,
+                transducer_depth,
+                transducer_lateral,
+                phase_jitter,
+                rng,
+            )
+            push!(clusters, BubbleCluster2D(
+                depth=depth,
+                lateral=lateral,
+                fundamental=Float64(fundamental),
+                amplitude=Float64(amplitude),
+                n_bubbles=Float64(n_bubbles),
+                harmonics=copy(harmonics_i),
+                harmonic_amplitudes=copy(harmonic_amplitudes_f),
+                harmonic_phases=phases,
+                gate_duration=Float64(gate_duration),
+                taper_ratio=Float64(taper_ratio),
+                delay=Float64(delay),
+            ))
+        end
+    end
+
+    isempty(clusters) && error("Vascular cluster generation produced no sources inside the requested bounds.")
+    meta = Dict{Symbol, Any}(
+        :cluster_model => :vascular,
+        :anchors => anchor_pairs,
+        :root_length => Float64(root_length),
+        :branch_levels => Int(branch_levels),
+        :branch_angle => Float64(branch_angle),
+        :branch_scale => Float64(branch_scale),
+        :source_spacing => Float64(source_spacing),
+        :position_jitter => Float64(position_jitter),
+        :min_separation => Float64(min_separation),
+        :max_sources_per_anchor => isnothing(max_sources_per_anchor) ? nothing : Int(max_sources_per_anchor),
+        :source_count_by_anchor => source_count_by_anchor,
+        :segments => all_segments,
+        :phase_mode => mode,
+    )
+    return clusters, meta
+end
+
 Base.@kwdef struct PAMConfig
     dx::Float64 = 0.2e-3
     dz::Float64 = 0.2e-3
@@ -551,6 +827,279 @@ function find_pam_peaks(
     return peaks
 end
 
+function _default_psf_widths(
+    cfg::PAMConfig,
+    kgrid::KGrid2D,
+    frequencies::Union{Nothing, AbstractVector{<:Real}};
+    characteristic_depth::Real=30e-3,
+)
+    aperture = something(cfg.receiver_aperture, kgrid.Ny * cfg.dz)
+    depth = max(Float64(characteristic_depth), 2 * cfg.dx)
+
+    freqs = isnothing(frequencies) || isempty(frequencies) ? nothing : Float64.(frequencies)
+    if isnothing(freqs)
+        # Fallback: assume one wavelength worth of structure
+        lambda = cfg.c0 / 5e5
+        lateral = lambda * depth / aperture
+        axial = 2 * lambda * (depth / aperture)^2
+        return max(axial, 2 * cfg.dx), max(lateral, 2 * cfg.dz)
+    end
+
+    f_max = maximum(freqs)
+    f_min = minimum(freqs)
+    lambda_min = cfg.c0 / f_max
+    bw = f_max - f_min
+
+    lateral = lambda_min * depth / aperture
+    axial = if bw > 0
+        cfg.c0 / (2 * bw)
+    else
+        2 * lambda_min * (depth / aperture)^2
+    end
+    return max(axial, 2 * cfg.dx), max(lateral, 2 * cfg.dz)
+end
+
+"""
+    find_pam_peaks_clean(intensity, kgrid, cfg; n_peaks, frequencies=nothing,
+                         psf_axial_fwhm=nothing, psf_lateral_fwhm=nothing,
+                         loop_gain=0.1, max_iter=500, threshold_ratio=1e-2,
+                         suppression_radius=nothing)
+
+Iterative CLEAN (Högbom) peak detector for PAM intensity maps. Each iteration
+finds the brightest residual pixel, adds `loop_gain * peak` to the accumulator,
+and subtracts a scaled Gaussian PSF from the residual. The `n_peaks` brightest
+maxima in the accumulator are returned. If `suppression_radius` is not given,
+it defaults to the lateral PSF FWHM, which lets sources as close as one PSF
+width apart be resolved distinctly.
+"""
+function find_pam_peaks_clean(
+    intensity::AbstractMatrix{<:Real},
+    kgrid::KGrid2D,
+    cfg::PAMConfig;
+    n_peaks::Integer,
+    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    psf_axial_fwhm::Union{Nothing, Real}=nothing,
+    psf_lateral_fwhm::Union{Nothing, Real}=nothing,
+    loop_gain::Real=0.1,
+    max_iter::Integer=500,
+    threshold_ratio::Real=1e-2,
+    suppression_radius::Union{Nothing, Real}=nothing,
+)
+    0 < loop_gain <= 1 || error("loop_gain must lie in (0, 1].")
+    n_peaks > 0 || error("n_peaks must be positive.")
+
+    residual = copy(Float64.(intensity))
+    row_start = receiver_row(cfg) + 1
+    row_stop = size(residual, 1)
+    row_start <= row_stop || error("No valid reconstruction rows remain.")
+    residual[1:(row_start - 1), :] .= -Inf
+    if row_stop < size(residual, 1)
+        residual[(row_stop + 1):end, :] .= -Inf
+    end
+
+    ax_fwhm, lat_fwhm = if isnothing(psf_axial_fwhm) || isnothing(psf_lateral_fwhm)
+        _default_psf_widths(cfg, kgrid, frequencies)
+    else
+        Float64(psf_axial_fwhm), Float64(psf_lateral_fwhm)
+    end
+    ax_fwhm = something(psf_axial_fwhm, ax_fwhm)
+    lat_fwhm = something(psf_lateral_fwhm, lat_fwhm)
+
+    σ_ax_cells = max(1.0, Float64(ax_fwhm) / (cfg.dx * 2.3548))
+    σ_lat_cells = max(1.0, Float64(lat_fwhm) / (cfg.dz * 2.3548))
+    half_ax = max(1, ceil(Int, 3 * σ_ax_cells))
+    half_lat = max(1, ceil(Int, 3 * σ_lat_cells))
+
+    finite_mask = isfinite.(residual)
+    any(finite_mask) || return Tuple{Int, Int}[]
+    peak_init = maximum(residual[finite_mask])
+    peak_init > 0 || return Tuple{Int, Int}[]
+    threshold = peak_init * Float64(threshold_ratio)
+
+    accum = zeros(Float64, size(residual))
+    nx, ny = size(residual)
+
+    for _ in 1:Int(max_iter)
+        idx = Tuple(argmax(residual))
+        pv = residual[idx...]
+        (!isfinite(pv) || pv < threshold) && break
+
+        scale = Float64(loop_gain) * pv
+        r0, c0 = idx
+        accum[r0, c0] += scale
+
+        r1 = max(1, r0 - half_ax)
+        r2 = min(nx, r0 + half_ax)
+        c1 = max(1, c0 - half_lat)
+        c2 = min(ny, c0 + half_lat)
+        @inbounds for r in r1:r2
+            dr = (r - r0) / σ_ax_cells
+            for c in c1:c2
+                dc = (c - c0) / σ_lat_cells
+                weight = exp(-0.5 * (dr^2 + dc^2))
+                residual[r, c] -= scale * weight
+            end
+        end
+    end
+
+    sup_radius = isnothing(suppression_radius) ? Float64(lat_fwhm) : Float64(suppression_radius)
+    return find_pam_peaks(accum, kgrid, cfg; n_peaks=n_peaks, suppression_radius=sup_radius)
+end
+
+function pam_truth_mask(
+    sources::AbstractVector{<:EmissionSource2D},
+    kgrid::KGrid2D,
+    cfg::PAMConfig;
+    radius::Real=cfg.success_tolerance,
+)
+    radius_m = Float64(radius)
+    radius_m >= 0 || error("truth-mask radius must be non-negative.")
+
+    mask = falses(kgrid.Nx, kgrid.Ny)
+    depth = depth_coordinates(kgrid, cfg)
+    lateral = kgrid.y_vec
+    radius2 = radius_m^2
+    row_radius = ceil(Int, radius_m / cfg.dx)
+    col_radius = ceil(Int, radius_m / cfg.dz)
+
+    for src in sources
+        row0, col0 = source_grid_index(src, cfg, kgrid)
+        row_start = max(receiver_row(cfg) + 1, row0 - row_radius)
+        row_stop = min(kgrid.Nx, row0 + row_radius)
+        col_start = max(1, col0 - col_radius)
+        col_stop = min(kgrid.Ny, col0 + col_radius)
+        @inbounds for row in row_start:row_stop
+            dd = depth[row] - src.depth
+            for col in col_start:col_stop
+                dl = lateral[col] - src.lateral
+                if dd^2 + dl^2 <= radius2
+                    mask[row, col] = true
+                end
+            end
+        end
+    end
+
+    return mask
+end
+
+function threshold_pam_map(
+    intensity::AbstractMatrix{<:Real},
+    cfg::PAMConfig;
+    threshold_ratio::Real=0.2,
+)
+    ratio = Float64(threshold_ratio)
+    ratio > 0 || error("threshold_ratio must be positive.")
+    work = Float64.(intensity)
+    ref = maximum(work)
+    ref > 0 || return falses(size(work))
+
+    mask = work .>= (ratio * ref)
+    mask[1:receiver_row(cfg), :] .= false
+    return mask
+end
+
+function _component_overlap_counts(mask::BitMatrix, reference::BitMatrix)
+    size(mask) == size(reference) || error("Component masks must have the same size.")
+    rows, cols = size(mask)
+    visited = falses(rows, cols)
+    total = 0
+    overlapping = 0
+
+    for row in 1:rows, col in 1:cols
+        (mask[row, col] && !visited[row, col]) || continue
+        total += 1
+        touches_reference = false
+        queue = [(row, col)]
+        visited[row, col] = true
+
+        while !isempty(queue)
+            current = popfirst!(queue)
+            i, j = current
+            touches_reference |= reference[i, j]
+            for (di, dj) in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                ii = i + di
+                jj = j + dj
+                if 1 <= ii <= rows && 1 <= jj <= cols && mask[ii, jj] && !visited[ii, jj]
+                    visited[ii, jj] = true
+                    push!(queue, (ii, jj))
+                end
+            end
+        end
+
+        overlapping += touches_reference ? 1 : 0
+    end
+
+    return total, overlapping, total - overlapping
+end
+
+_safe_fraction(num::Real, den::Real) = den > 0 ? Float64(num) / Float64(den) : 0.0
+
+function analyse_pam_detection_2d(
+    intensity::AbstractMatrix{<:Real},
+    kgrid::KGrid2D,
+    cfg::PAMConfig,
+    sources::AbstractVector{<:EmissionSource2D};
+    truth_radius::Real=cfg.success_tolerance,
+    threshold_ratio::Real=0.2,
+)
+    isempty(sources) && error("At least one emission source is required for PAM detection analysis.")
+    truth = pam_truth_mask(sources, kgrid, cfg; radius=truth_radius)
+    predicted = threshold_pam_map(intensity, cfg; threshold_ratio=threshold_ratio)
+
+    tp = count(predicted .& truth)
+    fp = count(predicted .& (.!truth))
+    fn = count((.!predicted) .& truth)
+    tn = length(predicted) - tp - fp - fn
+
+    precision = _safe_fraction(tp, tp + fp)
+    recall = _safe_fraction(tp, tp + fn)
+    f1 = (precision + recall) > 0 ? 2 * precision * recall / (precision + recall) : 0.0
+    dice = _safe_fraction(2 * tp, 2 * tp + fp + fn)
+    jaccard = _safe_fraction(tp, tp + fp + fn)
+
+    prediction_components, matched_prediction_components, spurious_prediction_components =
+        _component_overlap_counts(predicted, truth)
+    truth_components, recovered_truth_components, missed_truth_components =
+        _component_overlap_counts(truth, predicted)
+
+    pixel_area_mm2 = cfg.dx * cfg.dz * 1e6
+    max_idx = Tuple(argmax(Float64.(intensity)))
+    depth = depth_coordinates(kgrid, cfg)
+    lateral = kgrid.y_vec
+    max_intensity = maximum(Float64.(intensity))
+
+    return Dict{Symbol, Any}(
+        :truth_mm => [(src.depth * 1e3, src.lateral * 1e3) for src in sources],
+        :num_truth_sources => length(sources),
+        :truth_radius_mm => Float64(truth_radius) * 1e3,
+        :threshold_ratio => Float64(threshold_ratio),
+        :threshold_db => 10 * log10(Float64(threshold_ratio)),
+        :true_positive_pixels => tp,
+        :false_positive_pixels => fp,
+        :false_negative_pixels => fn,
+        :true_negative_pixels => tn,
+        :precision => precision,
+        :recall => recall,
+        :f1 => f1,
+        :dice => dice,
+        :jaccard => jaccard,
+        :truth_area_mm2 => count(truth) * pixel_area_mm2,
+        :predicted_area_mm2 => count(predicted) * pixel_area_mm2,
+        :overlap_area_mm2 => tp * pixel_area_mm2,
+        :false_positive_area_mm2 => fp * pixel_area_mm2,
+        :false_negative_area_mm2 => fn * pixel_area_mm2,
+        :prediction_components => prediction_components,
+        :matched_prediction_components => matched_prediction_components,
+        :spurious_prediction_components => spurious_prediction_components,
+        :truth_components => truth_components,
+        :recovered_truth_components => recovered_truth_components,
+        :missed_truth_components => missed_truth_components,
+        :peak_mm => (depth[max_idx[1]] * 1e3, lateral[max_idx[2]] * 1e3),
+        :peak_intensity => Float64(intensity[max_idx...]),
+        :max_intensity => max_intensity,
+    )
+end
+
 function analyse_pam_2d(
     intensity::AbstractMatrix{<:Real},
     kgrid::KGrid2D,
@@ -559,11 +1108,34 @@ function analyse_pam_2d(
     n_peaks::Union{Nothing, Integer}=nothing,
     success_tolerance::Real=cfg.success_tolerance,
     suppression_radius::Real=cfg.peak_suppression_radius,
+    peak_method::Symbol=:argmax,
+    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    clean_loop_gain::Real=0.1,
+    clean_max_iter::Integer=500,
+    clean_threshold_ratio::Real=1e-2,
+    clean_psf_axial_fwhm::Union{Nothing, Real}=nothing,
+    clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
 )
     n_truth = length(sources)
     n_truth > 0 || error("At least one emission source is required for PAM analysis.")
     n_find = isnothing(n_peaks) ? n_truth : Int(n_peaks)
-    peaks = find_pam_peaks(intensity, kgrid, cfg; n_peaks=n_find, suppression_radius=suppression_radius)
+    peaks = if peak_method == :clean
+        find_pam_peaks_clean(
+            intensity, kgrid, cfg;
+            n_peaks=n_find,
+            frequencies=frequencies,
+            psf_axial_fwhm=clean_psf_axial_fwhm,
+            psf_lateral_fwhm=clean_psf_lateral_fwhm,
+            loop_gain=clean_loop_gain,
+            max_iter=clean_max_iter,
+            threshold_ratio=clean_threshold_ratio,
+            suppression_radius=nothing,
+        )
+    elseif peak_method == :argmax
+        find_pam_peaks(intensity, kgrid, cfg; n_peaks=n_find, suppression_radius=suppression_radius)
+    else
+        error("Unknown peak_method: $peak_method (expected :argmax or :clean).")
+    end
     length(peaks) == n_truth || error("Expected to recover $n_truth peaks, found $(length(peaks)).")
 
     depth = depth_coordinates(kgrid, cfg)
@@ -722,14 +1294,47 @@ function run_pam_case(
     frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
     bandwidth::Real=0.0,
     use_gpu::Bool=false,
+    analysis_mode::Symbol=:localization,
+    peak_method::Symbol=:argmax,
+    clean_loop_gain::Real=0.1,
+    clean_max_iter::Integer=500,
+    clean_threshold_ratio::Real=1e-2,
+    clean_psf_axial_fwhm::Union{Nothing, Real}=nothing,
+    clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
+    detection_truth_radius::Real=cfg.success_tolerance,
+    detection_threshold_ratio::Real=0.2,
 )
     recon_freqs = isnothing(frequencies) ? _default_recon_frequencies(sources) : Float64.(frequencies)
     rf, kgrid, sim_info = simulate_point_sources(c, rho, sources, cfg; use_gpu=use_gpu)
     pam_geo, _, geo_info = reconstruct_pam(rf, c, cfg; frequencies=recon_freqs, bandwidth=bandwidth, corrected=false)
     pam_hasa, _, hasa_info = reconstruct_pam(rf, c, cfg; frequencies=recon_freqs, bandwidth=bandwidth, corrected=true)
 
-    stats_geo = analyse_pam_2d(pam_geo, kgrid, cfg, sources)
-    stats_hasa = analyse_pam_2d(pam_hasa, kgrid, cfg, sources)
+    stats_geo, stats_hasa = if analysis_mode == :localization
+        analyse_kwargs = (
+            peak_method=peak_method,
+            frequencies=recon_freqs,
+            clean_loop_gain=clean_loop_gain,
+            clean_max_iter=clean_max_iter,
+            clean_threshold_ratio=clean_threshold_ratio,
+            clean_psf_axial_fwhm=clean_psf_axial_fwhm,
+            clean_psf_lateral_fwhm=clean_psf_lateral_fwhm,
+        )
+        (
+            analyse_pam_2d(pam_geo, kgrid, cfg, sources; analyse_kwargs...),
+            analyse_pam_2d(pam_hasa, kgrid, cfg, sources; analyse_kwargs...),
+        )
+    elseif analysis_mode == :detection
+        analyse_kwargs = (
+            truth_radius=detection_truth_radius,
+            threshold_ratio=detection_threshold_ratio,
+        )
+        (
+            analyse_pam_detection_2d(pam_geo, kgrid, cfg, sources; analyse_kwargs...),
+            analyse_pam_detection_2d(pam_hasa, kgrid, cfg, sources; analyse_kwargs...),
+        )
+    else
+        error("Unknown analysis_mode: $analysis_mode (expected :localization or :detection).")
+    end
 
     return Dict{Symbol, Any}(
         :rf => rf,
@@ -742,6 +1347,7 @@ function run_pam_case(
         :stats_geo => stats_geo,
         :stats_hasa => stats_hasa,
         :reconstruction_frequencies => recon_freqs,
+        :analysis_mode => analysis_mode,
     )
 end
 

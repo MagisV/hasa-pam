@@ -190,26 +190,30 @@ Both scripts generate an `outputs/...` directory name automatically from the mai
 
 ## Passive Acoustic Mapping
 
-The PAM path implements a 2D passive reconstruction workflow based on simple point emitters:
+The PAM path implements a 2D passive reconstruction workflow based on simple point emitters and denser bubble-cluster activity:
 
 - forward propagation simulated with `k-wave-python`
 - geometric ASA reconstruction
 - corrected HASA reconstruction
 - localization and image-quality metrics such as axial, lateral, and radial error, FWHM, peak intensity, and success rate
+- thresholded detection metrics for dense aggregate cases, including precision, recall, F1, false-positive area, and false-negative area
 
 Core types:
 
 - `PointSource2D`
+- `BubbleCluster2D`
 - `PAMConfig`
 
 Key helpers:
 
 - `fit_pam_config`
+- `make_vascular_bubble_clusters`
 - `make_pam_medium`
 - `simulate_point_sources`
 - `reconstruct_pam`
 - `find_pam_peaks`
 - `analyse_pam_2d`
+- `analyse_pam_detection_2d`
 - `run_pam_case`
 - `run_pam_sweep`
 
@@ -266,10 +270,17 @@ julia --project=. scripts/run_pam_case.jl \
   --aberrator=lens
 ```
 
-With a skull and three point sources placed inside:
+Vascular-like bubble aggregate with skull correction. `--clusters-mm` gives one or more vascular anchors; each anchor expands into many small harmonic bubble emitters along a branching 2D vessel-like tree. The default aggregate analysis mode is detection, so `summary.json` reports precision/recall-style map recovery instead of one distance error per cluster.
+
 ```bash
 julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=45:-6,54:0,59:8 \
+  --clusters-mm=54:0 \
+  --cluster-model=vascular \
+  --vascular-length-mm=12 \
+  --vascular-branch-levels=2 \
+  --vascular-source-spacing-mm=0.8 \
+  --vascular-radius-mm=1.0 \
+  --detection-threshold-ratio=0.2 \
   --fundamental-mhz=0.5 \
   --harmonics=2,3 \
   --harmonic-amplitudes=1.0,0.6 \
@@ -278,9 +289,12 @@ julia --project=. scripts/run_pam_clusters.jl \
   --aberrator=skull
 ```
 
-`run_pam_case.jl` writes:
+The one-emitter-per-aggregate behavior is available with `--cluster-model=point --analysis-mode=localization`.
+
+The PAM run scripts write:
 
 - `overview.png`
+- `paper_style.png` for cluster runs, with stacked uncorrected/corrected detection scatter panels
 - `summary.json`
 - `result.jld2`
 
@@ -367,6 +381,7 @@ The tests currently cover:
 - HU-to-medium conversion
 - skull boundary detection and masking
 - focusing placement resolution
+- vascular PAM source generation and detection metrics
 - PAM medium fitting and skull placement
 - PAM sweep aggregation and target filtering
 - opt-in k-Wave smoke tests

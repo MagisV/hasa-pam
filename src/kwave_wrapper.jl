@@ -188,13 +188,25 @@ function simulate_point_sources(
     indexed_sources = [(source_grid_index(src, cfg, kgrid), src) for src in sources]
     sort!(indexed_sources; by=entry -> first(entry)[1] + (first(entry)[2] - 1) * nx)
 
+    grouped_sources = Vector{Tuple{Tuple{Int, Int}, Vector{EmissionSource2D}}}()
+    for (grid_index, src) in indexed_sources
+        if !isempty(grouped_sources) && first(last(grouped_sources)) == grid_index
+            push!(last(grouped_sources)[2], src)
+        else
+            push!(grouped_sources, (grid_index, EmissionSource2D[src]))
+        end
+    end
+
     source = mods.ksource.kSource()
     src_mask = _py_bool_matrix(np, nx, ny)
-    source_signals = Matrix{Float64}(undef, length(indexed_sources), nt)
+    source_signals = Matrix{Float64}(undef, length(grouped_sources), nt)
     source_indices = Tuple{Int, Int}[]
-    for (idx, ((row, col), src)) in pairs(indexed_sources)
+    for (idx, ((row, col), cell_sources)) in pairs(grouped_sources)
         src_mask[row - 1, col - 1] = true
-        source_signals[idx, :] .= _source_signal(nt, cfg.dt, src)
+        source_signals[idx, :] .= 0.0
+        for src in cell_sources
+            source_signals[idx, :] .+= _source_signal(nt, cfg.dt, src)
+        end
         push!(source_indices, (row, col))
     end
     source.p_mask = src_mask
@@ -246,6 +258,8 @@ function simulate_point_sources(
         :receiver_row => row,
         :receiver_cols => col_range,
         :source_indices => source_indices,
+        :num_input_sources => length(sources),
+        :num_source_points => length(grouped_sources),
     )
     return rf, kgrid, info
 end
