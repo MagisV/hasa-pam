@@ -212,6 +212,7 @@ Key helpers:
 - `simulate_point_sources`
 - `reconstruct_pam`
 - `find_pam_peaks`
+- `pam_centerline_truth_mask`
 - `analyse_pam_2d`
 - `analyse_pam_detection_2d`
 - `run_pam_case`
@@ -272,15 +273,17 @@ julia --project=. scripts/run_pam_case.jl \
   --aberrator=lens
 ```
 
-Vascular-like bubble aggregate with skull correction. `--clusters-mm` gives one or more vascular anchors; each anchor expands into many small harmonic bubble emitters along a branching 2D vessel-like tree. The default aggregate analysis mode is detection, so `summary.json` reports precision/recall-style map recovery instead of one distance error per cluster.
+Vascular-like bubble aggregate with skull correction. `--clusters-mm` gives one or more vascular anchors; each anchor expands into many small harmonic bubble emitters along a paper-like squiggly vessel by default. The default aggregate analysis mode is detection, so `summary.json` reports precision/recall-style map recovery instead of one distance error per cluster. Squiggle and bundle topologies use a continuous centerline tube truth mask for detection; `--vascular-topology=tree` keeps the older branching stress case.
 Cluster runs default to an 80 mm axial domain so activity below the skull is not clipped near 60 mm; override with `--axial-mm=...` if needed. The reconstruction reference speed is averaged over the receiver-to-source region, so extra trailing axial padding does not change the correction.
 
 ```bash
 julia --project=. scripts/run_pam_clusters.jl \
   --clusters-mm=54:0 \
   --cluster-model=vascular \
+  --vascular-topology=squiggle \
   --vascular-length-mm=12 \
-  --vascular-branch-levels=2 \
+  --vascular-squiggle-amplitude-mm=1.5 \
+  --vascular-squiggle-wavelength-mm=8 \
   --vascular-source-spacing-mm=0.8 \
   --vascular-radius-mm=1.0 \
   --detection-threshold-ratio=0.2 \
@@ -291,6 +294,8 @@ julia --project=. scripts/run_pam_clusters.jl \
   --phase-mode=geometric \
   --aberrator=skull
 ```
+
+Use `--vascular-topology=bundle --vascular-bundle-count=3 --vascular-bundle-spacing-mm=2.0` for a small set of parallel squiggly vessels, or `--vascular-topology=tree --vascular-branch-levels=2` for the previous branching model.
 
 The one-emitter-per-aggregate behavior is available with `--cluster-model=point --analysis-mode=localization`.
 

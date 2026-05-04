@@ -47,6 +47,13 @@ function _normalize_cluster_phase_mode(phase_mode)
     return mode
 end
 
+function _normalize_vascular_topology(topology)
+    mode = Symbol(lowercase(string(topology)))
+    mode in (:squiggle, :bundle, :tree) ||
+        error("Unknown vascular topology: $topology (expected squiggle, bundle, or tree).")
+    return mode
+end
+
 function _cluster_harmonic_phases(
     depth::Real,
     lateral::Real,
@@ -185,20 +192,175 @@ function _sample_vascular_segments(
     return points
 end
 
+function _squiggle_centerline(
+    anchor_depth::Real,
+    anchor_lateral::Real;
+    root_length::Real,
+    amplitude::Real,
+    wavelength::Real,
+    slope::Real,
+    axial_offset::Real=0.0,
+    source_spacing::Real=0.8e-3,
+)
+    length_m = Float64(root_length)
+    length_m > 0 || error("root_length must be positive.")
+    wavelength_m = Float64(wavelength)
+    wavelength_m > 0 || error("squiggle_wavelength must be positive.")
+    spacing = Float64(source_spacing)
+    spacing > 0 || error("source_spacing must be positive.")
+
+    n = max(16, ceil(Int, length_m / (spacing / 2)) + 1)
+    half = length_m / 2
+    points = Tuple{Float64, Float64}[]
+    for x in range(-half, half; length=n)
+        lateral = Float64(anchor_lateral) + x
+        depth = Float64(anchor_depth) + Float64(axial_offset) +
+                Float64(slope) * x +
+                Float64(amplitude) * sin(2π * x / wavelength_m)
+        push!(points, (depth, lateral))
+    end
+    return points
+end
+
+function _vascular_centerlines(
+    anchor_depth::Real,
+    anchor_lateral::Real;
+    topology::Symbol,
+    root_length::Real,
+    squiggle_amplitude::Real,
+    squiggle_wavelength::Real,
+    squiggle_slope::Real,
+    bundle_count::Integer,
+    bundle_spacing::Real,
+    source_spacing::Real,
+)
+    if topology == :squiggle
+        return [
+            _squiggle_centerline(
+                anchor_depth,
+                anchor_lateral;
+                root_length=root_length,
+                amplitude=squiggle_amplitude,
+                wavelength=squiggle_wavelength,
+                slope=squiggle_slope,
+                source_spacing=source_spacing,
+            ),
+        ]
+    elseif topology == :bundle
+        count = Int(bundle_count)
+        count > 0 || error("bundle_count must be positive.")
+        spacing = Float64(bundle_spacing)
+        spacing >= 0 || error("bundle_spacing must be non-negative.")
+        center = (count + 1) / 2
+        return [
+            _squiggle_centerline(
+                anchor_depth,
+                anchor_lateral;
+                root_length=root_length,
+                amplitude=squiggle_amplitude,
+                wavelength=squiggle_wavelength,
+                slope=squiggle_slope,
+                axial_offset=(idx - center) * spacing,
+                source_spacing=source_spacing,
+            )
+            for idx in 1:count
+        ]
+    end
+    error("_vascular_centerlines only supports squiggle and bundle topologies.")
+end
+
+function _interp_centerline_point(centerline::AbstractVector{<:Tuple}, distance::Real)
+    length(centerline) >= 2 || error("Centerline must contain at least two points.")
+    remaining = Float64(distance)
+    for idx in 1:(length(centerline) - 1)
+        d0, l0 = centerline[idx]
+        d1, l1 = centerline[idx + 1]
+        sd = d1 - d0
+        sl = l1 - l0
+        seg_len = hypot(sd, sl)
+        seg_len > eps(Float64) || continue
+        if remaining <= seg_len || idx == length(centerline) - 1
+            t = clamp(remaining / seg_len, 0.0, 1.0)
+            depth = d0 + t * sd
+            lateral = l0 + t * sl
+            return depth, lateral, sd / seg_len, sl / seg_len
+        end
+        remaining -= seg_len
+    end
+    d0, l0 = centerline[end - 1]
+    d1, l1 = centerline[end]
+    seg_len = max(hypot(d1 - d0, l1 - l0), eps(Float64))
+    return d1, l1, (d1 - d0) / seg_len, (l1 - l0) / seg_len
+end
+
+function _sample_vascular_centerlines(
+    centerlines::AbstractVector;
+    source_spacing::Real,
+    position_jitter::Real,
+    min_separation::Real,
+    depth_bounds::Tuple{<:Real, <:Real},
+    lateral_bounds::Tuple{<:Real, <:Real},
+    max_sources::Union{Nothing, Integer},
+    rng::Random.AbstractRNG,
+)
+    spacing = Float64(source_spacing)
+    spacing > 0 || error("source_spacing must be positive.")
+    points = Tuple{Float64, Float64}[]
+
+    for centerline in centerlines
+        length(centerline) >= 2 || continue
+        total_len = 0.0
+        for idx in 1:(length(centerline) - 1)
+            d0, l0 = centerline[idx]
+            d1, l1 = centerline[idx + 1]
+            total_len += hypot(d1 - d0, l1 - l0)
+        end
+        total_len > eps(Float64) || continue
+        n = max(2, ceil(Int, total_len / spacing) + 1)
+        for distance in range(0.0, total_len; length=n)
+            depth, lateral, tangent_d, tangent_l = _interp_centerline_point(centerline, distance)
+            if position_jitter > 0
+                jitter = randn(rng) * Float64(position_jitter)
+                depth += -tangent_l * jitter
+                lateral += tangent_d * jitter
+            end
+            point = (depth, lateral)
+            _within_bounds(point, depth_bounds, lateral_bounds) || continue
+            _far_enough(point, points, min_separation) || continue
+            push!(points, point)
+        end
+    end
+
+    if !isnothing(max_sources) && length(points) > Int(max_sources)
+        maxn = Int(max_sources)
+        maxn > 0 || error("max_sources must be positive when provided.")
+        keep = unique(round.(Int, range(1, length(points); length=maxn)))
+        points = points[keep]
+    end
+
+    return points
+end
+
 """
     make_vascular_bubble_clusters(anchors; kwargs...)
 
-Generate many small `BubbleCluster2D` emitters along a deterministic branching
-2D vessel-like tree rooted at each `(depth, lateral)` anchor. This is intended
-for aggregate simulations where the truth is a spatial activity region rather
-than a small number of named point targets.
+Generate many small `BubbleCluster2D` emitters along a deterministic 2D
+vessel-like topology rooted at each `(depth, lateral)` anchor. The default
+topology is a paper-like squiggly horizontal vessel; the original branching
+tree remains available via `topology=:tree`.
 """
 function make_vascular_bubble_clusters(
     anchors::AbstractVector{<:Tuple};
+    topology=:squiggle,
     root_length::Real=12e-3,
     branch_levels::Integer=2,
     branch_angle::Real=30π / 180,
     branch_scale::Real=0.65,
+    squiggle_amplitude::Real=1.5e-3,
+    squiggle_wavelength::Real=8e-3,
+    squiggle_slope::Real=0.0,
+    bundle_count::Integer=3,
+    bundle_spacing::Real=2e-3,
     source_spacing::Real=0.8e-3,
     position_jitter::Real=0.15e-3,
     min_separation::Real=0.3e-3,
@@ -227,32 +389,60 @@ function make_vascular_bubble_clusters(
     length(harmonic_amplitudes_f) == length(harmonics_i) ||
         error("harmonic_amplitudes must have the same length as harmonics.")
     mode = _normalize_cluster_phase_mode(phase_mode)
+    vessel_topology = _normalize_vascular_topology(topology)
 
     clusters = BubbleCluster2D[]
     all_segments = Tuple{Float64, Float64, Float64, Float64}[]
+    all_centerlines = Vector{Tuple{Float64, Float64}}[]
     source_count_by_anchor = Int[]
     anchor_pairs = [(Float64(anchor[1]), Float64(anchor[2])) for anchor in anchors]
 
     for (anchor_depth, anchor_lateral) in anchor_pairs
-        segments = _vascular_tree_segments(
-            anchor_depth,
-            anchor_lateral;
-            root_length=root_length,
-            branch_levels=branch_levels,
-            branch_angle=branch_angle,
-            branch_scale=branch_scale,
-        )
-        append!(all_segments, segments)
-        points = _sample_vascular_segments(
-            segments;
-            source_spacing=source_spacing,
-            position_jitter=position_jitter,
-            min_separation=min_separation,
-            depth_bounds=(Float64(depth_bounds[1]), Float64(depth_bounds[2])),
-            lateral_bounds=(Float64(lateral_bounds[1]), Float64(lateral_bounds[2])),
-            max_sources=max_sources_per_anchor,
-            rng=rng,
-        )
+        points = if vessel_topology == :tree
+            segments = _vascular_tree_segments(
+                anchor_depth,
+                anchor_lateral;
+                root_length=root_length,
+                branch_levels=branch_levels,
+                branch_angle=branch_angle,
+                branch_scale=branch_scale,
+            )
+            append!(all_segments, segments)
+            _sample_vascular_segments(
+                segments;
+                source_spacing=source_spacing,
+                position_jitter=position_jitter,
+                min_separation=min_separation,
+                depth_bounds=(Float64(depth_bounds[1]), Float64(depth_bounds[2])),
+                lateral_bounds=(Float64(lateral_bounds[1]), Float64(lateral_bounds[2])),
+                max_sources=max_sources_per_anchor,
+                rng=rng,
+            )
+        else
+            centerlines = _vascular_centerlines(
+                anchor_depth,
+                anchor_lateral;
+                topology=vessel_topology,
+                root_length=root_length,
+                squiggle_amplitude=squiggle_amplitude,
+                squiggle_wavelength=squiggle_wavelength,
+                squiggle_slope=squiggle_slope,
+                bundle_count=bundle_count,
+                bundle_spacing=bundle_spacing,
+                source_spacing=source_spacing,
+            )
+            append!(all_centerlines, centerlines)
+            _sample_vascular_centerlines(
+                centerlines;
+                source_spacing=source_spacing,
+                position_jitter=position_jitter,
+                min_separation=min_separation,
+                depth_bounds=(Float64(depth_bounds[1]), Float64(depth_bounds[2])),
+                lateral_bounds=(Float64(lateral_bounds[1]), Float64(lateral_bounds[2])),
+                max_sources=max_sources_per_anchor,
+                rng=rng,
+            )
+        end
         push!(source_count_by_anchor, length(points))
 
         for (depth, lateral) in points
@@ -287,17 +477,24 @@ function make_vascular_bubble_clusters(
     isempty(clusters) && error("Vascular cluster generation produced no sources inside the requested bounds.")
     meta = Dict{Symbol, Any}(
         :cluster_model => :vascular,
+        :topology => vessel_topology,
         :anchors => anchor_pairs,
         :root_length => Float64(root_length),
         :branch_levels => Int(branch_levels),
         :branch_angle => Float64(branch_angle),
         :branch_scale => Float64(branch_scale),
+        :squiggle_amplitude => Float64(squiggle_amplitude),
+        :squiggle_wavelength => Float64(squiggle_wavelength),
+        :squiggle_slope => Float64(squiggle_slope),
+        :bundle_count => Int(bundle_count),
+        :bundle_spacing => Float64(bundle_spacing),
         :source_spacing => Float64(source_spacing),
         :position_jitter => Float64(position_jitter),
         :min_separation => Float64(min_separation),
         :max_sources_per_anchor => isnothing(max_sources_per_anchor) ? nothing : Int(max_sources_per_anchor),
         :source_count_by_anchor => source_count_by_anchor,
         :segments => all_segments,
+        :centerlines => all_centerlines,
         :phase_mode => mode,
     )
     return clusters, meta
@@ -1013,6 +1210,66 @@ function pam_truth_mask(
     return mask
 end
 
+function _mark_centerline_segment!(
+    mask::BitMatrix,
+    depth::AbstractVector{<:Real},
+    lateral::AbstractVector{<:Real},
+    cfg::PAMConfig,
+    d0::Real,
+    l0::Real,
+    d1::Real,
+    l1::Real,
+    radius_m::Real,
+)
+    dd = Float64(d1) - Float64(d0)
+    dl = Float64(l1) - Float64(l0)
+    seg_len2 = dd^2 + dl^2
+    radius2 = Float64(radius_m)^2
+    row_pad = ceil(Int, Float64(radius_m) / cfg.dx) + 1
+    col_pad = ceil(Int, Float64(radius_m) / cfg.dz) + 1
+    row_min = clamp(searchsortedfirst(depth, min(Float64(d0), Float64(d1)) - Float64(radius_m)) - row_pad, receiver_row(cfg) + 1, length(depth))
+    row_max = clamp(searchsortedlast(depth, max(Float64(d0), Float64(d1)) + Float64(radius_m)) + row_pad, receiver_row(cfg) + 1, length(depth))
+    col_min = clamp(searchsortedfirst(lateral, min(Float64(l0), Float64(l1)) - Float64(radius_m)) - col_pad, 1, length(lateral))
+    col_max = clamp(searchsortedlast(lateral, max(Float64(l0), Float64(l1)) + Float64(radius_m)) + col_pad, 1, length(lateral))
+
+    @inbounds for row in row_min:row_max
+        pd = Float64(depth[row])
+        for col in col_min:col_max
+            pl = Float64(lateral[col])
+            t = seg_len2 <= eps(Float64) ? 0.0 : clamp(((pd - Float64(d0)) * dd + (pl - Float64(l0)) * dl) / seg_len2, 0.0, 1.0)
+            nearest_d = Float64(d0) + t * dd
+            nearest_l = Float64(l0) + t * dl
+            if (pd - nearest_d)^2 + (pl - nearest_l)^2 <= radius2
+                mask[row, col] = true
+            end
+        end
+    end
+    return mask
+end
+
+function pam_centerline_truth_mask(
+    centerlines::AbstractVector,
+    kgrid::KGrid2D,
+    cfg::PAMConfig;
+    radius::Real=cfg.success_tolerance,
+)
+    radius_m = Float64(radius)
+    radius_m >= 0 || error("centerline truth-mask radius must be non-negative.")
+    mask = falses(kgrid.Nx, kgrid.Ny)
+    depth = depth_coordinates(kgrid, cfg)
+    lateral = kgrid.y_vec
+
+    for centerline in centerlines
+        length(centerline) >= 2 || continue
+        for idx in 1:(length(centerline) - 1)
+            d0, l0 = centerline[idx]
+            d1, l1 = centerline[idx + 1]
+            _mark_centerline_segment!(mask, depth, lateral, cfg, d0, l0, d1, l1, radius_m)
+        end
+    end
+    return mask
+end
+
 function threshold_pam_map(
     intensity::AbstractMatrix{<:Real},
     cfg::PAMConfig;
@@ -1125,9 +1382,16 @@ function analyse_pam_detection_2d(
     sources::AbstractVector{<:EmissionSource2D};
     truth_radius::Real=cfg.success_tolerance,
     threshold_ratio::Real=0.2,
+    truth_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
 )
     isempty(sources) && error("At least one emission source is required for PAM detection analysis.")
-    truth = pam_truth_mask(sources, kgrid, cfg; radius=truth_radius)
+    truth = if isnothing(truth_mask)
+        pam_truth_mask(sources, kgrid, cfg; radius=truth_radius)
+    else
+        size(truth_mask) == (kgrid.Nx, kgrid.Ny) ||
+            error("truth_mask size $(size(truth_mask)) does not match kgrid size ($(kgrid.Nx), $(kgrid.Ny)).")
+        BitMatrix(truth_mask)
+    end
     predicted = threshold_pam_map(intensity, cfg; threshold_ratio=threshold_ratio)
 
     tp = count(predicted .& truth)
@@ -1156,6 +1420,7 @@ function analyse_pam_detection_2d(
         :truth_mm => [(src.depth * 1e3, src.lateral * 1e3) for src in sources],
         :num_truth_sources => length(sources),
         :truth_radius_mm => Float64(truth_radius) * 1e3,
+        :truth_mask_mode => isnothing(truth_mask) ? :source_disks : :provided,
         :threshold_ratio => Float64(threshold_ratio),
         :threshold_db => 10 * log10(Float64(threshold_ratio)),
         :true_positive_pixels => tp,
@@ -1418,6 +1683,7 @@ function run_pam_case(
     clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
     detection_truth_radius::Real=cfg.success_tolerance,
     detection_threshold_ratio::Real=0.2,
+    detection_truth_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
     reconstruction_axial_step::Union{Nothing, Real}=50e-6,
 )
     recon_freqs = isnothing(frequencies) ? _default_recon_frequencies(sources) : Float64.(frequencies)
@@ -1439,6 +1705,7 @@ function run_pam_case(
         clean_psf_lateral_fwhm=clean_psf_lateral_fwhm,
         detection_truth_radius=detection_truth_radius,
         detection_threshold_ratio=detection_threshold_ratio,
+        detection_truth_mask=detection_truth_mask,
         reconstruction_axial_step=reconstruction_axial_step,
     )
     results[:kgrid] = kgrid
@@ -1466,6 +1733,7 @@ function reconstruct_pam_case(
     clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
     detection_truth_radius::Real=cfg.success_tolerance,
     detection_threshold_ratio::Real=0.2,
+    detection_truth_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
     reconstruction_axial_step::Union{Nothing, Real}=50e-6,
 )
     size(c) == (pam_Nx(cfg), pam_Ny(cfg)) ||
@@ -1502,6 +1770,7 @@ function reconstruct_pam_case(
         analyse_kwargs = (
             truth_radius=detection_truth_radius,
             threshold_ratio=detection_threshold_ratio,
+            truth_mask=detection_truth_mask,
         )
         (
             analyse_pam_detection_2d(pam_geo, kgrid, cfg, sources; analyse_kwargs...),

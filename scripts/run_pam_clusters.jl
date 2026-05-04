@@ -52,10 +52,16 @@ function parse_cli(args)
         "transducer-mm" => "-30:0",
         "delays-us" => "0",
         "cluster-model" => "vascular",
+        "vascular-topology" => "squiggle",
         "vascular-length-mm" => "12",
         "vascular-branch-levels" => "2",
         "vascular-branch-angle-deg" => "30",
         "vascular-branch-scale" => "0.65",
+        "vascular-squiggle-amplitude-mm" => "1.5",
+        "vascular-squiggle-wavelength-mm" => "8",
+        "vascular-squiggle-slope" => "0.0",
+        "vascular-bundle-count" => "3",
+        "vascular-bundle-spacing-mm" => "2.0",
         "vascular-source-spacing-mm" => "0.8",
         "vascular-position-jitter-mm" => "0.15",
         "vascular-min-separation-mm" => "0.3",
@@ -106,6 +112,12 @@ function parse_cluster_model(s::AbstractString)
     return value
 end
 
+function parse_vascular_topology(s::AbstractString)
+    value = Symbol(lowercase(strip(s)))
+    value in (:squiggle, :bundle, :tree) || error("--vascular-topology must be squiggle, bundle, or tree, got: $s")
+    return value
+end
+
 function parse_analysis_mode(s::AbstractString, cluster_model::Symbol)
     value = Symbol(lowercase(strip(s)))
     value == :auto && return cluster_model == :vascular ? :detection : :localization
@@ -124,6 +136,9 @@ function parse_transducer_mm(s::AbstractString)
     length(parts) == 2 || error("--transducer-mm must be depth_mm:lateral_mm, got: $s")
     return parse(Float64, strip(parts[1])) * 1e-3, parse(Float64, strip(parts[2])) * 1e-3
 end
+
+point_pairs_m(points) = [[point[1], point[2]] for point in points]
+centerlines_m(centerlines) = [point_pairs_m(line) for line in centerlines]
 
 function expand_cluster_values(values::Vector{Float64}, n::Int, default::Float64)
     isempty(values) && return fill(default, n)
@@ -173,17 +188,25 @@ function parse_clusters(opts, cfg::PAMConfig)
 
     clusters = BubbleCluster2D[]
     vascular_meta_by_anchor = Dict{String, Any}[]
+    all_centerlines_m = Any[]
 
     if cluster_model == :vascular
+        vascular_topology = parse_vascular_topology(opts["vascular-topology"])
         max_sources_per_anchor_raw = parse(Int, opts["vascular-max-sources-per-anchor"])
         max_sources_per_anchor = max_sources_per_anchor_raw <= 0 ? nothing : max_sources_per_anchor_raw
         for (idx, anchor) in pairs(anchors)
             anchor_clusters, anchor_meta = make_vascular_bubble_clusters(
                 [anchor];
+                topology=vascular_topology,
                 root_length=parse(Float64, opts["vascular-length-mm"]) * 1e-3,
                 branch_levels=parse(Int, opts["vascular-branch-levels"]),
                 branch_angle=deg2rad(parse(Float64, opts["vascular-branch-angle-deg"])),
                 branch_scale=parse(Float64, opts["vascular-branch-scale"]),
+                squiggle_amplitude=parse(Float64, opts["vascular-squiggle-amplitude-mm"]) * 1e-3,
+                squiggle_wavelength=parse(Float64, opts["vascular-squiggle-wavelength-mm"]) * 1e-3,
+                squiggle_slope=parse(Float64, opts["vascular-squiggle-slope"]),
+                bundle_count=parse(Int, opts["vascular-bundle-count"]),
+                bundle_spacing=parse(Float64, opts["vascular-bundle-spacing-mm"]) * 1e-3,
                 source_spacing=parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
                 position_jitter=parse(Float64, opts["vascular-position-jitter-mm"]) * 1e-3,
                 min_separation=parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
@@ -206,11 +229,15 @@ function parse_clusters(opts, cfg::PAMConfig)
                 rng=rng,
             )
             append!(clusters, anchor_clusters)
-            push!(vascular_meta_by_anchor, Dict(
+            anchor_centerlines = centerlines_m(anchor_meta[:centerlines])
+            append!(all_centerlines_m, anchor_centerlines)
+            anchor_meta_dict = Dict(
                 "anchor_m" => collect(anchor),
                 "source_count" => length(anchor_clusters),
                 "segments_m" => [collect(segment) for segment in anchor_meta[:segments]],
-            ))
+                "centerlines_m" => anchor_centerlines,
+            )
+            push!(vascular_meta_by_anchor, anchor_meta_dict)
         end
     else
         for (idx, anchor) in pairs(anchors)
@@ -265,15 +292,22 @@ function parse_clusters(opts, cfg::PAMConfig)
     )
     if cluster_model == :vascular
         meta["vascular"] = Dict(
+            "topology" => opts["vascular-topology"],
             "length_m" => parse(Float64, opts["vascular-length-mm"]) * 1e-3,
             "branch_levels" => parse(Int, opts["vascular-branch-levels"]),
             "branch_angle_rad" => deg2rad(parse(Float64, opts["vascular-branch-angle-deg"])),
             "branch_scale" => parse(Float64, opts["vascular-branch-scale"]),
+            "squiggle_amplitude_m" => parse(Float64, opts["vascular-squiggle-amplitude-mm"]) * 1e-3,
+            "squiggle_wavelength_m" => parse(Float64, opts["vascular-squiggle-wavelength-mm"]) * 1e-3,
+            "squiggle_slope" => parse(Float64, opts["vascular-squiggle-slope"]),
+            "bundle_count" => parse(Int, opts["vascular-bundle-count"]),
+            "bundle_spacing_m" => parse(Float64, opts["vascular-bundle-spacing-mm"]) * 1e-3,
             "source_spacing_m" => parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
             "position_jitter_m" => parse(Float64, opts["vascular-position-jitter-mm"]) * 1e-3,
             "min_separation_m" => parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
             "max_sources_per_anchor" => parse(Int, opts["vascular-max-sources-per-anchor"]),
             "truth_radius_m" => parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
+            "centerlines_m" => all_centerlines_m,
             "anchors" => vascular_meta_by_anchor,
         )
     end
@@ -282,11 +316,17 @@ end
 
 function default_output_dir(opts, clusters, cfg, cluster_meta)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
+    cluster_model = lowercase(cluster_meta["cluster_model"])
+    vascular = haskey(cluster_meta, "vascular") ? cluster_meta["vascular"] : Dict{String, Any}()
+    topology = cluster_model == "vascular" ? lowercase(String(get(vascular, "topology", "tree"))) : ""
     parts = String[
         timestamp,
         "run_pam_clusters",
         lowercase(opts["aberrator"]),
-        lowercase(cluster_meta["cluster_model"]),
+        cluster_model,
+    ]
+    !isempty(topology) && push!(parts, topology)
+    append!(parts, String[
         "$(cluster_meta["n_anchor_clusters"])anchors",
         "$(length(clusters))src",
         "f$(slug_value(parse(Float64, opts["fundamental-mhz"]); digits=2))mhz",
@@ -294,7 +334,7 @@ function default_output_dir(opts, clusters, cfg, cluster_meta)
         lowercase(opts["phase-mode"]),
         "ax$(slug_value(cfg.axial_dim * 1e3; digits=0))mm",
         "lat$(slug_value(cfg.transverse_dim * 1e3; digits=0))mm",
-    ]
+    ])
     if lowercase(opts["aberrator"]) == "skull"
         insert!(parts, length(parts), "slice" * opts["slice-index"])
         insert!(parts, length(parts), "st$(slug_value(parse(Float64, opts["skull-transducer-distance-mm"]); digits=1))mm")
@@ -334,6 +374,28 @@ end
 json3_to_any(x) = x
 json3_to_any(x::JSON3.Object) = Dict(String(key) => json3_to_any(value) for (key, value) in pairs(x))
 json3_to_any(x::JSON3.Array) = [json3_to_any(value) for value in x]
+
+function centerlines_from_cluster_meta(cluster_meta)
+    haskey(cluster_meta, "vascular") || return nothing
+    vascular = cluster_meta["vascular"]
+    haskey(vascular, "centerlines_m") || return nothing
+    centerlines = Vector{Tuple{Float64, Float64}}[]
+    for raw_line in vascular["centerlines_m"]
+        line = Tuple{Float64, Float64}[]
+        for point in raw_line
+            length(point) >= 2 || continue
+            push!(line, (Float64(point[1]), Float64(point[2])))
+        end
+        length(line) >= 2 && push!(centerlines, line)
+    end
+    return isempty(centerlines) ? nothing : centerlines
+end
+
+function detection_truth_mask_from_meta(cluster_meta, kgrid, cfg, radius::Real)
+    centerlines = centerlines_from_cluster_meta(cluster_meta)
+    isnothing(centerlines) && return nothing
+    return pam_centerline_truth_mask(centerlines, kgrid, cfg; radius=radius)
+end
 
 function map_db(map::AbstractMatrix{<:Real}, ref::Real)
     safe_ref = max(Float64(ref), eps(Float64))
@@ -505,6 +567,34 @@ function medium_points_mm(c::AbstractMatrix{<:Real}, kgrid, cfg; tol::Real=5.0, 
     return mask_points_mm(medium_mask, kgrid, cfg; max_points=max_points)
 end
 
+function centerline_points_mm(centerlines)
+    isnothing(centerlines) && return Float64[], Float64[]
+    lateral_mm = Float64[]
+    depth_mm = Float64[]
+    for line in centerlines
+        for (depth, lateral) in line
+            push!(lateral_mm, lateral * 1e3)
+            push!(depth_mm, depth * 1e3)
+        end
+    end
+    return lateral_mm, depth_mm
+end
+
+function lines_centerlines!(ax, centerlines; color=(:black, 0.45), linewidth=2)
+    isnothing(centerlines) && return nothing
+    for line in centerlines
+        length(line) >= 2 || continue
+        lines!(
+            ax,
+            [point[2] * 1e3 for point in line],
+            [point[1] * 1e3 for point in line];
+            color=color,
+            linewidth=linewidth,
+        )
+    end
+    return nothing
+end
+
 function nearest_detection_errors_mm(mask::BitMatrix, kgrid, cfg, clusters)
     pred_lateral_mm, pred_depth_mm = mask_points_mm(mask, kgrid, cfg; max_points=typemax(Int))
     isempty(pred_lateral_mm) && return Float64[], Float64[]
@@ -563,6 +653,7 @@ function add_paper_style_panel!(
     threshold_ratio::Real,
     limits,
     show_xlabel::Bool,
+    truth_centerlines=nothing,
 )
     mask = threshold_pam_map(intensity, cfg; threshold_ratio=threshold_ratio)
     pred_lat, pred_depth = mask_points_mm(mask, kgrid, cfg)
@@ -585,6 +676,7 @@ function add_paper_style_panel!(
     ylims!(ax, limits[3], limits[4])
 
     scatter!(ax, medium_lat, medium_depth; color=(:gray70, 0.35), markersize=4, marker=:rect)
+    lines_centerlines!(ax, truth_centerlines; color=(:gray20, 0.55), linewidth=2)
     scatter!(ax, truth_lat, truth_depth; color=(:gray45, 0.75), markersize=5, marker=:rect)
     scatter!(ax, pred_lat, pred_depth; color=(color, 0.85), markersize=6, marker=:circle)
     text!(ax, 0.92, 0.86; text=title, space=:relative, align=(:right, :center), color=color, fontsize=30)
@@ -619,12 +711,13 @@ function add_paper_style_panel!(
     return pred_lat, pred_depth
 end
 
-function save_paper_style_detection(path, c, pam_geo, pam_hasa, kgrid, cfg, clusters; threshold_ratio::Real)
+function save_paper_style_detection(path, c, pam_geo, pam_hasa, kgrid, cfg, clusters; threshold_ratio::Real, truth_centerlines=nothing)
     geo_mask = threshold_pam_map(pam_geo, cfg; threshold_ratio=threshold_ratio)
     hasa_mask = threshold_pam_map(pam_hasa, cfg; threshold_ratio=threshold_ratio)
     geo_points = mask_points_mm(geo_mask, kgrid, cfg)
     hasa_points = mask_points_mm(hasa_mask, kgrid, cfg)
-    limits = pam_panel_limits(clusters, geo_points, hasa_points; min_depth_max_mm=80.0)
+    centerline_points = centerline_points_mm(truth_centerlines)
+    limits = pam_panel_limits(clusters, geo_points, hasa_points, centerline_points; min_depth_max_mm=80.0)
 
     fig = Figure(size=paper_style_figure_size(limits), fontsize=24)
     add_paper_style_panel!(
@@ -640,6 +733,7 @@ function save_paper_style_detection(path, c, pam_geo, pam_hasa, kgrid, cfg, clus
         threshold_ratio=threshold_ratio,
         limits=limits,
         show_xlabel=false,
+        truth_centerlines=truth_centerlines,
     )
     add_paper_style_panel!(
         fig,
@@ -654,6 +748,7 @@ function save_paper_style_detection(path, c, pam_geo, pam_hasa, kgrid, cfg, clus
         threshold_ratio=threshold_ratio,
         limits=limits,
         show_xlabel=true,
+        truth_centerlines=truth_centerlines,
     )
     rowgap!(fig.layout, 8)
     save(path, fig)
@@ -664,6 +759,8 @@ from_run_dir = strip(opts["from-run-dir"])
 recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
 peak_method = Symbol(lowercase(strip(opts["peak-method"])))
 peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
+detection_truth_radius_m = parse(Float64, opts["vascular-radius-mm"]) * 1e-3
+detection_threshold_ratio = parse(Float64, opts["detection-threshold-ratio"])
 
 if isempty(from_run_dir)
     cfg_base = PAMConfig(
@@ -719,6 +816,8 @@ if isempty(from_run_dir)
     end
     cluster_model = parse_cluster_model(opts["cluster-model"])
     analysis_mode = parse_analysis_mode(opts["analysis-mode"], cluster_model)
+    truth_centerlines = centerlines_from_cluster_meta(cluster_meta)
+    detection_truth_mask = detection_truth_mask_from_meta(cluster_meta, pam_grid(cfg), cfg, detection_truth_radius_m)
 
     results = run_pam_case(
         c,
@@ -734,8 +833,9 @@ if isempty(from_run_dir)
         clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
         clean_max_iter=parse(Int, opts["clean-max-iter"]),
         clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
-        detection_truth_radius=parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
-        detection_threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
+        detection_truth_radius=detection_truth_radius_m,
+        detection_threshold_ratio=detection_threshold_ratio,
+        detection_truth_mask=detection_truth_mask,
     )
     reconstruction_source = Dict("mode" => "simulation")
 else
@@ -751,8 +851,10 @@ else
             "lens-depth-mm", "lens-lateral-mm", "lens-axial-radius-mm", "lens-lateral-radius-mm",
             "aberrator-c", "aberrator-rho", "use-gpu", "phase-mode", "phase-jitter-rad",
             "random-seed", "transducer-mm", "delays-us", "cluster-model",
-            "vascular-length-mm", "vascular-branch-levels", "vascular-branch-angle-deg",
-            "vascular-branch-scale", "vascular-source-spacing-mm", "vascular-position-jitter-mm",
+            "vascular-topology", "vascular-length-mm", "vascular-branch-levels", "vascular-branch-angle-deg",
+            "vascular-branch-scale", "vascular-squiggle-amplitude-mm", "vascular-squiggle-wavelength-mm",
+            "vascular-squiggle-slope", "vascular-bundle-count", "vascular-bundle-spacing-mm",
+            "vascular-source-spacing-mm", "vascular-position-jitter-mm",
             "vascular-min-separation-mm", "vascular-max-sources-per-anchor",
         ),
     )
@@ -800,6 +902,8 @@ else
     cached_model = Symbol(String(cluster_meta["cluster_model"]))
     analysis_mode = parse_analysis_mode(opts["analysis-mode"], cached_model)
     simulation_info = haskey(cached_results, :simulation) ? cached_results[:simulation] : default_simulation_info(cfg)
+    truth_centerlines = centerlines_from_cluster_meta(cluster_meta)
+    detection_truth_mask = detection_truth_mask_from_meta(cluster_meta, pam_grid(cfg), cfg, detection_truth_radius_m)
     results = reconstruct_pam_case(
         rf,
         c,
@@ -814,8 +918,9 @@ else
         clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
         clean_max_iter=parse(Int, opts["clean-max-iter"]),
         clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
-        detection_truth_radius=parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
-        detection_threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
+        detection_truth_radius=detection_truth_radius_m,
+        detection_threshold_ratio=detection_threshold_ratio,
+        detection_truth_mask=detection_truth_mask,
     )
     reconstruction_source = Dict(
         "mode" => "cached_rf",
@@ -845,7 +950,7 @@ heatmap_metrics = save_pam_heatmap(
     results[:kgrid],
     cfg,
     clusters;
-    threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
+    threshold_ratio=detection_threshold_ratio,
 )
 
 paper_style_path = joinpath(out_dir, "paper_style.png")
@@ -857,7 +962,8 @@ save_paper_style_detection(
     results[:kgrid],
     cfg,
     clusters;
-    threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
+    threshold_ratio=detection_threshold_ratio,
+    truth_centerlines=truth_centerlines,
 )
 
 summary = Dict(
@@ -900,8 +1006,9 @@ summary = Dict(
     "reconstruction_axial_step_m" => results[:geo_info][:axial_step],
     "reference_sound_speed_m_per_s" => results[:geo_info][:reference_sound_speed],
     "analysis_mode" => String(analysis_mode),
-    "detection_truth_radius_m" => parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
-    "detection_threshold_ratio" => parse(Float64, opts["detection-threshold-ratio"]),
+    "detection_truth_radius_m" => detection_truth_radius_m,
+    "detection_truth_mode" => isnothing(detection_truth_mask) ? "source_disks" : "centerline_tube",
+    "detection_threshold_ratio" => detection_threshold_ratio,
     "peak_method" => String(peak_method),
     "clean_loop_gain" => parse(Float64, opts["clean-loop-gain"]),
     "clean_max_iter" => parse(Int, opts["clean-max-iter"]),

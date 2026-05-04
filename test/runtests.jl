@@ -275,9 +275,45 @@ end
 end
 
 @testset "Vascular bubble clusters" begin
-    rng = Random.MersenneTwister(42)
+    squiggle_clusters, squiggle_meta = make_vascular_bubble_clusters(
+        [(0.03, 0.0)];
+        root_length=12e-3,
+        squiggle_amplitude=1.5e-3,
+        squiggle_wavelength=6e-3,
+        source_spacing=1e-3,
+        position_jitter=0.0,
+        min_separation=0.0,
+        lateral_bounds=(-0.02, 0.02),
+        rng=Random.MersenneTwister(41),
+    )
+
+    @test squiggle_meta[:cluster_model] == :vascular
+    @test squiggle_meta[:topology] == :squiggle
+    @test length(squiggle_meta[:centerlines]) == 1
+    @test maximum(src.lateral for src in squiggle_clusters) - minimum(src.lateral for src in squiggle_clusters) > 10e-3
+    @test maximum(src.depth for src in squiggle_clusters) - minimum(src.depth for src in squiggle_clusters) > 2e-3
+
+    bundle_clusters, bundle_meta = make_vascular_bubble_clusters(
+        [(0.03, 0.0)];
+        topology=:bundle,
+        root_length=12e-3,
+        bundle_count=3,
+        bundle_spacing=2e-3,
+        source_spacing=1e-3,
+        position_jitter=0.0,
+        min_separation=0.0,
+        lateral_bounds=(-0.02, 0.02),
+        rng=Random.MersenneTwister(42),
+    )
+    @test bundle_meta[:topology] == :bundle
+    @test length(bundle_meta[:centerlines]) == 3
+    @test length(bundle_clusters) > length(squiggle_clusters)
+    @test maximum(mean(first.(line)) for line in bundle_meta[:centerlines]) -
+          minimum(mean(first.(line)) for line in bundle_meta[:centerlines]) > 3e-3
+
     clusters, meta = make_vascular_bubble_clusters(
         [(0.03, 0.0)];
+        topology=:tree,
         root_length=8e-3,
         branch_levels=1,
         source_spacing=1e-3,
@@ -285,12 +321,13 @@ end
         min_separation=0.0,
         max_sources_per_anchor=20,
         lateral_bounds=(-0.02, 0.02),
-        rng=rng,
+        rng=Random.MersenneTwister(43),
     )
 
     @test length(clusters) > 8
     @test length(clusters) <= 20
     @test meta[:cluster_model] == :vascular
+    @test meta[:topology] == :tree
     @test meta[:source_count_by_anchor] == [length(clusters)]
     @test maximum(src.depth for src in clusters) > minimum(src.depth for src in clusters)
     @test maximum(abs(src.lateral) for src in clusters) > 0
@@ -331,6 +368,22 @@ end
     @test stats[:false_positive_pixels] > 0
     @test stats[:false_negative_pixels] > 0
     @test stats[:spurious_prediction_components] == 1
+
+    truth_override = falses(kgrid.Nx, kgrid.Ny)
+    truth_override[row_false, col_false] = true
+    override_stats = analyse_pam_detection_2d(
+        intensity,
+        kgrid,
+        cfg,
+        sources;
+        truth_radius=1.0e-3,
+        threshold_ratio=0.5,
+        truth_mask=truth_override,
+    )
+    @test override_stats[:truth_mask_mode] == :provided
+    @test override_stats[:true_positive_pixels] == 1
+    @test override_stats[:false_positive_pixels] == 1
+    @test override_stats[:false_negative_pixels] == 0
 end
 
 @testset "CLEAN peak detection" begin
