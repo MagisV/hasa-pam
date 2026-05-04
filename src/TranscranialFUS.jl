@@ -40,7 +40,7 @@ export make_medium_fixed_distance_from_skull, make_medium_fixed_transducer, make
 export plot_hasa_results, focus, analyse_focus_2d, run_focus_case, kwave_available
 export EmissionSource2D, PointSource2D, BubbleCluster2D, PAMConfig, fit_pam_config, pam_Nx, pam_Ny, pam_Nt, pam_grid, receiver_row, receiver_col_range, depth_coordinates
 export make_vascular_bubble_clusters, make_pam_medium, source_grid_index, simulate_point_sources, reconstruct_pam, find_pam_peaks, find_pam_peaks_clean
-export pam_truth_mask, threshold_pam_map, analyse_pam_2d, analyse_pam_detection_2d, run_pam_case, run_pam_sweep
+export pam_truth_mask, threshold_pam_map, pam_intensity_metrics, analyse_pam_2d, analyse_pam_detection_2d, reconstruct_pam_case, run_pam_case, run_pam_sweep
 
 include("ct.jl")
 include("focus.jl")

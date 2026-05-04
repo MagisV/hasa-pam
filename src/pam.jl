@@ -336,11 +336,41 @@ function _pam_pml_guard(cfg::PAMConfig)
     return cfg.PML_GUARD
 end
 
+_source_duration(src::PointSource2D) = src.num_cycles / src.frequency
+_source_duration(src::BubbleCluster2D) = src.gate_duration
+
+function _pam_axial_substeps(dx::Real, axial_step::Real)
+    ratio = Float64(dx) / Float64(axial_step)
+    nearest = round(Int, ratio)
+    if isapprox(ratio, nearest; rtol=1e-9, atol=1e-12)
+        return max(1, nearest)
+    end
+    return max(1, ceil(Int, ratio))
+end
+
+function _required_pam_t_max(
+    cfg::PAMConfig,
+    sources::AbstractVector{<:EmissionSource2D};
+    time_margin::Real=10e-6,
+)
+    isempty(sources) && return 0.0
+    kgrid = pam_grid(cfg)
+    receiver_laterals = kgrid.y_vec[receiver_col_range(cfg)]
+    required_t = 0.0
+    for src in sources
+        max_receiver_offset = maximum(abs.(receiver_laterals .- src.lateral))
+        latest_arrival = src.delay + hypot(src.depth, max_receiver_offset) / cfg.c0
+        required_t = max(required_t, latest_arrival + _source_duration(src))
+    end
+    return required_t + Float64(time_margin)
+end
+
 function fit_pam_config(
     cfg::PAMConfig,
     sources::AbstractVector{<:EmissionSource2D};
     min_bottom_margin::Real=10e-3,
     reference_depth::Union{Nothing, Real}=nothing,
+    time_margin::Real=10e-6,
 )
     deepest_source_depth = isempty(sources) ? 0.0 : maximum(src.depth for src in sources)
     deepest_required = max(
@@ -350,8 +380,9 @@ function fit_pam_config(
     required_rows = receiver_row(cfg) + round(Int, deepest_required / cfg.dx)
     target_rows = max(pam_Nx(cfg), required_rows)
     target_axial_dim = target_rows * cfg.dx
+    target_t_max = max(cfg.t_max, _required_pam_t_max(cfg, sources; time_margin=time_margin))
 
-    target_rows == pam_Nx(cfg) && return cfg
+    target_rows == pam_Nx(cfg) && target_t_max == cfg.t_max && return cfg
     return PAMConfig(
         dx=cfg.dx,
         dz=cfg.dz,
@@ -359,7 +390,7 @@ function fit_pam_config(
         transverse_dim=cfg.transverse_dim,
         receiver_aperture=cfg.receiver_aperture,
         receiver_row=cfg.receiver_row,
-        t_max=cfg.t_max,
+        t_max=target_t_max,
         dt=cfg.dt,
         c0=cfg.c0,
         rho0=cfg.rho0,
@@ -998,6 +1029,59 @@ function threshold_pam_map(
     return mask
 end
 
+function pam_intensity_metrics(
+    intensity::AbstractMatrix{<:Real},
+    kgrid::KGrid2D,
+    cfg::PAMConfig;
+    threshold_ratio::Real=0.2,
+    reference_intensity::Union{Nothing, Real}=nothing,
+)
+    size(intensity) == (kgrid.Nx, kgrid.Ny) ||
+        error("PAM intensity size $(size(intensity)) does not match kgrid size ($(kgrid.Nx), $(kgrid.Ny)).")
+    ratio = Float64(threshold_ratio)
+    ratio > 0 || error("threshold_ratio must be positive.")
+
+    work = Float64.(intensity)
+    peak = maximum(work)
+    ref = isnothing(reference_intensity) ? peak : Float64(reference_intensity)
+    ref = max(ref, eps(Float64))
+    local_threshold = ratio * max(peak, eps(Float64))
+    shared_threshold = ratio * ref
+
+    active = work .>= local_threshold
+    active[1:receiver_row(cfg), :] .= false
+    shared_active = work .>= shared_threshold
+    shared_active[1:receiver_row(cfg), :] .= false
+
+    depth = depth_coordinates(kgrid, cfg)
+    lateral = kgrid.y_vec
+    active_idxs = findall(active)
+    centroid_depth_mm = NaN
+    centroid_lateral_mm = NaN
+    if !isempty(active_idxs)
+        weight_sum = sum(work[idx] for idx in active_idxs)
+        if weight_sum > 0
+            centroid_depth_mm = sum(work[idx] * depth[idx[1]] for idx in active_idxs) / weight_sum * 1e3
+            centroid_lateral_mm = sum(work[idx] * lateral[idx[2]] for idx in active_idxs) / weight_sum * 1e3
+        end
+    end
+
+    pixel_area_mm2 = cfg.dx * cfg.dz * 1e6
+    max_idx = Tuple(argmax(work))
+    return Dict{Symbol, Any}(
+        :peak_intensity => peak,
+        :relative_peak_intensity => peak / ref,
+        :integrated_intensity_m2 => sum(work) * cfg.dx * cfg.dz,
+        :threshold_ratio => ratio,
+        :active_area_mm2 => count(active) * pixel_area_mm2,
+        :shared_scale_active_area_mm2 => count(shared_active) * pixel_area_mm2,
+        :centroid_depth_mm => centroid_depth_mm,
+        :centroid_lateral_mm => centroid_lateral_mm,
+        :peak_depth_mm => depth[max_idx[1]] * 1e3,
+        :peak_lateral_mm => lateral[max_idx[2]] * 1e3,
+    )
+end
+
 function _component_overlap_counts(mask::BitMatrix, reference::BitMatrix)
     size(mask) == size(reference) || error("Component masks must have the same size.")
     rows, cols = size(mask)
@@ -1204,6 +1288,8 @@ function reconstruct_pam(
     frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
     bandwidth::Real=0.0,
     corrected::Bool=true,
+    reference_sound_speed::Union{Nothing, Real}=nothing,
+    axial_step::Union{Nothing, Real}=nothing,
 )
     nx, ny = size(c)
     size(rf, 1) == ny || error("RF data must have size (Ny, Nt); expected Ny=$ny, got $(size(rf, 1)).")
@@ -1217,6 +1303,12 @@ function reconstruct_pam(
     padded_ny = cfg.zero_pad_factor > 1 ? cfg.zero_pad_factor * ny : ny
     _, crop_range = _zero_pad_receiver_rf(rf, padded_ny)
     c_padded, _ = _edge_pad_lateral(c, padded_ny)
+    c0 = isnothing(reference_sound_speed) ? mean(c_padded) : Float64(reference_sound_speed)
+    c0 > 0 || error("reference_sound_speed must be positive.")
+    target_axial_step = isnothing(axial_step) ? cfg.dx : Float64(axial_step)
+    0 < target_axial_step <= cfg.dx || error("axial_step must lie in (0, cfg.dx].")
+    axial_substeps = _pam_axial_substeps(cfg.dx, target_axial_step)
+    effective_axial_step = cfg.dx / axial_substeps
     intensity_padded = zeros(Float64, nx, padded_ny)
     row_stop = nx
     row_stop > rr || error("No valid reconstruction rows remain below the receiver row.")
@@ -1226,13 +1318,15 @@ function reconstruct_pam(
         p0_padded, _ = _zero_pad_receiver_rf(reshape(p0, ny, 1), padded_ny)
         p0_vec = vec(p0_padded[:, 1])
 
-        c0 = mean(c_padded)
         k0 = 2π * freq / c0
         k = _fft_wavenumbers(padded_ny, cfg.dz)
         kz = sqrt.(complex.(k0^2 .- k .^ 2, 0.0))
-        propagator = exp.(1im .* kz .* cfg.dx)
+        propagator = exp.(1im .* kz .* effective_axial_step)
 
         real_inds = findall(real.(kz ./ k0) .> 0.0)
+        propagating = falses(padded_ny)
+        propagating[real_inds] .= true
+        evanescent_inds = findall(x -> !x, propagating)
         weighting = zeros(Float64, padded_ny)
         weighting[real_inds] .= _tukey_window(length(real_inds), cfg.tukey_ratio)
 
@@ -1245,21 +1339,25 @@ function reconstruct_pam(
         correction = zeros(ComplexF64, padded_ny)
         for idx in real_inds
             abs(kz[idx]) > sqrt(eps(Float64)) || continue
-            correction[idx] = propagator[idx] * cfg.dx / (2im * kz[idx])
+            correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
         end
 
         for row in (rr + 1):row_stop
-            if corrected
-                p_space = ifft(_ifftshift(current))
-                conv_term = _fftshift(fft(lambda[row, :] .* p_space))
-                next = current .* propagator
-                next .+= correction .* conv_term
-            else
-                next = current .* propagator
+            for _ in 1:axial_substeps
+                if corrected
+                    p_space = ifft(_ifftshift(current))
+                    conv_term = _fftshift(fft(lambda[row, :] .* p_space))
+                    next = current .* propagator
+                    next .+= correction .* conv_term
+                else
+                    next = current .* propagator
+                end
+                next[evanescent_inds] .= 0.0
+                current = next
             end
-            next[setdiff(eachindex(next), real_inds)] .= 0.0
-            next .*= weighting
-            current = next
+            # Taper once per reconstruction row to suppress long-range numerical
+            # growth without making damping depend on substep count.
+            current .*= weighting
 
             p_row = ifft(_ifftshift(current))
             intensity_padded[row, :] .+= abs2.(p_row)
@@ -1274,6 +1372,9 @@ function reconstruct_pam(
         :corrected => corrected,
         :receiver_row => rr,
         :crop_range => crop_range,
+        :reference_sound_speed => c0,
+        :axial_step => effective_axial_step,
+        :axial_substeps_per_cell => axial_substeps,
     )
     return intensity, kgrid, info
 end
@@ -1284,6 +1385,20 @@ function _default_recon_frequencies(sources::AbstractVector{<:EmissionSource2D})
         append!(all_freqs, _emission_frequencies(src))
     end
     return sort(unique(all_freqs))
+end
+
+function _pam_reference_sound_speed(
+    c::AbstractMatrix{<:Real},
+    cfg::PAMConfig,
+    sources::AbstractVector{<:EmissionSource2D};
+    margin::Real=10e-3,
+)
+    isempty(sources) && return mean(Float64.(c))
+    row_start = clamp(receiver_row(cfg), 1, size(c, 1))
+    deepest_source_depth = maximum(src.depth for src in sources)
+    row_stop = row_start + ceil(Int, (deepest_source_depth + Float64(margin)) / cfg.dx)
+    row_stop = clamp(row_stop, row_start, size(c, 1))
+    return mean(Float64.(view(c, row_start:row_stop, :)))
 end
 
 function run_pam_case(
@@ -1303,11 +1418,71 @@ function run_pam_case(
     clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
     detection_truth_radius::Real=cfg.success_tolerance,
     detection_threshold_ratio::Real=0.2,
+    reconstruction_axial_step::Union{Nothing, Real}=50e-6,
 )
     recon_freqs = isnothing(frequencies) ? _default_recon_frequencies(sources) : Float64.(frequencies)
     rf, kgrid, sim_info = simulate_point_sources(c, rho, sources, cfg; use_gpu=use_gpu)
-    pam_geo, _, geo_info = reconstruct_pam(rf, c, cfg; frequencies=recon_freqs, bandwidth=bandwidth, corrected=false)
-    pam_hasa, _, hasa_info = reconstruct_pam(rf, c, cfg; frequencies=recon_freqs, bandwidth=bandwidth, corrected=true)
+    results = reconstruct_pam_case(
+        rf,
+        c,
+        sources,
+        cfg;
+        simulation_info=sim_info,
+        frequencies=recon_freqs,
+        bandwidth=bandwidth,
+        analysis_mode=analysis_mode,
+        peak_method=peak_method,
+        clean_loop_gain=clean_loop_gain,
+        clean_max_iter=clean_max_iter,
+        clean_threshold_ratio=clean_threshold_ratio,
+        clean_psf_axial_fwhm=clean_psf_axial_fwhm,
+        clean_psf_lateral_fwhm=clean_psf_lateral_fwhm,
+        detection_truth_radius=detection_truth_radius,
+        detection_threshold_ratio=detection_threshold_ratio,
+        reconstruction_axial_step=reconstruction_axial_step,
+    )
+    results[:kgrid] = kgrid
+    return results
+end
+
+function reconstruct_pam_case(
+    rf::AbstractMatrix{<:Real},
+    c::AbstractMatrix{<:Real},
+    sources::AbstractVector{<:EmissionSource2D},
+    cfg::PAMConfig;
+    simulation_info::AbstractDict=Dict{Symbol, Any}(
+        :receiver_row => receiver_row(cfg),
+        :receiver_cols => receiver_col_range(cfg),
+        :source_indices => Tuple{Int, Int}[],
+    ),
+    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    bandwidth::Real=0.0,
+    analysis_mode::Symbol=:localization,
+    peak_method::Symbol=:argmax,
+    clean_loop_gain::Real=0.1,
+    clean_max_iter::Integer=500,
+    clean_threshold_ratio::Real=1e-2,
+    clean_psf_axial_fwhm::Union{Nothing, Real}=nothing,
+    clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
+    detection_truth_radius::Real=cfg.success_tolerance,
+    detection_threshold_ratio::Real=0.2,
+    reconstruction_axial_step::Union{Nothing, Real}=50e-6,
+)
+    size(c) == (pam_Nx(cfg), pam_Ny(cfg)) ||
+        error("Sound-speed map size $(size(c)) does not match PAMConfig size ($(pam_Nx(cfg)), $(pam_Ny(cfg))).")
+    size(rf, 1) == pam_Ny(cfg) ||
+        error("RF data must have $(pam_Ny(cfg)) receiver rows; got $(size(rf, 1)).")
+
+    recon_freqs = isnothing(frequencies) ? _default_recon_frequencies(sources) : Float64.(frequencies)
+    reference_sound_speed = _pam_reference_sound_speed(c, cfg, sources)
+    recon_kwargs = (
+        frequencies=recon_freqs,
+        bandwidth=bandwidth,
+        reference_sound_speed=reference_sound_speed,
+        axial_step=reconstruction_axial_step,
+    )
+    pam_geo, kgrid, geo_info = reconstruct_pam(rf, c, cfg; recon_kwargs..., corrected=false)
+    pam_hasa, _, hasa_info = reconstruct_pam(rf, c, cfg; recon_kwargs..., corrected=true)
 
     stats_geo, stats_hasa = if analysis_mode == :localization
         analyse_kwargs = (
@@ -1337,9 +1512,9 @@ function run_pam_case(
     end
 
     return Dict{Symbol, Any}(
-        :rf => rf,
+        :rf => Float64.(rf),
         :kgrid => kgrid,
-        :simulation => sim_info,
+        :simulation => Dict{Symbol, Any}(Symbol(key) => value for (key, value) in simulation_info),
         :pam_geo => pam_geo,
         :pam_hasa => pam_hasa,
         :geo_info => geo_info,

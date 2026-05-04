@@ -4,6 +4,7 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
 using Dates
+using Printf
 using Random
 using CairoMakie
 using JLD2
@@ -40,6 +41,7 @@ function parse_cli(args)
         "aberrator-rho" => "1150",
         "use-gpu" => "false",
         "recon-bandwidth-khz" => "0",
+        "recon-step-um" => "50",
         "phase-mode" => "coherent",
         "phase-jitter-rad" => "0.2",
         "random-seed" => "0",
@@ -47,15 +49,18 @@ function parse_cli(args)
         "clean-loop-gain" => "0.1",
         "clean-max-iter" => "500",
         "clean-threshold-ratio" => "0.01",
+        "from-run-dir" => "",
     )
 
+    provided_keys = Set{String}()
     for arg in args
         startswith(arg, "--") || error("Unsupported argument format: $arg")
         parts = split(arg[3:end], "="; limit=2)
         length(parts) == 2 || error("Arguments must use --name=value, got: $arg")
+        push!(provided_keys, parts[1])
         opts[parts[1]] = parts[2]
     end
-    return opts
+    return opts, provided_keys
 end
 
 slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
@@ -168,6 +173,27 @@ function default_output_dir(opts, sources, cfg)
     return joinpath(pwd(), "outputs", join(parts, "_"))
 end
 
+function default_reconstruction_output_dir(source_dir::AbstractString)
+    timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
+    source_name = basename(normpath(source_dir))
+    return joinpath(pwd(), "outputs", "$(timestamp)_reconstruct_$(source_name)")
+end
+
+function reject_cached_simulation_options!(provided_keys::Set{String}, blocked_keys)
+    illegal = sort(collect(intersect(provided_keys, Set(blocked_keys))))
+    isempty(illegal) && return nothing
+    formatted = join(["--$key" for key in illegal], ", ")
+    error("--from-run-dir reuses the previous RF simulation, medium, sources, and grid. Remove simulation-specific option(s): $formatted")
+end
+
+function default_simulation_info(cfg::PAMConfig)
+    return Dict{Symbol, Any}(
+        :receiver_row => receiver_row(cfg),
+        :receiver_cols => receiver_col_range(cfg),
+        :source_indices => Tuple{Int, Int}[],
+    )
+end
+
 function map_db(map::AbstractMatrix{<:Real}, ref::Real)
     safe_ref = max(Float64(ref), eps(Float64))
     return 10 .* log10.(max.(Float64.(map), eps(Float64)) ./ safe_ref)
@@ -265,79 +291,229 @@ function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, sources, stat
     save(path, fig)
 end
 
-opts = parse_cli(ARGS)
-sources = parse_sources(opts)
-cfg = PAMConfig(
-    dx=parse(Float64, opts["dx-mm"]) * 1e-3,
-    dz=parse(Float64, opts["dz-mm"]) * 1e-3,
-    axial_dim=parse(Float64, opts["axial-mm"]) * 1e-3,
-    transverse_dim=parse(Float64, opts["transverse-mm"]) * 1e-3,
-    receiver_aperture=parse_receiver_aperture_mm(opts["receiver-aperture-mm"]),
-    t_max=parse(Float64, opts["t-max-us"]) * 1e-6,
-    dt=parse(Float64, opts["dt-ns"]) * 1e-9,
-    zero_pad_factor=parse(Int, opts["zero-pad-factor"]),
-    peak_suppression_radius=parse(Float64, opts["peak-suppression-radius-mm"]) * 1e-3,
-    success_tolerance=parse(Float64, opts["success-tolerance-mm"]) * 1e-3,
-)
+format_sci(value::Real) = @sprintf("%.2e", Float64(value))
 
-aberrator = parse_aberrator(opts["aberrator"])
-cfg = fit_pam_config(
-    cfg,
-    sources;
-    min_bottom_margin=parse(Float64, opts["bottom-margin-mm"]) * 1e-3,
-    reference_depth=aberrator == :skull ? parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3 : nothing,
-)
-out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
-    opts["out-dir"]
-else
-    default_output_dir(opts, sources, cfg)
+function string_key_dict(dict::AbstractDict)
+    return Dict(String(key) => value for (key, value) in dict)
 end
-mkpath(out_dir)
 
-c, rho, medium_info = make_pam_medium(
-    cfg;
-    aberrator=aberrator,
-    lens_center_depth=parse(Float64, opts["lens-depth-mm"]) * 1e-3,
-    lens_center_lateral=parse(Float64, opts["lens-lateral-mm"]) * 1e-3,
-    lens_axial_radius=parse(Float64, opts["lens-axial-radius-mm"]) * 1e-3,
-    lens_lateral_radius=parse(Float64, opts["lens-lateral-radius-mm"]) * 1e-3,
-    c_aberrator=parse(Float64, opts["aberrator-c"]),
-    rho_aberrator=parse(Float64, opts["aberrator-rho"]),
-    ct_path=opts["ct-path"],
-    slice_index=parse(Int, opts["slice-index"]),
-    skull_to_transducer=parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
-    hu_bone_thr=parse(Int, opts["hu-bone-thr"]),
+function overlay_medium_contour!(ax, c::AbstractMatrix{<:Real}, lateral_mm, depth_mm, cfg; tol::Real=5.0)
+    medium = Float64.(abs.(Float64.(c) .- cfg.c0) .> Float64(tol))
+    any(medium .> 0.0) || return nothing
+    contour!(ax, lateral_mm, depth_mm, medium'; levels=[0.5], color=(:white, 0.45), linewidth=1.2)
+    return nothing
+end
+
+function pam_heatmap_title(label::AbstractString, metrics)
+    rel_peak = round(metrics[:relative_peak_intensity]; digits=2)
+    peak = format_sci(metrics[:peak_intensity])
+    total = format_sci(metrics[:integrated_intensity_m2])
+    return "$label | rel peak=$rel_peak, peak=$peak, sum=$total"
+end
+
+function add_pam_heatmap_panel!(
+    fig,
+    row::Int,
+    label::AbstractString,
+    intensity::AbstractMatrix{<:Real},
+    c,
+    kgrid,
+    cfg,
+    sources,
+    global_ref::Real,
+    metrics,
 )
+    depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
+    lateral_mm = kgrid.y_vec .* 1e3
+    norm_intensity = clamp.(Float64.(intensity) ./ max(Float64(global_ref), eps(Float64)), 0.0, 1.0)
+
+    ax = Axis(
+        fig[row, 1];
+        title=pam_heatmap_title(label, metrics),
+        xlabel=row == 2 ? "Lateral distance [mm]" : "",
+        ylabel="Axial distance [mm]",
+        aspect=DataAspect(),
+    )
+    hm = heatmap!(ax, lateral_mm, depth_mm, norm_intensity'; colormap=:turbo, colorrange=(0, 1))
+    overlay_medium_contour!(ax, c, lateral_mm, depth_mm, cfg)
+    scatter_source_points!(ax, sources; color=(:white, 0.85), marker=:circle, markersize=7, strokewidth=0)
+    xlims!(ax, minimum(lateral_mm), maximum(lateral_mm))
+    ylims!(ax, minimum(depth_mm), maximum(depth_mm))
+    return hm
+end
+
+function save_pam_heatmap(path, c, pam_geo, pam_hasa, kgrid, cfg, sources; threshold_ratio::Real=0.2)
+    global_ref = max(maximum(Float64.(pam_geo)), maximum(Float64.(pam_hasa)), eps(Float64))
+    geo_metrics = pam_intensity_metrics(
+        pam_geo,
+        kgrid,
+        cfg;
+        threshold_ratio=threshold_ratio,
+        reference_intensity=global_ref,
+    )
+    hasa_metrics = pam_intensity_metrics(
+        pam_hasa,
+        kgrid,
+        cfg;
+        threshold_ratio=threshold_ratio,
+        reference_intensity=global_ref,
+    )
+
+    fig = Figure(size=(900, 1100), fontsize=22)
+    hm = add_pam_heatmap_panel!(fig, 1, "Uncorrected", pam_geo, c, kgrid, cfg, sources, global_ref, geo_metrics)
+    add_pam_heatmap_panel!(fig, 2, "Corrected", pam_hasa, c, kgrid, cfg, sources, global_ref, hasa_metrics)
+    Colorbar(fig[1:2, 2], hm; label="Norm. PAM intensity (shared max)")
+
+    save(path, fig)
+    return Dict(
+        "global_reference_intensity" => global_ref,
+        "geometric" => string_key_dict(geo_metrics),
+        "hasa" => string_key_dict(hasa_metrics),
+    )
+end
+
+opts, provided_keys = parse_cli(ARGS)
+from_run_dir = strip(opts["from-run-dir"])
+recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
+peak_method = Symbol(lowercase(strip(opts["peak-method"])))
+peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
+
+if isempty(from_run_dir)
+    sources = parse_sources(opts)
+    cfg = PAMConfig(
+        dx=parse(Float64, opts["dx-mm"]) * 1e-3,
+        dz=parse(Float64, opts["dz-mm"]) * 1e-3,
+        axial_dim=parse(Float64, opts["axial-mm"]) * 1e-3,
+        transverse_dim=parse(Float64, opts["transverse-mm"]) * 1e-3,
+        receiver_aperture=parse_receiver_aperture_mm(opts["receiver-aperture-mm"]),
+        t_max=parse(Float64, opts["t-max-us"]) * 1e-6,
+        dt=parse(Float64, opts["dt-ns"]) * 1e-9,
+        zero_pad_factor=parse(Int, opts["zero-pad-factor"]),
+        peak_suppression_radius=parse(Float64, opts["peak-suppression-radius-mm"]) * 1e-3,
+        success_tolerance=parse(Float64, opts["success-tolerance-mm"]) * 1e-3,
+    )
+
+    aberrator = parse_aberrator(opts["aberrator"])
+    bottom_margin_m = parse(Float64, opts["bottom-margin-mm"]) * 1e-3
+    cfg = fit_pam_config(
+        cfg,
+        sources;
+        min_bottom_margin=bottom_margin_m,
+        reference_depth=aberrator == :skull ? parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3 : nothing,
+    )
+    out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
+        opts["out-dir"]
+    else
+        default_output_dir(opts, sources, cfg)
+    end
+    mkpath(out_dir)
+
+    c, rho, medium_info = make_pam_medium(
+        cfg;
+        aberrator=aberrator,
+        lens_center_depth=parse(Float64, opts["lens-depth-mm"]) * 1e-3,
+        lens_center_lateral=parse(Float64, opts["lens-lateral-mm"]) * 1e-3,
+        lens_axial_radius=parse(Float64, opts["lens-axial-radius-mm"]) * 1e-3,
+        lens_lateral_radius=parse(Float64, opts["lens-lateral-radius-mm"]) * 1e-3,
+        c_aberrator=parse(Float64, opts["aberrator-c"]),
+        rho_aberrator=parse(Float64, opts["aberrator-rho"]),
+        ct_path=opts["ct-path"],
+        slice_index=parse(Int, opts["slice-index"]),
+        skull_to_transducer=parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
+        hu_bone_thr=parse(Int, opts["hu-bone-thr"]),
+    )
+
+    recon_frequencies = if haskey(opts, "recon-frequencies-mhz")
+        parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
+    else
+        sort(unique(Float64[src.frequency for src in sources]))
+    end
+
+    results = run_pam_case(
+        c,
+        rho,
+        sources,
+        cfg;
+        frequencies=recon_frequencies,
+        bandwidth=recon_bandwidth_hz,
+        use_gpu=parse_bool(opts["use-gpu"]),
+        reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
+        peak_method=peak_method,
+        clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
+        clean_max_iter=parse(Int, opts["clean-max-iter"]),
+        clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
+    )
+    reconstruction_source = Dict("mode" => "simulation")
+    phase_mode_summary = lowercase(strip(opts["phase-mode"]))
+    random_seed_summary = parse(Int, opts["random-seed"])
+else
+    reject_cached_simulation_options!(
+        provided_keys,
+        (
+            "sources-mm", "frequency-mhz", "amplitude-pa", "num-cycles",
+            "phases-deg", "delays-us", "source-amplitudes-pa", "source-frequencies-mhz",
+            "phase-mode", "phase-jitter-rad", "random-seed",
+            "axial-mm", "transverse-mm", "dx-mm", "dz-mm", "receiver-aperture-mm",
+            "t-max-us", "dt-ns", "zero-pad-factor", "peak-suppression-radius-mm",
+            "success-tolerance-mm", "aberrator", "ct-path", "slice-index",
+            "skull-transducer-distance-mm", "bottom-margin-mm", "hu-bone-thr",
+            "lens-depth-mm", "lens-lateral-mm", "lens-axial-radius-mm", "lens-lateral-radius-mm",
+            "aberrator-c", "aberrator-rho", "use-gpu",
+        ),
+    )
+    cached_path = joinpath(from_run_dir, "result.jld2")
+    isfile(cached_path) || error("--from-run-dir must contain result.jld2, missing: $cached_path")
+    cached = load(cached_path)
+    c = cached["c"]
+    rho = haskey(cached, "rho") ? cached["rho"] : fill(Float32(cached["cfg"].rho0), size(c))
+    cfg = cached["cfg"]
+    sources = cached["sources"]
+    cached_results = cached["results"]
+    rf = cached_results[:rf]
+    medium_info = haskey(cached, "medium_info") ? cached["medium_info"] : Dict{Symbol, Any}(:aberrator => :cached)
+    bottom_margin_m = nothing
+
+    out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
+        opts["out-dir"]
+    else
+        default_reconstruction_output_dir(from_run_dir)
+    end
+    mkpath(out_dir)
+
+    recon_frequencies = if haskey(opts, "recon-frequencies-mhz")
+        parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
+    else
+        sort(unique(Float64[src.frequency for src in sources]))
+    end
+    simulation_info = haskey(cached_results, :simulation) ? cached_results[:simulation] : default_simulation_info(cfg)
+    results = reconstruct_pam_case(
+        rf,
+        c,
+        sources,
+        cfg;
+        simulation_info=simulation_info,
+        frequencies=recon_frequencies,
+        bandwidth=recon_bandwidth_hz,
+        reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
+        peak_method=peak_method,
+        clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
+        clean_max_iter=parse(Int, opts["clean-max-iter"]),
+        clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
+    )
+    reconstruction_source = Dict(
+        "mode" => "cached_rf",
+        "from_run_dir" => abspath(from_run_dir),
+        "from_result_jld2" => abspath(cached_path),
+    )
+    phase_mode_summary = nothing
+    random_seed_summary = nothing
+end
 
 medium_summary = Dict{String, Any}()
 for (key, value) in medium_info
     key == :mask && continue
     medium_summary[String(key)] = value
 end
-
-recon_frequencies = if haskey(opts, "recon-frequencies-mhz")
-    parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
-else
-    sort(unique(Float64[src.frequency for src in sources]))
-end
-
-recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
-peak_method = Symbol(lowercase(strip(opts["peak-method"])))
-peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
-
-results = run_pam_case(
-    c,
-    rho,
-    sources,
-    cfg;
-    frequencies=recon_frequencies,
-    bandwidth=recon_bandwidth_hz,
-    use_gpu=parse_bool(opts["use-gpu"]),
-    peak_method=peak_method,
-    clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
-    clean_max_iter=parse(Int, opts["clean-max-iter"]),
-    clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
-)
 
 save_overview(
     joinpath(out_dir, "overview.png"),
@@ -352,8 +528,22 @@ save_overview(
     results[:stats_hasa],
 )
 
+heatmap_path = joinpath(out_dir, "pam_heatmap.png")
+heatmap_metrics = save_pam_heatmap(
+    heatmap_path,
+    c,
+    results[:pam_geo],
+    results[:pam_hasa],
+    results[:kgrid],
+    cfg,
+    sources,
+)
+
 summary = Dict(
     "out_dir" => out_dir,
+    "reconstruction_source" => reconstruction_source,
+    "heatmap_figure" => heatmap_path,
+    "pam_heatmap_metrics" => heatmap_metrics,
     "sources" => [Dict(
         "depth_m" => src.depth,
         "lateral_m" => src.lateral,
@@ -378,13 +568,15 @@ summary = Dict(
         "zero_pad_factor" => cfg.zero_pad_factor,
         "peak_suppression_radius" => cfg.peak_suppression_radius,
         "success_tolerance" => cfg.success_tolerance,
-        "bottom_margin" => parse(Float64, opts["bottom-margin-mm"]) * 1e-3,
+        "bottom_margin" => bottom_margin_m,
     ),
     "medium" => medium_summary,
     "reconstruction_frequencies_hz" => recon_frequencies,
     "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
-    "phase_mode" => lowercase(strip(opts["phase-mode"])),
-    "random_seed" => parse(Int, opts["random-seed"]),
+    "reconstruction_axial_step_m" => results[:geo_info][:axial_step],
+    "reference_sound_speed_m_per_s" => results[:geo_info][:reference_sound_speed],
+    "phase_mode" => phase_mode_summary,
+    "random_seed" => random_seed_summary,
     "peak_method" => String(peak_method),
     "clean_loop_gain" => parse(Float64, opts["clean-loop-gain"]),
     "clean_max_iter" => parse(Int, opts["clean-max-iter"]),

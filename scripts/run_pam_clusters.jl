@@ -4,6 +4,7 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
 using Dates
+using Printf
 using Random
 using CairoMakie
 using JLD2
@@ -20,7 +21,7 @@ function parse_cli(args)
         "harmonic-amplitudes" => "1.0,0.6",
         "gate-us" => "50",
         "taper-ratio" => "0.25",
-        "axial-mm" => "60",
+        "axial-mm" => "80",
         "transverse-mm" => "60",
         "dx-mm" => "0.2",
         "dz-mm" => "0.2",
@@ -44,6 +45,7 @@ function parse_cli(args)
         "aberrator-rho" => "1150",
         "use-gpu" => "false",
         "recon-bandwidth-khz" => "20",
+        "recon-step-um" => "50",
         "phase-mode" => "geometric",
         "phase-jitter-rad" => "0.2",
         "random-seed" => "0",
@@ -65,15 +67,18 @@ function parse_cli(args)
         "clean-loop-gain" => "0.1",
         "clean-max-iter" => "500",
         "clean-threshold-ratio" => "0.01",
+        "from-run-dir" => "",
     )
 
+    provided_keys = Set{String}()
     for arg in args
         startswith(arg, "--") || error("Unsupported argument format: $arg")
         parts = split(arg[3:end], "="; limit=2)
         length(parts) == 2 || error("Arguments must use --name=value, got: $arg")
+        push!(provided_keys, parts[1])
         opts[parts[1]] = parts[2]
     end
-    return opts
+    return opts, provided_keys
 end
 
 slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
@@ -297,6 +302,39 @@ function default_output_dir(opts, clusters, cfg, cluster_meta)
     return joinpath(pwd(), "outputs", join(parts, "_"))
 end
 
+function default_reconstruction_output_dir(source_dir::AbstractString)
+    timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
+    source_name = basename(normpath(source_dir))
+    return joinpath(pwd(), "outputs", "$(timestamp)_reconstruct_$(source_name)")
+end
+
+function reject_cached_simulation_options!(provided_keys::Set{String}, blocked_keys)
+    illegal = sort(collect(intersect(provided_keys, Set(blocked_keys))))
+    isempty(illegal) && return nothing
+    formatted = join(["--$key" for key in illegal], ", ")
+    error("--from-run-dir reuses the previous RF simulation, medium, clusters, and grid. Remove simulation-specific option(s): $formatted")
+end
+
+function default_simulation_info(cfg::PAMConfig)
+    return Dict{Symbol, Any}(
+        :receiver_row => receiver_row(cfg),
+        :receiver_cols => receiver_col_range(cfg),
+        :source_indices => Tuple{Int, Int}[],
+    )
+end
+
+function default_cluster_recon_frequencies(clusters)
+    freqs = Float64[]
+    for cluster in clusters
+        append!(freqs, Float64[n * cluster.fundamental for n in cluster.harmonics])
+    end
+    return sort(unique(freqs))
+end
+
+json3_to_any(x) = x
+json3_to_any(x::JSON3.Object) = Dict(String(key) => json3_to_any(value) for (key, value) in pairs(x))
+json3_to_any(x::JSON3.Array) = [json3_to_any(value) for value in x]
+
 function map_db(map::AbstractMatrix{<:Real}, ref::Real)
     safe_ref = max(Float64(ref), eps(Float64))
     return 10 .* log10.(max.(Float64.(map), eps(Float64)) ./ safe_ref)
@@ -365,6 +403,87 @@ function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, clusters, sta
     save(path, fig)
 end
 
+format_sci(value::Real) = @sprintf("%.2e", Float64(value))
+
+function string_key_dict(dict::AbstractDict)
+    return Dict(String(key) => value for (key, value) in dict)
+end
+
+function overlay_medium_contour!(ax, c::AbstractMatrix{<:Real}, lateral_mm, depth_mm, cfg; tol::Real=5.0)
+    medium = Float64.(abs.(Float64.(c) .- cfg.c0) .> Float64(tol))
+    any(medium .> 0.0) || return nothing
+    contour!(ax, lateral_mm, depth_mm, medium'; levels=[0.5], color=(:white, 0.45), linewidth=1.2)
+    return nothing
+end
+
+function pam_heatmap_title(label::AbstractString, metrics)
+    rel_peak = round(metrics[:relative_peak_intensity]; digits=2)
+    peak = format_sci(metrics[:peak_intensity])
+    total = format_sci(metrics[:integrated_intensity_m2])
+    return "$label | rel peak=$rel_peak, peak=$peak, sum=$total"
+end
+
+function add_pam_heatmap_panel!(
+    fig,
+    row::Int,
+    label::AbstractString,
+    intensity::AbstractMatrix{<:Real},
+    c,
+    kgrid,
+    cfg,
+    clusters,
+    global_ref::Real,
+    metrics,
+)
+    depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
+    lateral_mm = kgrid.y_vec .* 1e3
+    norm_intensity = clamp.(Float64.(intensity) ./ max(Float64(global_ref), eps(Float64)), 0.0, 1.0)
+
+    ax = Axis(
+        fig[row, 1];
+        title=pam_heatmap_title(label, metrics),
+        xlabel=row == 2 ? "Lateral distance [mm]" : "",
+        ylabel="Axial distance [mm]",
+        aspect=DataAspect(),
+    )
+    hm = heatmap!(ax, lateral_mm, depth_mm, norm_intensity'; colormap=:turbo, colorrange=(0, 1))
+    overlay_medium_contour!(ax, c, lateral_mm, depth_mm, cfg)
+    scatter_cluster_points!(ax, clusters; color=(:white, 0.75), marker=:circle, markersize=3, strokewidth=0)
+    xlims!(ax, minimum(lateral_mm), maximum(lateral_mm))
+    ylims!(ax, minimum(depth_mm), maximum(depth_mm))
+    return hm
+end
+
+function save_pam_heatmap(path, c, pam_geo, pam_hasa, kgrid, cfg, clusters; threshold_ratio::Real=0.2)
+    global_ref = max(maximum(Float64.(pam_geo)), maximum(Float64.(pam_hasa)), eps(Float64))
+    geo_metrics = pam_intensity_metrics(
+        pam_geo,
+        kgrid,
+        cfg;
+        threshold_ratio=threshold_ratio,
+        reference_intensity=global_ref,
+    )
+    hasa_metrics = pam_intensity_metrics(
+        pam_hasa,
+        kgrid,
+        cfg;
+        threshold_ratio=threshold_ratio,
+        reference_intensity=global_ref,
+    )
+
+    fig = Figure(size=(900, 1100), fontsize=22)
+    hm = add_pam_heatmap_panel!(fig, 1, "Uncorrected", pam_geo, c, kgrid, cfg, clusters, global_ref, geo_metrics)
+    add_pam_heatmap_panel!(fig, 2, "Corrected", pam_hasa, c, kgrid, cfg, clusters, global_ref, hasa_metrics)
+    Colorbar(fig[1:2, 2], hm; label="Norm. PAM intensity (shared max)")
+
+    save(path, fig)
+    return Dict(
+        "global_reference_intensity" => global_ref,
+        "geometric" => string_key_dict(geo_metrics),
+        "hasa" => string_key_dict(hasa_metrics),
+    )
+end
+
 function cluster_points_mm(clusters)
     return [cl.lateral * 1e3 for cl in clusters], [cl.depth * 1e3 for cl in clusters]
 end
@@ -378,6 +497,12 @@ function mask_points_mm(mask::BitMatrix, kgrid, cfg; max_points::Int=2500)
     depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
     lateral_mm = kgrid.y_vec .* 1e3
     return [lateral_mm[idx[2]] for idx in sampled], [depth_mm[idx[1]] for idx in sampled]
+end
+
+function medium_points_mm(c::AbstractMatrix{<:Real}, kgrid, cfg; tol::Real=5.0, max_points::Int=5000)
+    medium_mask = BitMatrix(abs.(Float64.(c) .- cfg.c0) .> Float64(tol))
+    medium_mask[1:receiver_row(cfg), :] .= false
+    return mask_points_mm(medium_mask, kgrid, cfg; max_points=max_points)
 end
 
 function nearest_detection_errors_mm(mask::BitMatrix, kgrid, cfg, clusters)
@@ -396,7 +521,7 @@ function nearest_detection_errors_mm(mask::BitMatrix, kgrid, cfg, clusters)
     return lateral_errors, depth_errors
 end
 
-function pam_panel_limits(clusters, datasets...)
+function pam_panel_limits(clusters, datasets...; min_depth_max_mm::Real=80.0)
     truth_lat, truth_depth = cluster_points_mm(clusters)
     all_lat = copy(truth_lat)
     all_depth = copy(truth_depth)
@@ -411,8 +536,18 @@ function pam_panel_limits(clusters, datasets...)
         floor(minimum(all_lat) - x_pad),
         ceil(maximum(all_lat) + x_pad),
         floor(minimum(all_depth) - y_pad),
-        ceil(maximum(all_depth) + y_pad),
+        max(Float64(min_depth_max_mm), ceil(maximum(all_depth) + y_pad)),
     )
+end
+
+function paper_style_figure_size(limits; px_per_mm::Real=8.0)
+    x_range_mm = max(Float64(limits[2] - limits[1]), 1.0)
+    y_range_mm = max(Float64(limits[4] - limits[3]), 1.0)
+    axis_width_px = clamp(Float64(px_per_mm) * x_range_mm, 420.0, 620.0)
+    axis_height_px = axis_width_px * y_range_mm / x_range_mm
+    figure_width_px = round(Int, axis_width_px + 170.0)
+    figure_height_px = round(Int, 2.0 * axis_height_px + 210.0)
+    return (figure_width_px, figure_height_px)
 end
 
 function add_paper_style_panel!(
@@ -420,6 +555,7 @@ function add_paper_style_panel!(
     row::Int,
     title::AbstractString,
     intensity,
+    c,
     kgrid,
     cfg,
     clusters;
@@ -431,6 +567,7 @@ function add_paper_style_panel!(
     mask = threshold_pam_map(intensity, cfg; threshold_ratio=threshold_ratio)
     pred_lat, pred_depth = mask_points_mm(mask, kgrid, cfg)
     truth_lat, truth_depth = cluster_points_mm(clusters)
+    medium_lat, medium_depth = medium_points_mm(c, kgrid, cfg)
 
     ax = Axis(
         fig[row, 1];
@@ -441,11 +578,13 @@ function add_paper_style_panel!(
         ygridvisible=false,
         xticks=WilkinsonTicks(3),
         yticks=WilkinsonTicks(3),
+        aspect=DataAspect(),
     )
     hidespines!(ax, :t, :r)
     xlims!(ax, limits[1], limits[2])
     ylims!(ax, limits[3], limits[4])
 
+    scatter!(ax, medium_lat, medium_depth; color=(:gray70, 0.35), markersize=4, marker=:rect)
     scatter!(ax, truth_lat, truth_depth; color=(:gray45, 0.75), markersize=5, marker=:rect)
     scatter!(ax, pred_lat, pred_depth; color=(color, 0.85), markersize=6, marker=:circle)
     text!(ax, 0.92, 0.86; text=title, space=:relative, align=(:right, :center), color=color, fontsize=30)
@@ -480,19 +619,20 @@ function add_paper_style_panel!(
     return pred_lat, pred_depth
 end
 
-function save_paper_style_detection(path, pam_geo, pam_hasa, kgrid, cfg, clusters; threshold_ratio::Real)
+function save_paper_style_detection(path, c, pam_geo, pam_hasa, kgrid, cfg, clusters; threshold_ratio::Real)
     geo_mask = threshold_pam_map(pam_geo, cfg; threshold_ratio=threshold_ratio)
     hasa_mask = threshold_pam_map(pam_hasa, cfg; threshold_ratio=threshold_ratio)
     geo_points = mask_points_mm(geo_mask, kgrid, cfg)
     hasa_points = mask_points_mm(hasa_mask, kgrid, cfg)
-    limits = pam_panel_limits(clusters, geo_points, hasa_points)
+    limits = pam_panel_limits(clusters, geo_points, hasa_points; min_depth_max_mm=80.0)
 
-    fig = Figure(size=(760, 760), fontsize=24)
+    fig = Figure(size=paper_style_figure_size(limits), fontsize=24)
     add_paper_style_panel!(
         fig,
         1,
         "Uncorrected",
         pam_geo,
+        c,
         kgrid,
         cfg,
         clusters;
@@ -506,6 +646,7 @@ function save_paper_style_detection(path, pam_geo, pam_hasa, kgrid, cfg, cluster
         2,
         "Corrected",
         pam_hasa,
+        c,
         kgrid,
         cfg,
         clusters;
@@ -518,52 +659,170 @@ function save_paper_style_detection(path, pam_geo, pam_hasa, kgrid, cfg, cluster
     save(path, fig)
 end
 
-opts = parse_cli(ARGS)
+opts, provided_keys = parse_cli(ARGS)
+from_run_dir = strip(opts["from-run-dir"])
+recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
+peak_method = Symbol(lowercase(strip(opts["peak-method"])))
+peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
 
-cfg_base = PAMConfig(
-    dx=parse(Float64, opts["dx-mm"]) * 1e-3,
-    dz=parse(Float64, opts["dz-mm"]) * 1e-3,
-    axial_dim=parse(Float64, opts["axial-mm"]) * 1e-3,
-    transverse_dim=parse(Float64, opts["transverse-mm"]) * 1e-3,
-    receiver_aperture=parse_receiver_aperture_mm(opts["receiver-aperture-mm"]),
-    t_max=parse(Float64, opts["t-max-us"]) * 1e-6,
-    dt=parse(Float64, opts["dt-ns"]) * 1e-9,
-    zero_pad_factor=parse(Int, opts["zero-pad-factor"]),
-    peak_suppression_radius=parse(Float64, opts["peak-suppression-radius-mm"]) * 1e-3,
-    success_tolerance=parse(Float64, opts["success-tolerance-mm"]) * 1e-3,
-)
+if isempty(from_run_dir)
+    cfg_base = PAMConfig(
+        dx=parse(Float64, opts["dx-mm"]) * 1e-3,
+        dz=parse(Float64, opts["dz-mm"]) * 1e-3,
+        axial_dim=parse(Float64, opts["axial-mm"]) * 1e-3,
+        transverse_dim=parse(Float64, opts["transverse-mm"]) * 1e-3,
+        receiver_aperture=parse_receiver_aperture_mm(opts["receiver-aperture-mm"]),
+        t_max=parse(Float64, opts["t-max-us"]) * 1e-6,
+        dt=parse(Float64, opts["dt-ns"]) * 1e-9,
+        zero_pad_factor=parse(Int, opts["zero-pad-factor"]),
+        peak_suppression_radius=parse(Float64, opts["peak-suppression-radius-mm"]) * 1e-3,
+        success_tolerance=parse(Float64, opts["success-tolerance-mm"]) * 1e-3,
+    )
 
-clusters, cluster_meta = parse_clusters(opts, cfg_base)
+    clusters, cluster_meta = parse_clusters(opts, cfg_base)
 
-aberrator = parse_aberrator(opts["aberrator"])
-cfg = fit_pam_config(
-    cfg_base,
-    clusters;
-    min_bottom_margin=parse(Float64, opts["bottom-margin-mm"]) * 1e-3,
-    reference_depth=aberrator == :skull ? parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3 : nothing,
-)
+    aberrator = parse_aberrator(opts["aberrator"])
+    bottom_margin_m = parse(Float64, opts["bottom-margin-mm"]) * 1e-3
+    cfg = fit_pam_config(
+        cfg_base,
+        clusters;
+        min_bottom_margin=bottom_margin_m,
+        reference_depth=aberrator == :skull ? parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3 : nothing,
+    )
 
-out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
-    opts["out-dir"]
+    out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
+        opts["out-dir"]
+    else
+        default_output_dir(opts, clusters, cfg, cluster_meta)
+    end
+    mkpath(out_dir)
+
+    c, rho, medium_info = make_pam_medium(
+        cfg;
+        aberrator=aberrator,
+        lens_center_depth=parse(Float64, opts["lens-depth-mm"]) * 1e-3,
+        lens_center_lateral=parse(Float64, opts["lens-lateral-mm"]) * 1e-3,
+        lens_axial_radius=parse(Float64, opts["lens-axial-radius-mm"]) * 1e-3,
+        lens_lateral_radius=parse(Float64, opts["lens-lateral-radius-mm"]) * 1e-3,
+        c_aberrator=parse(Float64, opts["aberrator-c"]),
+        rho_aberrator=parse(Float64, opts["aberrator-rho"]),
+        ct_path=opts["ct-path"],
+        slice_index=parse(Int, opts["slice-index"]),
+        skull_to_transducer=parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
+        hu_bone_thr=parse(Int, opts["hu-bone-thr"]),
+    )
+
+    recon_frequencies = if haskey(opts, "recon-frequencies-mhz") && !isempty(strip(opts["recon-frequencies-mhz"]))
+        parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
+    else
+        default_cluster_recon_frequencies(clusters)
+    end
+    cluster_model = parse_cluster_model(opts["cluster-model"])
+    analysis_mode = parse_analysis_mode(opts["analysis-mode"], cluster_model)
+
+    results = run_pam_case(
+        c,
+        rho,
+        clusters,
+        cfg;
+        frequencies=recon_frequencies,
+        bandwidth=recon_bandwidth_hz,
+        use_gpu=parse_bool(opts["use-gpu"]),
+        reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
+        analysis_mode=analysis_mode,
+        peak_method=peak_method,
+        clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
+        clean_max_iter=parse(Int, opts["clean-max-iter"]),
+        clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
+        detection_truth_radius=parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
+        detection_threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
+    )
+    reconstruction_source = Dict("mode" => "simulation")
 else
-    default_output_dir(opts, clusters, cfg, cluster_meta)
-end
-mkpath(out_dir)
+    reject_cached_simulation_options!(
+        provided_keys,
+        (
+            "clusters-mm", "fundamental-mhz", "amplitude-pa", "n-bubbles",
+            "harmonics", "harmonic-amplitudes", "gate-us", "taper-ratio",
+            "axial-mm", "transverse-mm", "dx-mm", "dz-mm", "receiver-aperture-mm",
+            "t-max-us", "dt-ns", "zero-pad-factor", "peak-suppression-radius-mm",
+            "success-tolerance-mm", "aberrator", "ct-path", "slice-index",
+            "skull-transducer-distance-mm", "bottom-margin-mm", "hu-bone-thr",
+            "lens-depth-mm", "lens-lateral-mm", "lens-axial-radius-mm", "lens-lateral-radius-mm",
+            "aberrator-c", "aberrator-rho", "use-gpu", "phase-mode", "phase-jitter-rad",
+            "random-seed", "transducer-mm", "delays-us", "cluster-model",
+            "vascular-length-mm", "vascular-branch-levels", "vascular-branch-angle-deg",
+            "vascular-branch-scale", "vascular-source-spacing-mm", "vascular-position-jitter-mm",
+            "vascular-min-separation-mm", "vascular-max-sources-per-anchor",
+        ),
+    )
+    cached_path = joinpath(from_run_dir, "result.jld2")
+    isfile(cached_path) || error("--from-run-dir must contain result.jld2, missing: $cached_path")
+    cached = load(cached_path)
+    c = cached["c"]
+    rho = haskey(cached, "rho") ? cached["rho"] : fill(Float32(cached["cfg"].rho0), size(c))
+    cfg = cached["cfg"]
+    clusters = cached["clusters"]
+    cached_results = cached["results"]
+    rf = cached_results[:rf]
+    medium_info = haskey(cached, "medium_info") ? cached["medium_info"] : Dict{Symbol, Any}(:aberrator => :cached)
+    bottom_margin_m = nothing
+    cached_summary_path = joinpath(from_run_dir, "summary.json")
+    cached_summary = isfile(cached_summary_path) ? JSON3.read(read(cached_summary_path, String)) : nothing
+    cluster_meta = if !isnothing(cached_summary) && hasproperty(cached_summary, :emission_meta)
+        Dict{String, Any}(json3_to_any(cached_summary.emission_meta))
+    else
+        harmonics = Int[]
+        for cluster in clusters
+            append!(harmonics, cluster.harmonics)
+        end
+        Dict{String, Any}(
+            "source_count" => length(clusters),
+            "fundamental_hz" => isempty(clusters) ? NaN : first(clusters).fundamental,
+            "harmonics" => sort(unique(harmonics)),
+        )
+    end
+    get!(cluster_meta, "cluster_model", length(clusters) > 10 ? "vascular" : "point")
+    cluster_meta["from_run_dir"] = abspath(from_run_dir)
 
-c, rho, medium_info = make_pam_medium(
-    cfg;
-    aberrator=aberrator,
-    lens_center_depth=parse(Float64, opts["lens-depth-mm"]) * 1e-3,
-    lens_center_lateral=parse(Float64, opts["lens-lateral-mm"]) * 1e-3,
-    lens_axial_radius=parse(Float64, opts["lens-axial-radius-mm"]) * 1e-3,
-    lens_lateral_radius=parse(Float64, opts["lens-lateral-radius-mm"]) * 1e-3,
-    c_aberrator=parse(Float64, opts["aberrator-c"]),
-    rho_aberrator=parse(Float64, opts["aberrator-rho"]),
-    ct_path=opts["ct-path"],
-    slice_index=parse(Int, opts["slice-index"]),
-    skull_to_transducer=parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
-    hu_bone_thr=parse(Int, opts["hu-bone-thr"]),
-)
+    out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
+        opts["out-dir"]
+    else
+        default_reconstruction_output_dir(from_run_dir)
+    end
+    mkpath(out_dir)
+
+    recon_frequencies = if haskey(opts, "recon-frequencies-mhz") && !isempty(strip(opts["recon-frequencies-mhz"]))
+        parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
+    else
+        default_cluster_recon_frequencies(clusters)
+    end
+    cached_model = Symbol(String(cluster_meta["cluster_model"]))
+    analysis_mode = parse_analysis_mode(opts["analysis-mode"], cached_model)
+    simulation_info = haskey(cached_results, :simulation) ? cached_results[:simulation] : default_simulation_info(cfg)
+    results = reconstruct_pam_case(
+        rf,
+        c,
+        clusters,
+        cfg;
+        simulation_info=simulation_info,
+        frequencies=recon_frequencies,
+        bandwidth=recon_bandwidth_hz,
+        reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
+        analysis_mode=analysis_mode,
+        peak_method=peak_method,
+        clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
+        clean_max_iter=parse(Int, opts["clean-max-iter"]),
+        clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
+        detection_truth_radius=parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
+        detection_threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
+    )
+    reconstruction_source = Dict(
+        "mode" => "cached_rf",
+        "from_run_dir" => abspath(from_run_dir),
+        "from_result_jld2" => abspath(cached_path),
+    )
+end
 
 medium_summary = Dict{String, Any}()
 for (key, value) in medium_info
@@ -571,42 +830,28 @@ for (key, value) in medium_info
     medium_summary[String(key)] = value
 end
 
-recon_frequencies = if haskey(opts, "recon-frequencies-mhz") && !isempty(strip(opts["recon-frequencies-mhz"]))
-    parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
-else
-    sort(unique(Float64[n * cluster_meta["fundamental_hz"] for n in cluster_meta["harmonics"]]))
-end
-recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
-analysis_mode = parse_analysis_mode(opts["analysis-mode"], parse_cluster_model(opts["cluster-model"]))
-peak_method = Symbol(lowercase(strip(opts["peak-method"])))
-peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
-
-results = run_pam_case(
-    c,
-    rho,
-    clusters,
-    cfg;
-    frequencies=recon_frequencies,
-    bandwidth=recon_bandwidth_hz,
-    use_gpu=parse_bool(opts["use-gpu"]),
-    analysis_mode=analysis_mode,
-    peak_method=peak_method,
-    clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
-    clean_max_iter=parse(Int, opts["clean-max-iter"]),
-    clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
-    detection_truth_radius=parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
-    detection_threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
-)
-
 save_overview(
     joinpath(out_dir, "overview.png"),
     c, results[:rf], results[:pam_geo], results[:pam_hasa],
     results[:kgrid], cfg, clusters, results[:stats_geo], results[:stats_hasa],
 )
 
+heatmap_path = joinpath(out_dir, "pam_heatmap.png")
+heatmap_metrics = save_pam_heatmap(
+    heatmap_path,
+    c,
+    results[:pam_geo],
+    results[:pam_hasa],
+    results[:kgrid],
+    cfg,
+    clusters;
+    threshold_ratio=parse(Float64, opts["detection-threshold-ratio"]),
+)
+
 paper_style_path = joinpath(out_dir, "paper_style.png")
 save_paper_style_detection(
     paper_style_path,
+    c,
     results[:pam_geo],
     results[:pam_hasa],
     results[:kgrid],
@@ -617,7 +862,10 @@ save_paper_style_detection(
 
 summary = Dict(
     "out_dir" => out_dir,
+    "reconstruction_source" => reconstruction_source,
     "paper_style_figure" => paper_style_path,
+    "heatmap_figure" => heatmap_path,
+    "pam_heatmap_metrics" => heatmap_metrics,
     "clusters" => [Dict(
         "depth_m" => cl.depth,
         "lateral_m" => cl.lateral,
@@ -644,11 +892,13 @@ summary = Dict(
         "zero_pad_factor" => cfg.zero_pad_factor,
         "peak_suppression_radius" => cfg.peak_suppression_radius,
         "success_tolerance" => cfg.success_tolerance,
-        "bottom_margin" => parse(Float64, opts["bottom-margin-mm"]) * 1e-3,
+        "bottom_margin" => bottom_margin_m,
     ),
     "medium" => medium_summary,
     "reconstruction_frequencies_hz" => recon_frequencies,
     "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
+    "reconstruction_axial_step_m" => results[:geo_info][:axial_step],
+    "reference_sound_speed_m_per_s" => results[:geo_info][:reference_sound_speed],
     "analysis_mode" => String(analysis_mode),
     "detection_truth_radius_m" => parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
     "detection_threshold_ratio" => parse(Float64, opts["detection-threshold-ratio"]),

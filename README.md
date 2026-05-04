@@ -221,7 +221,7 @@ Key helpers:
 
 Supported aberrators:
 
-- `--aberrator=none`: homogeneous water
+- `--aberrator=none`: homogeneous water control. Corrected and uncorrected PAM should match because there is no heterogeneous phase error to correct.
 - `--aberrator=lens`: simple elliptical speed perturbation
 - `--aberrator=skull`: CT-derived skull inserted into the PAM domain
 
@@ -231,6 +231,8 @@ For `--aberrator=skull`:
 - the outer skull surface is placed `--skull-transducer-distance-mm` below the receiver, default `30 mm`
 - source coordinates stay defined relative to the transducer/receiver, not relative to the skull
 - `fit_pam_config` extends the axial domain automatically to fit the deepest source plus `--bottom-margin-mm`
+- `fit_pam_config` also extends `t_max` when a deep or long-gated source would otherwise be truncated
+- the run scripts default to `--recon-step-um=50` for HASA/ASA axial integration, matching the trans-skull PAM paper setup
 
 ### Run One PAM Case
 
@@ -271,6 +273,7 @@ julia --project=. scripts/run_pam_case.jl \
 ```
 
 Vascular-like bubble aggregate with skull correction. `--clusters-mm` gives one or more vascular anchors; each anchor expands into many small harmonic bubble emitters along a branching 2D vessel-like tree. The default aggregate analysis mode is detection, so `summary.json` reports precision/recall-style map recovery instead of one distance error per cluster.
+Cluster runs default to an 80 mm axial domain so activity below the skull is not clipped near 60 mm; override with `--axial-mm=...` if needed. The reconstruction reference speed is averaged over the receiver-to-source region, so extra trailing axial padding does not change the correction.
 
 ```bash
 julia --project=. scripts/run_pam_clusters.jl \
@@ -294,9 +297,20 @@ The one-emitter-per-aggregate behavior is available with `--cluster-model=point 
 The PAM run scripts write:
 
 - `overview.png`
-- `paper_style.png` for cluster runs, with stacked uncorrected/corrected detection scatter panels
+- `pam_heatmap.png` with stacked uncorrected/corrected reconstructed PAM intensity fields on a shared 0-1 scale
+- `paper_style.png` for cluster runs, with stacked uncorrected/corrected detection scatter panels and a faint skull/lens medium overlay
 - `summary.json`
 - `result.jld2`
+
+To rerun only reconstruction and figure generation from saved RF data, pass an existing output folder:
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --from-run-dir=outputs/20260504_135027_run_pam_clusters_skull_vascular_1anchors_68src_f0p5mhz_h23_geometric_ax200p0mm_slice250_st30p0mm \
+  --recon-bandwidth-khz=20
+```
+
+`--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources/clusters, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, time step, and GPU simulation are rejected in this mode; reconstruction and analysis options such as `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, `--peak-method`, and cluster detection thresholds remain adjustable.
 
 ### Run a PAM Sweep
 

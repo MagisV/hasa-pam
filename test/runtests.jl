@@ -1,5 +1,6 @@
 using Test
 using Random
+using Statistics
 using TranscranialFUS
 
 function synthetic_hu_volume(nslices::Int=5, rows::Int=80, cols::Int=60)
@@ -215,6 +216,18 @@ end
     @test info_hasa[:corrected] == true
     @test stats_hasa[:mean_radial_error_mm] < 1.0
     @test stats_hasa[:success_rate] == 1.0
+
+    cached_results = reconstruct_pam_case(
+        rf,
+        c,
+        [source],
+        cfg;
+        simulation_info=Dict(:receiver_row => receiver_row(cfg), :receiver_cols => receiver_col_range(cfg)),
+        frequencies=[source.frequency],
+    )
+    @test cached_results[:simulation][:receiver_row] == receiver_row(cfg)
+    @test cached_results[:stats_geo][:success_rate] == 1.0
+    @test cached_results[:stats_hasa][:success_rate] == 1.0
 end
 
 @testset "PAM analysis metrics" begin
@@ -251,6 +264,14 @@ end
     @test length(stats[:axial_fwhm_mm]) == 2
     @test all(stats[:axial_fwhm_mm] .> 0)
     @test all(stats[:lateral_fwhm_mm] .> 0)
+
+    metrics = pam_intensity_metrics(intensity, kgrid, cfg; threshold_ratio=0.5, reference_intensity=2.0)
+    @test metrics[:peak_intensity] ≈ maximum(intensity)
+    @test metrics[:relative_peak_intensity] ≈ maximum(intensity) / 2.0
+    @test metrics[:integrated_intensity_m2] > 0
+    @test metrics[:active_area_mm2] > 0
+    @test isfinite(metrics[:centroid_depth_mm])
+    @test isfinite(metrics[:centroid_lateral_mm])
 end
 
 @testset "Vascular bubble clusters" begin
@@ -542,6 +563,55 @@ end
     source_row, source_col = source_grid_index(first(sources), fitted_cfg, pam_grid(fitted_cfg))
     @test c[source_row, source_col] ≈ fitted_cfg.c0
     @test all(c[(source_row + 1):end, source_col] .≈ fitted_cfg.c0)
+end
+
+@testset "PAM deep-domain fitting is padding-stable" begin
+    base_cfg = PAMConfig(
+        dx=1e-3,
+        dz=1e-3,
+        axial_dim=0.08,
+        transverse_dim=0.06,
+        receiver_aperture=0.04,
+        t_max=80e-6,
+        dt=50e-9,
+    )
+    cluster = BubbleCluster2D(
+        depth=0.08,
+        lateral=0.0,
+        fundamental=0.5e6,
+        gate_duration=50e-6,
+    )
+    fitted_cfg = fit_pam_config(base_cfg, [cluster]; min_bottom_margin=5e-3)
+    @test fitted_cfg.t_max >= TranscranialFUS._required_pam_t_max(base_cfg, [cluster])
+    @test fitted_cfg.t_max > 110e-6
+
+    cfg80 = PAMConfig(dx=1e-3, dz=1e-3, axial_dim=0.08, transverse_dim=0.03)
+    cfg200 = PAMConfig(dx=1e-3, dz=1e-3, axial_dim=0.20, transverse_dim=0.03)
+    c80 = fill(cfg80.c0, pam_Nx(cfg80), pam_Ny(cfg80))
+    c200 = fill(cfg200.c0, pam_Nx(cfg200), pam_Ny(cfg200))
+    c80[30:35, :] .= 2500.0
+    c200[30:35, :] .= 2500.0
+    source = PointSource2D(depth=0.055, lateral=0.0)
+
+    ref80 = TranscranialFUS._pam_reference_sound_speed(c80, cfg80, [source])
+    ref200 = TranscranialFUS._pam_reference_sound_speed(c200, cfg200, [source])
+    @test ref80 ≈ ref200
+    @test mean(c200) < mean(c80)
+
+    rf = zeros(Float64, pam_Ny(cfg80), pam_Nt(cfg80))
+    _, _, info = reconstruct_pam(
+        rf,
+        c80,
+        cfg80;
+        frequencies=[0.5e6],
+        corrected=false,
+        reference_sound_speed=1540.0,
+        axial_step=0.25e-3,
+    )
+    @test info[:reference_sound_speed] == 1540.0
+    @test info[:axial_step] ≈ 0.25e-3
+    @test info[:axial_substeps_per_cell] == 4
+    @test TranscranialFUS._pam_axial_substeps(0.2e-3, 50e-6) == 4
 end
 
 @testset "k-Wave smoke tests" begin
