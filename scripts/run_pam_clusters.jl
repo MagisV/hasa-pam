@@ -19,6 +19,7 @@ function parse_cli(args)
         "n-bubbles" => "10",
         "harmonics" => "2,3",
         "harmonic-amplitudes" => "1.0,0.6",
+        "cavitation-model" => "harmonic-cos",
         "gate-us" => "50",
         "taper-ratio" => "0.25",
         "axial-mm" => "80",
@@ -118,6 +119,13 @@ function parse_vascular_topology(s::AbstractString)
     return value
 end
 
+function parse_cavitation_model(s::AbstractString)
+    raw = lowercase(strip(s))
+    value = Symbol(replace(raw, "-" => "_"))
+    value in (:harmonic_cos, :gaussian_pulse) || error("--cavitation-model must be harmonic-cos or gaussian-pulse, got: $s")
+    return value
+end
+
 function parse_analysis_mode(s::AbstractString, cluster_model::Symbol)
     value = Symbol(lowercase(strip(s)))
     value == :auto && return cluster_model == :vascular ? :detection : :localization
@@ -167,6 +175,7 @@ function parse_clusters(opts, cfg::PAMConfig)
     gate = parse(Float64, opts["gate-us"]) * 1e-6
     taper = parse(Float64, opts["taper-ratio"])
     per_bubble_amp = parse(Float64, opts["amplitude-pa"])
+    cavitation = parse_cavitation_model(opts["cavitation-model"])
 
     n_clusters = length(coord_tokens)
     n_bubbles_per = expand_cluster_values(parse_float_list(opts["n-bubbles"]), n_clusters, 10.0)
@@ -186,7 +195,7 @@ function parse_clusters(opts, cfg::PAMConfig)
         push!(anchors, (parse(Float64, strip(parts[1])) * 1e-3, parse(Float64, strip(parts[2])) * 1e-3))
     end
 
-    clusters = BubbleCluster2D[]
+    clusters = EmissionSource2D[]
     vascular_meta_by_anchor = Dict{String, Any}[]
     all_centerlines_m = Any[]
 
@@ -218,6 +227,7 @@ function parse_clusters(opts, cfg::PAMConfig)
                 n_bubbles=n_bubbles_per[idx],
                 harmonics=harmonics,
                 harmonic_amplitudes=harmonic_amplitudes,
+                cavitation_model=cavitation,
                 gate_duration=gate,
                 taper_ratio=taper,
                 delay=delays_us[idx] * 1e-6,
@@ -258,7 +268,7 @@ function parse_clusters(opts, cfg::PAMConfig)
                 phases[h_idx] = base
             end
 
-            push!(clusters, BubbleCluster2D(
+            kwargs = (
                 depth=depth_m,
                 lateral=lateral_m,
                 fundamental=f0,
@@ -270,7 +280,8 @@ function parse_clusters(opts, cfg::PAMConfig)
                 gate_duration=gate,
                 taper_ratio=taper,
                 delay=delays_us[idx] * 1e-6,
-            ))
+            )
+            push!(clusters, cavitation == :gaussian_pulse ? GaussianPulseCluster2D(; kwargs...) : BubbleCluster2D(; kwargs...))
         end
     end
 
@@ -283,6 +294,7 @@ function parse_clusters(opts, cfg::PAMConfig)
         "fundamental_hz" => f0,
         "harmonics" => harmonics,
         "harmonic_amplitudes" => harmonic_amplitudes,
+        "cavitation_model" => String(cavitation),
         "gate_duration_s" => gate,
         "transducer_m" => (tx_depth, tx_lateral),
         "phase_jitter_rad" => jitter_rad,
@@ -366,7 +378,7 @@ end
 function default_cluster_recon_frequencies(clusters)
     freqs = Float64[]
     for cluster in clusters
-        append!(freqs, Float64[n * cluster.fundamental for n in cluster.harmonics])
+        append!(freqs, emission_frequencies(cluster))
     end
     return sort(unique(freqs))
 end
@@ -843,7 +855,7 @@ else
         provided_keys,
         (
             "clusters-mm", "fundamental-mhz", "amplitude-pa", "n-bubbles",
-            "harmonics", "harmonic-amplitudes", "gate-us", "taper-ratio",
+            "harmonics", "harmonic-amplitudes", "cavitation-model", "gate-us", "taper-ratio",
             "axial-mm", "transverse-mm", "dx-mm", "dz-mm", "receiver-aperture-mm",
             "t-max-us", "dt-ns", "zero-pad-factor", "peak-suppression-radius-mm",
             "success-tolerance-mm", "aberrator", "ct-path", "slice-index",
@@ -882,6 +894,7 @@ else
             "source_count" => length(clusters),
             "fundamental_hz" => isempty(clusters) ? NaN : first(clusters).fundamental,
             "harmonics" => sort(unique(harmonics)),
+            "cavitation_model" => isempty(clusters) ? "unknown" : String(cavitation_model(first(clusters))),
         )
     end
     get!(cluster_meta, "cluster_model", length(clusters) > 10 ? "vascular" : "point")
@@ -981,6 +994,7 @@ summary = Dict(
         "harmonics" => cl.harmonics,
         "harmonic_amplitudes" => cl.harmonic_amplitudes,
         "harmonic_phases_rad" => cl.harmonic_phases,
+        "cavitation_model" => String(cavitation_model(cl)),
         "gate_duration_s" => cl.gate_duration,
         "delay_s" => cl.delay,
     ) for cl in clusters],

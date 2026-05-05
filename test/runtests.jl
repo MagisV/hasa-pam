@@ -1,6 +1,7 @@
 using Test
 using Random
 using Statistics
+using FFTW
 using TranscranialFUS
 
 function synthetic_hu_volume(nslices::Int=5, rows::Int=80, cols::Int=60)
@@ -274,6 +275,51 @@ end
     @test isfinite(metrics[:centroid_lateral_mm])
 end
 
+@testset "Gaussian pulse cluster emissions" begin
+    dt = 20e-9
+    nt = 1000
+    src = GaussianPulseCluster2D(
+        depth=0.03,
+        lateral=0.0,
+        fundamental=0.5e6,
+        amplitude=1.0,
+        n_bubbles=1.0,
+        harmonics=[2],
+        harmonic_amplitudes=[1.0],
+        harmonic_phases=[0.0],
+        gate_duration=10e-6,
+    )
+    signal = TranscranialFUS._source_signal(nt, dt, src)
+    active = findall(!iszero, signal)
+
+    @test !isempty(active)
+    @test maximum(abs, signal) > 0.5
+    @test abs(signal[first(active)]) < 0.05 * maximum(abs, signal)
+    @test abs(signal[last(active)]) < 0.05 * maximum(abs, signal)
+    @test emission_frequencies(src) == [1.0e6]
+    @test cavitation_model(src) == :gaussian_pulse
+
+    spectrum = abs.(fft(signal))
+    freq_axis = collect(0:(nt - 1)) ./ (nt * dt)
+    pos_bins = 2:(fld(nt, 2) + 1)
+    peak_bin = pos_bins[argmax(spectrum[pos_bins])]
+    @test abs(freq_axis[peak_bin] - 1.0e6) <= 1 / (nt * dt)
+
+    harmonic = BubbleCluster2D(
+        depth=0.03,
+        lateral=0.0,
+        fundamental=0.5e6,
+        harmonics=[2],
+        harmonic_amplitudes=[1.0],
+        harmonic_phases=[0.0],
+        gate_duration=10e-6,
+    )
+    @test cavitation_model(harmonic) == :harmonic_cos
+    @test TranscranialFUS._normalize_cavitation_model("harmonic-cos") == :harmonic_cos
+    @test TranscranialFUS._normalize_cavitation_model("gaussian-pulse") == :gaussian_pulse
+    @test_throws ErrorException TranscranialFUS._normalize_cavitation_model("haromnic-cos")
+end
+
 @testset "Vascular bubble clusters" begin
     squiggle_clusters, squiggle_meta = make_vascular_bubble_clusters(
         [(0.03, 0.0)];
@@ -289,9 +335,28 @@ end
 
     @test squiggle_meta[:cluster_model] == :vascular
     @test squiggle_meta[:topology] == :squiggle
+    @test squiggle_meta[:cavitation_model] == :harmonic_cos
+    @test all(src -> src isa BubbleCluster2D, squiggle_clusters)
     @test length(squiggle_meta[:centerlines]) == 1
     @test maximum(src.lateral for src in squiggle_clusters) - minimum(src.lateral for src in squiggle_clusters) > 10e-3
     @test maximum(src.depth for src in squiggle_clusters) - minimum(src.depth for src in squiggle_clusters) > 2e-3
+
+    pulse_clusters, pulse_meta = make_vascular_bubble_clusters(
+        [(0.03, 0.0)];
+        cavitation_model=:gaussian_pulse,
+        root_length=12e-3,
+        squiggle_amplitude=1.5e-3,
+        squiggle_wavelength=6e-3,
+        source_spacing=1e-3,
+        position_jitter=0.0,
+        min_separation=0.0,
+        lateral_bounds=(-0.02, 0.02),
+        rng=Random.MersenneTwister(41),
+    )
+
+    @test pulse_meta[:cavitation_model] == :gaussian_pulse
+    @test all(src -> src isa GaussianPulseCluster2D, pulse_clusters)
+    @test length(pulse_clusters) == length(squiggle_clusters)
 
     bundle_clusters, bundle_meta = make_vascular_bubble_clusters(
         [(0.03, 0.0)];

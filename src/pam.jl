@@ -24,8 +24,34 @@ Base.@kwdef struct BubbleCluster2D <: EmissionSource2D
     delay::Float64 = 0.0
 end
 
+Base.@kwdef struct GaussianPulseCluster2D <: EmissionSource2D
+    depth::Float64
+    lateral::Float64
+    fundamental::Float64 = 5e5
+    amplitude::Float64 = 1.0
+    n_bubbles::Float64 = 1.0
+    harmonics::Vector{Int} = [2, 3]
+    harmonic_amplitudes::Vector{Float64} = [1.0, 0.6]
+    harmonic_phases::Vector{Float64} = [0.0, 0.0]
+    gate_duration::Float64 = 10e-6
+    taper_ratio::Float64 = 0.25
+    delay::Float64 = 0.0
+end
+
 _emission_frequencies(src::PointSource2D) = Float64[src.frequency]
 _emission_frequencies(src::BubbleCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
+_emission_frequencies(src::GaussianPulseCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
+
+emission_frequencies(src::EmissionSource2D) = _emission_frequencies(src)
+cavitation_model(::BubbleCluster2D) = :harmonic_cos
+cavitation_model(::GaussianPulseCluster2D) = :gaussian_pulse
+
+function _normalize_cavitation_model(cavitation_model)
+    model = Symbol(replace(lowercase(string(cavitation_model)), "-" => "_"))
+    model in (:harmonic_cos, :gaussian_pulse) ||
+        error("Unknown cavitation_model: $cavitation_model (expected harmonic-cos or gaussian-pulse).")
+    return model
+end
 
 function _geometric_drive_phase(
     depth::Real,
@@ -344,10 +370,10 @@ end
 """
     make_vascular_bubble_clusters(anchors; kwargs...)
 
-Generate many small `BubbleCluster2D` emitters along a deterministic 2D
-vessel-like topology rooted at each `(depth, lateral)` anchor. The default
-topology is a paper-like squiggly horizontal vessel; the original branching
-tree remains available via `topology=:tree`.
+Generate many small cavitation emitters along a deterministic 2D vessel-like
+topology rooted at each `(depth, lateral)` anchor. The default topology is a
+paper-like squiggly horizontal vessel; the original branching tree remains
+available via `topology=:tree`.
 """
 function make_vascular_bubble_clusters(
     anchors::AbstractVector{<:Tuple};
@@ -372,6 +398,7 @@ function make_vascular_bubble_clusters(
     n_bubbles::Real=1.0,
     harmonics::AbstractVector{<:Integer}=[2, 3],
     harmonic_amplitudes::AbstractVector{<:Real}=[1.0, 0.6],
+    cavitation_model=:harmonic_cos,
     gate_duration::Real=50e-6,
     taper_ratio::Real=0.25,
     delay::Real=0.0,
@@ -390,8 +417,9 @@ function make_vascular_bubble_clusters(
         error("harmonic_amplitudes must have the same length as harmonics.")
     mode = _normalize_cluster_phase_mode(phase_mode)
     vessel_topology = _normalize_vascular_topology(topology)
+    source_model = _normalize_cavitation_model(cavitation_model)
 
-    clusters = BubbleCluster2D[]
+    clusters = EmissionSource2D[]
     all_segments = Tuple{Float64, Float64, Float64, Float64}[]
     all_centerlines = Vector{Tuple{Float64, Float64}}[]
     source_count_by_anchor = Int[]
@@ -458,7 +486,7 @@ function make_vascular_bubble_clusters(
                 phase_jitter,
                 rng,
             )
-            push!(clusters, BubbleCluster2D(
+            kwargs = (
                 depth=depth,
                 lateral=lateral,
                 fundamental=Float64(fundamental),
@@ -470,7 +498,8 @@ function make_vascular_bubble_clusters(
                 gate_duration=Float64(gate_duration),
                 taper_ratio=Float64(taper_ratio),
                 delay=Float64(delay),
-            ))
+            )
+            push!(clusters, source_model == :gaussian_pulse ? GaussianPulseCluster2D(; kwargs...) : BubbleCluster2D(; kwargs...))
         end
     end
 
@@ -496,6 +525,7 @@ function make_vascular_bubble_clusters(
         :segments => all_segments,
         :centerlines => all_centerlines,
         :phase_mode => mode,
+        :cavitation_model => source_model,
     )
     return clusters, meta
 end
@@ -535,6 +565,7 @@ end
 
 _source_duration(src::PointSource2D) = src.num_cycles / src.frequency
 _source_duration(src::BubbleCluster2D) = src.gate_duration
+_source_duration(src::GaussianPulseCluster2D) = src.gate_duration
 
 function _pam_axial_substeps(dx::Real, axial_step::Real)
     ratio = Float64(dx) / Float64(axial_step)
@@ -855,8 +886,40 @@ function _cluster_emission_signal(nt::Int, dt::Real, src::BubbleCluster2D)
     return signal
 end
 
+function _cluster_emission_signal(nt::Int, dt::Real, src::GaussianPulseCluster2D)
+    length(src.harmonics) == length(src.harmonic_amplitudes) ||
+        error("GaussianPulseCluster2D: harmonics and harmonic_amplitudes must have equal length.")
+    length(src.harmonics) == length(src.harmonic_phases) ||
+        error("GaussianPulseCluster2D: harmonics and harmonic_phases must have equal length.")
+
+    signal = zeros(Float64, nt)
+    samples = collect(0:(nt - 1))
+    t = samples .* Float64(dt) .- src.delay
+    active = findall((t .>= 0.0) .& (t .<= src.gate_duration))
+    isempty(active) && return signal
+
+    duration = Float64(src.gate_duration)
+    duration > 0 || return signal
+    center = duration / 2
+    sigma = duration / 6
+    t_active = t[active]
+    envelope = exp.(-0.5 .* ((t_active .- center) ./ sigma) .^ 2)
+    total_amp = src.amplitude * src.n_bubbles
+
+    accumulator = zeros(Float64, length(active))
+    @inbounds for i in eachindex(src.harmonics)
+        n = src.harmonics[i]
+        αn = src.harmonic_amplitudes[i]
+        φn = src.harmonic_phases[i]
+        accumulator .+= αn .* cos.(2π .* n .* src.fundamental .* (t_active .- center) .+ φn)
+    end
+    signal[active] .= total_amp .* envelope .* accumulator
+    return signal
+end
+
 _source_signal(nt::Int, dt::Real, src::PointSource2D) = _tone_burst_signal(nt, dt, src)
 _source_signal(nt::Int, dt::Real, src::BubbleCluster2D) = _cluster_emission_signal(nt, dt, src)
+_source_signal(nt::Int, dt::Real, src::GaussianPulseCluster2D) = _cluster_emission_signal(nt, dt, src)
 
 function source_grid_index(src::EmissionSource2D, cfg::PAMConfig, kgrid::KGrid2D)
     src.depth >= 0.0 || error("Source depth must be >= 0.")
