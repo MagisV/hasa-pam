@@ -202,15 +202,19 @@ Core types:
 
 - `PointSource2D`
 - `BubbleCluster2D`
+- `GaussianPulseCluster2D`
 - `PAMConfig`
+- `PAMWindowConfig`
 
 Key helpers:
 
 - `fit_pam_config`
 - `make_vascular_bubble_clusters`
+- `make_burst_train_sources`
 - `make_pam_medium`
 - `simulate_point_sources`
 - `reconstruct_pam`
+- `reconstruct_pam_windowed`
 - `find_pam_peaks`
 - `pam_centerline_truth_mask`
 - `analyse_pam_2d`
@@ -276,6 +280,16 @@ julia --project=. scripts/run_pam_case.jl \
 Vascular-like bubble aggregate with skull correction. `--clusters-mm` gives one or more vascular anchors; each anchor expands into many small harmonic bubble emitters along a paper-like squiggly vessel by default. The default aggregate analysis mode is detection, so `summary.json` reports precision/recall-style map recovery instead of one distance error per cluster. Squiggle and bundle topologies use a continuous centerline tube truth mask for detection; `--vascular-topology=tree` keeps the older branching stress case.
 Cluster runs default to an 80 mm axial domain so activity below the skull is not clipped near 60 mm; override with `--axial-mm=...` if needed. The reconstruction reference speed is averaged over the receiver-to-source region, so extra trailing axial padding does not change the correction.
 
+For vascular PAM, the default cluster workflow is an activity-area reconstruction rather than single-bubble localization. In `--recon-mode=auto`, `--cluster-model=vascular` selects windowed incoherent reconstruction, while point-source runs keep the original full-record reconstruction. The RF record is split into short tapered windows, low-energy windows are skipped, each remaining window is reconstructed with the existing geometric ASA and HASA code, and the output maps are accumulated as intensity:
+
+```text
+I_total(x,z) = mean_windows sum_f |p_hasa(x,z,f,window)|^2
+```
+
+The important detail is that windows are combined after `abs2`, not by summing complex pressure. This avoids preserving arbitrary phase interference between simultaneously active bubbles and instead estimates where acoustic activity occurred over the vascular region. The resulting vascular figures and detection metrics should be interpreted as accumulated activity or dose maps, not individual bubble position estimates.
+
+The synthetic vascular source model also has a time-varying mode. `--activity-mode=burst-train` expands each physical vascular emitter into short delayed Gaussian pulse events within the gate. By default, every physical emitter can be active in each activity frame, with small amplitude and phase jitter across frames to decorrelate the windows. `summary.json` records both `physical_source_count` and `emission_event_count`.
+
 ```bash
 julia --project=. scripts/run_pam_clusters.jl \
   --clusters-mm=54:0 \
@@ -293,6 +307,44 @@ julia --project=. scripts/run_pam_clusters.jl \
   --gate-us=50 \
   --phase-mode=geometric \
   --aberrator=skull
+```
+
+Longer squiggle example in homogeneous water, using the windowed activity model explicitly:
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=45:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=30 \
+  --vascular-squiggle-amplitude-mm=1 \
+  --vascular-squiggle-wavelength-mm=30 \
+  --vascular-source-spacing-mm=0.2 \
+  --vascular-min-separation-mm=0.15 \
+  --vascular-max-sources-per-anchor=150 \
+  --vascular-position-jitter-mm=0.5 \
+  --vascular-radius-mm=1.0 \
+  --fundamental-mhz=0.2 \
+  --harmonics=2,4,6 \
+  --harmonic-amplitudes=1.0,0.6,0.4 \
+  --cavitation-model=gaussian-pulse \
+  --gate-us=30 \
+  --n-bubbles=1 \
+  --phase-mode=geometric \
+  --random-seed=1 \
+  --recon-mode=windowed \
+  --recon-window-us=10 \
+  --recon-hop-us=5 \
+  --recon-window-taper=hann \
+  --recon-min-window-energy-ratio=0.001 \
+  --recon-bandwidth-khz=150 \
+  --activity-mode=burst-train \
+  --activity-frame-us=10 \
+  --activity-hop-us=5 \
+  --activity-phase-jitter-rad=0.3 \
+  --activity-amplitude-jitter=0.5 \
+  --activity-active-probability=1.0 \
+  --aberrator=none
 ```
 
 Use `--vascular-topology=bundle --vascular-bundle-count=3 --vascular-bundle-spacing-mm=2.0` for a small set of parallel squiggly vessels, or `--vascular-topology=tree --vascular-branch-levels=2` for the previous branching model.

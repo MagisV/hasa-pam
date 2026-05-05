@@ -47,9 +47,16 @@ function parse_cli(args)
         "use-gpu" => "false",
         "recon-bandwidth-khz" => "20",
         "recon-step-um" => "50",
+        "recon-mode" => "auto",
+        "recon-window-us" => "10",
+        "recon-hop-us" => "5",
+        "recon-window-taper" => "hann",
+        "recon-min-window-energy-ratio" => "0.001",
         "phase-mode" => "geometric",
         "phase-jitter-rad" => "0.2",
         "random-seed" => "0",
+        "source-phase-mode" => "coherent",
+        "n-realizations" => "1",
         "transducer-mm" => "-30:0",
         "delays-us" => "0",
         "cluster-model" => "vascular",
@@ -68,6 +75,12 @@ function parse_cli(args)
         "vascular-min-separation-mm" => "0.3",
         "vascular-max-sources-per-anchor" => "0",
         "vascular-radius-mm" => "1.0",
+        "activity-mode" => "burst-train",
+        "activity-frame-us" => "10",
+        "activity-hop-us" => "5",
+        "activity-phase-jitter-rad" => "0.3",
+        "activity-amplitude-jitter" => "0.5",
+        "activity-active-probability" => "1.0",
         "analysis-mode" => "auto",
         "detection-threshold-ratio" => "0.2",
         "peak-method" => "argmax",
@@ -126,11 +139,58 @@ function parse_cavitation_model(s::AbstractString)
     return value
 end
 
+function parse_activity_mode(s::AbstractString)
+    value = Symbol(replace(lowercase(strip(s)), "-" => "_"))
+    value in (:static, :burst_train) || error("--activity-mode must be static or burst-train, got: $s")
+    return value
+end
+
+function parse_source_phase_mode(s::AbstractString)
+    value = Symbol(replace(lowercase(strip(s)), "-" => "_"))
+    value in (
+        :coherent, :random_static_phase, :random_phase_per_window,
+        :random_phase_per_realization, :stochastic_broadband,
+    ) || error(
+        "--source-phase-mode must be one of: coherent, random_static_phase, " *
+        "random_phase_per_window, random_phase_per_realization, stochastic_broadband, got: $s",
+    )
+    return value
+end
+
 function parse_analysis_mode(s::AbstractString, cluster_model::Symbol)
     value = Symbol(lowercase(strip(s)))
     value == :auto && return cluster_model == :vascular ? :detection : :localization
     value in (:localization, :detection) || error("--analysis-mode must be auto, localization, or detection, got: $s")
     return value
+end
+
+function resolve_reconstruction_mode(s::AbstractString, cluster_model::Symbol)
+    return TranscranialFUS.pam_reconstruction_mode(s, cluster_model)
+end
+
+function parse_window_taper(s::AbstractString)
+    value = Symbol(replace(lowercase(strip(s)), "-" => "_"))
+    value in (:hann, :none, :rect, :rectangular, :tukey) ||
+        error("--recon-window-taper must be hann, none, rectangular, or tukey, got: $s")
+    return value
+end
+
+function make_window_config(opts, reconstruction_mode::Symbol)
+    return PAMWindowConfig(
+        enabled=reconstruction_mode == :windowed,
+        window_duration=parse(Float64, opts["recon-window-us"]) * 1e-6,
+        hop=parse(Float64, opts["recon-hop-us"]) * 1e-6,
+        taper=parse_window_taper(opts["recon-window-taper"]),
+        min_energy_ratio=parse(Float64, opts["recon-min-window-energy-ratio"]),
+        accumulation=:intensity,
+    )
+end
+
+function effective_recon_bandwidth_hz!(opts, provided_keys::Set{String}, reconstruction_mode::Symbol)
+    if reconstruction_mode == :windowed && !("recon-bandwidth-khz" in provided_keys)
+        opts["recon-bandwidth-khz"] = "150"
+    end
+    return parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
 end
 
 function parse_receiver_aperture_mm(s::AbstractString)
@@ -176,6 +236,7 @@ function parse_clusters(opts, cfg::PAMConfig)
     taper = parse(Float64, opts["taper-ratio"])
     per_bubble_amp = parse(Float64, opts["amplitude-pa"])
     cavitation = parse_cavitation_model(opts["cavitation-model"])
+    activity_mode = cluster_model == :vascular ? parse_activity_mode(opts["activity-mode"]) : :static
 
     n_clusters = length(coord_tokens)
     n_bubbles_per = expand_cluster_values(parse_float_list(opts["n-bubbles"]), n_clusters, 10.0)
@@ -183,8 +244,8 @@ function parse_clusters(opts, cfg::PAMConfig)
 
     tx_depth, tx_lateral = parse_transducer_mm(opts["transducer-mm"])
     phase_mode = lowercase(strip(opts["phase-mode"]))
-    phase_mode in ("coherent", "geometric", "random", "jittered") ||
-        error("Unknown phase-mode: $phase_mode (expected coherent|geometric|random|jittered).")
+    phase_mode in ("coherent", "geometric", "random", "random_static_phase", "jittered") ||
+        error("Unknown phase-mode: $phase_mode (expected coherent|geometric|random|random_static_phase|jittered).")
     rng = Random.MersenneTwister(parse(Int, opts["random-seed"]))
     jitter_rad = parse(Float64, opts["phase-jitter-rad"])
 
@@ -285,11 +346,32 @@ function parse_clusters(opts, cfg::PAMConfig)
         end
     end
 
+    physical_source_count = length(clusters)
+    activity_meta_sym = Dict{Symbol, Any}()
+    if cluster_model == :vascular && activity_mode == :burst_train
+        clusters, activity_meta_sym = make_burst_train_sources(
+            clusters;
+            activity_mode=:burst_train,
+            frame_duration=parse(Float64, opts["activity-frame-us"]) * 1e-6,
+            hop=parse(Float64, opts["activity-hop-us"]) * 1e-6,
+            amplitude_jitter=parse(Float64, opts["activity-amplitude-jitter"]),
+            phase_jitter=parse(Float64, opts["activity-phase-jitter-rad"]),
+            active_probability=parse(Float64, opts["activity-active-probability"]),
+            rng=rng,
+        )
+    else
+        clusters, activity_meta_sym = make_burst_train_sources(clusters; activity_mode=:static, rng=rng)
+    end
+    activity_meta = Dict(String(key) => value isa Symbol ? String(value) : value for (key, value) in activity_meta_sym)
+
     meta = Dict{String, Any}(
         "cluster_model" => String(cluster_model),
         "anchor_clusters_m" => [collect(anchor) for anchor in anchors],
         "n_anchor_clusters" => length(anchors),
         "n_emission_sources" => length(clusters),
+        "physical_source_count" => physical_source_count,
+        "emission_event_count" => length(clusters),
+        "activity_model" => activity_meta,
         "phase_mode" => phase_mode,
         "fundamental_hz" => f0,
         "harmonics" => harmonics,
@@ -344,6 +426,7 @@ function default_output_dir(opts, clusters, cfg, cluster_meta)
         "f$(slug_value(parse(Float64, opts["fundamental-mhz"]); digits=2))mhz",
         "h$(replace(opts["harmonics"], "," => ""))",
         lowercase(opts["phase-mode"]),
+        replace(lowercase(opts["source-phase-mode"]), "_" => ""),
         "ax$(slug_value(cfg.axial_dim * 1e3; digits=0))mm",
         "lat$(slug_value(cfg.transverse_dim * 1e3; digits=0))mm",
     ])
@@ -480,7 +563,7 @@ end
 format_sci(value::Real) = @sprintf("%.2e", Float64(value))
 
 function string_key_dict(dict::AbstractDict)
-    return Dict(String(key) => value for (key, value) in dict)
+    return Dict(String(key) => value isa Symbol ? String(value) : value for (key, value) in dict)
 end
 
 function overlay_medium_contour!(ax, c::AbstractMatrix{<:Real}, lateral_mm, depth_mm, cfg; tol::Real=5.0)
@@ -766,9 +849,26 @@ function save_paper_style_detection(path, c, pam_geo, pam_hasa, kgrid, cfg, clus
     save(path, fig)
 end
 
+function compact_window_info(info)
+    haskey(info, :used_window_count) || return nothing
+    range_pairs(ranges) = [[first(range), last(range)] for range in ranges]
+    return Dict(
+        "total_window_count" => info[:total_window_count],
+        "used_window_count" => info[:used_window_count],
+        "skipped_window_count" => info[:skipped_window_count],
+        "window_samples" => info[:window_samples],
+        "hop_samples" => info[:hop_samples],
+        "effective_window_duration_s" => info[:effective_window_duration_s],
+        "effective_hop_s" => info[:effective_hop_s],
+        "energy_threshold" => info[:energy_threshold],
+        "used_window_ranges" => range_pairs(info[:used_window_ranges]),
+        "skipped_window_ranges" => range_pairs(info[:skipped_window_ranges]),
+        "accumulation" => String(info[:accumulation]),
+    )
+end
+
 opts, provided_keys = parse_cli(ARGS)
 from_run_dir = strip(opts["from-run-dir"])
-recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
 peak_method = Symbol(lowercase(strip(opts["peak-method"])))
 peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
 detection_truth_radius_m = parse(Float64, opts["vascular-radius-mm"]) * 1e-3
@@ -827,9 +927,16 @@ if isempty(from_run_dir)
         default_cluster_recon_frequencies(clusters)
     end
     cluster_model = parse_cluster_model(opts["cluster-model"])
+    reconstruction_mode = resolve_reconstruction_mode(opts["recon-mode"], cluster_model)
+    recon_bandwidth_hz = effective_recon_bandwidth_hz!(opts, provided_keys, reconstruction_mode)
+    window_config = make_window_config(opts, reconstruction_mode)
     analysis_mode = parse_analysis_mode(opts["analysis-mode"], cluster_model)
     truth_centerlines = centerlines_from_cluster_meta(cluster_meta)
     detection_truth_mask = detection_truth_mask_from_meta(cluster_meta, pam_grid(cfg), cfg, detection_truth_radius_m)
+
+    source_phase_mode = parse_source_phase_mode(opts["source-phase-mode"])
+    n_realizations = parse(Int, opts["n-realizations"])
+    rng_sim = Random.MersenneTwister(parse(Int, opts["random-seed"]) + 1)
 
     results = run_pam_case(
         c,
@@ -848,6 +955,11 @@ if isempty(from_run_dir)
         detection_truth_radius=detection_truth_radius_m,
         detection_threshold_ratio=detection_threshold_ratio,
         detection_truth_mask=detection_truth_mask,
+        reconstruction_mode=reconstruction_mode,
+        window_config=window_config,
+        source_phase_mode=source_phase_mode,
+        n_realizations=n_realizations,
+        rng=rng_sim,
     )
     reconstruction_source = Dict("mode" => "simulation")
 else
@@ -868,6 +980,10 @@ else
             "vascular-squiggle-slope", "vascular-bundle-count", "vascular-bundle-spacing-mm",
             "vascular-source-spacing-mm", "vascular-position-jitter-mm",
             "vascular-min-separation-mm", "vascular-max-sources-per-anchor",
+            "activity-mode", "activity-frame-us", "activity-hop-us",
+            "activity-phase-jitter-rad", "activity-amplitude-jitter",
+            "activity-active-probability",
+            "source-phase-mode", "n-realizations",
         ),
     )
     cached_path = joinpath(from_run_dir, "result.jld2")
@@ -913,6 +1029,9 @@ else
         default_cluster_recon_frequencies(clusters)
     end
     cached_model = Symbol(String(cluster_meta["cluster_model"]))
+    reconstruction_mode = resolve_reconstruction_mode(opts["recon-mode"], cached_model)
+    recon_bandwidth_hz = effective_recon_bandwidth_hz!(opts, provided_keys, reconstruction_mode)
+    window_config = make_window_config(opts, reconstruction_mode)
     analysis_mode = parse_analysis_mode(opts["analysis-mode"], cached_model)
     simulation_info = haskey(cached_results, :simulation) ? cached_results[:simulation] : default_simulation_info(cfg)
     truth_centerlines = centerlines_from_cluster_meta(cluster_meta)
@@ -934,6 +1053,8 @@ else
         detection_truth_radius=detection_truth_radius_m,
         detection_threshold_ratio=detection_threshold_ratio,
         detection_truth_mask=detection_truth_mask,
+        reconstruction_mode=reconstruction_mode,
+        window_config=window_config,
     )
     reconstruction_source = Dict(
         "mode" => "cached_rf",
@@ -1017,8 +1138,19 @@ summary = Dict(
     "medium" => medium_summary,
     "reconstruction_frequencies_hz" => recon_frequencies,
     "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
+    "reconstruction_mode" => String(results[:reconstruction_mode]),
+    "source_phase_mode" => String(get(results, :source_phase_mode, :coherent)),
+    "n_realizations" => Int(get(results, :n_realizations, 1)),
+    "window_config" => string_key_dict(results[:window_config]),
+    "window_info" => Dict(
+        "geometric" => compact_window_info(results[:geo_info]),
+        "hasa" => compact_window_info(results[:hasa_info]),
+    ),
     "reconstruction_axial_step_m" => results[:geo_info][:axial_step],
     "reference_sound_speed_m_per_s" => results[:geo_info][:reference_sound_speed],
+    "activity_model" => get(cluster_meta, "activity_model", Dict("activity_mode" => "static")),
+    "physical_source_count" => get(cluster_meta, "physical_source_count", length(clusters)),
+    "emission_event_count" => get(cluster_meta, "emission_event_count", length(clusters)),
     "analysis_mode" => String(analysis_mode),
     "detection_truth_radius_m" => detection_truth_radius_m,
     "detection_truth_mode" => isnothing(detection_truth_mask) ? "source_disks" : "centerline_tube",

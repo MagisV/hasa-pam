@@ -38,9 +38,21 @@ Base.@kwdef struct GaussianPulseCluster2D <: EmissionSource2D
     delay::Float64 = 0.0
 end
 
+Base.@kwdef struct StochasticSource2D <: EmissionSource2D
+    depth::Float64
+    lateral::Float64
+    amplitude::Float64 = 1.0
+    center_frequency::Float64 = 5e5
+    bandwidth::Float64 = 4e5
+    gate_duration::Float64 = 50e-6
+    delay::Float64 = 0.0
+    seed::UInt64 = rand(UInt64)
+end
+
 _emission_frequencies(src::PointSource2D) = Float64[src.frequency]
 _emission_frequencies(src::BubbleCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
 _emission_frequencies(src::GaussianPulseCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
+_emission_frequencies(src::StochasticSource2D) = Float64[src.center_frequency]
 
 emission_frequencies(src::EmissionSource2D) = _emission_frequencies(src)
 cavitation_model(::BubbleCluster2D) = :harmonic_cos
@@ -67,9 +79,33 @@ function _geometric_drive_phase(
 end
 
 function _normalize_cluster_phase_mode(phase_mode)
-    mode = Symbol(lowercase(string(phase_mode)))
+    mode = Symbol(replace(lowercase(string(phase_mode)), "-" => "_"))
+    mode == :random_static_phase && return :random
     mode in (:coherent, :geometric, :random, :jittered) ||
-        error("Unknown phase_mode: $phase_mode (expected coherent, geometric, random, or jittered).")
+        error("Unknown phase_mode: $phase_mode (expected coherent, geometric, random, random_static_phase, or jittered).")
+    return mode
+end
+
+function _normalize_source_phase_mode(source_phase_mode)
+    mode = Symbol(replace(lowercase(string(source_phase_mode)), "-" => "_"))
+    mode in (
+        :coherent,
+        :random_static_phase,
+        :random_phase_per_window,
+        :random_phase_per_realization,
+        :stochastic_broadband,
+    ) || error(
+        "Unknown source_phase_mode: $source_phase_mode. " *
+        "Expected: coherent, random_static_phase, random_phase_per_window, " *
+        "random_phase_per_realization, or stochastic_broadband.",
+    )
+    return mode
+end
+
+function _normalize_activity_mode(activity_mode)
+    mode = Symbol(replace(lowercase(string(activity_mode)), "-" => "_"))
+    mode in (:static, :burst_train) ||
+        error("Unknown activity_mode: $activity_mode (expected static or burst-train).")
     return mode
 end
 
@@ -530,6 +566,155 @@ function make_vascular_bubble_clusters(
     return clusters, meta
 end
 
+function _burst_train_frame_offsets(
+    gate_duration::Real,
+    frame_duration::Real,
+    hop::Real,
+)
+    gate = Float64(gate_duration)
+    frame = Float64(frame_duration)
+    step = Float64(hop)
+    gate > 0 || error("gate_duration must be positive.")
+    frame > 0 || error("frame_duration must be positive.")
+    step > 0 || error("hop must be positive.")
+    frame >= gate && return [0.0]
+
+    last_start = gate - frame
+    starts = collect(0.0:step:last_start)
+    if isempty(starts) || !isapprox(last(starts), last_start; atol=max(eps(Float64), 1e-12))
+        push!(starts, last_start)
+    end
+    return starts
+end
+
+function _copy_burst_event(
+    src::BubbleCluster2D;
+    amplitude::Real,
+    harmonic_phases::AbstractVector{<:Real},
+    gate_duration::Real,
+    delay::Real,
+)
+    return BubbleCluster2D(
+        depth=src.depth,
+        lateral=src.lateral,
+        fundamental=src.fundamental,
+        amplitude=Float64(amplitude),
+        n_bubbles=src.n_bubbles,
+        harmonics=copy(src.harmonics),
+        harmonic_amplitudes=copy(src.harmonic_amplitudes),
+        harmonic_phases=Float64.(harmonic_phases),
+        gate_duration=Float64(gate_duration),
+        taper_ratio=src.taper_ratio,
+        delay=Float64(delay),
+    )
+end
+
+function _copy_burst_event(
+    src::GaussianPulseCluster2D;
+    amplitude::Real,
+    harmonic_phases::AbstractVector{<:Real},
+    gate_duration::Real,
+    delay::Real,
+)
+    return GaussianPulseCluster2D(
+        depth=src.depth,
+        lateral=src.lateral,
+        fundamental=src.fundamental,
+        amplitude=Float64(amplitude),
+        n_bubbles=src.n_bubbles,
+        harmonics=copy(src.harmonics),
+        harmonic_amplitudes=copy(src.harmonic_amplitudes),
+        harmonic_phases=Float64.(harmonic_phases),
+        gate_duration=Float64(gate_duration),
+        taper_ratio=src.taper_ratio,
+        delay=Float64(delay),
+    )
+end
+
+"""
+    make_burst_train_sources(sources; kwargs...)
+
+Expand each vascular emitter into short, delayed emission events. This is a
+synthetic activity model for simultaneous vascular cavitation: bubbles can emit
+in every activity frame, while per-frame amplitude and phase jitter decorrelate
+the accumulated PAM intensity across windows.
+"""
+function make_burst_train_sources(
+    sources::AbstractVector{<:EmissionSource2D};
+    activity_mode=:burst_train,
+    frame_duration::Real=10e-6,
+    hop::Real=5e-6,
+    amplitude_jitter::Real=0.5,
+    phase_jitter::Real=0.3,
+    active_probability::Real=1.0,
+    rng::Random.AbstractRNG=Random.default_rng(),
+)
+    mode = _normalize_activity_mode(activity_mode)
+    physical_count = length(sources)
+    if mode == :static
+        meta = Dict{Symbol, Any}(
+            :activity_mode => :static,
+            :physical_source_count => physical_count,
+            :emission_event_count => physical_count,
+            :frame_duration_s => nothing,
+            :hop_s => nothing,
+            :amplitude_jitter => 0.0,
+            :phase_jitter_rad => 0.0,
+            :active_probability => 1.0,
+        )
+        return EmissionSource2D[src for src in sources], meta
+    end
+
+    0.0 <= Float64(active_probability) <= 1.0 ||
+        error("active_probability must lie in [0, 1].")
+    Float64(amplitude_jitter) >= 0.0 || error("amplitude_jitter must be non-negative.")
+    Float64(phase_jitter) >= 0.0 || error("phase_jitter must be non-negative.")
+
+    events = EmissionSource2D[]
+    frame_count_by_source = Int[]
+    active_count_by_source = Int[]
+
+    for src in sources
+        src isa Union{BubbleCluster2D, GaussianPulseCluster2D} ||
+            error("burst-train activity currently supports bubble cluster sources only.")
+        frame_offsets = _burst_train_frame_offsets(_source_duration(src), frame_duration, hop)
+        push!(frame_count_by_source, length(frame_offsets))
+        active_count = 0
+        for offset in frame_offsets
+            rand(rng) <= Float64(active_probability) || continue
+            amp_scale = max(0.0, 1.0 + Float64(amplitude_jitter) * randn(rng))
+            phases = src.harmonic_phases .+ Float64(phase_jitter) .* randn(rng, length(src.harmonic_phases))
+            push!(
+                events,
+                _copy_burst_event(
+                    src;
+                    amplitude=src.amplitude * amp_scale,
+                    harmonic_phases=phases,
+                    gate_duration=frame_duration,
+                    delay=src.delay + offset,
+                ),
+            )
+            active_count += 1
+        end
+        push!(active_count_by_source, active_count)
+    end
+
+    isempty(events) && error("Burst-train activity generated no emission events.")
+    meta = Dict{Symbol, Any}(
+        :activity_mode => :burst_train,
+        :physical_source_count => physical_count,
+        :emission_event_count => length(events),
+        :frame_duration_s => Float64(frame_duration),
+        :hop_s => Float64(hop),
+        :amplitude_jitter => Float64(amplitude_jitter),
+        :phase_jitter_rad => Float64(phase_jitter),
+        :active_probability => Float64(active_probability),
+        :frame_count_by_source => frame_count_by_source,
+        :active_count_by_source => active_count_by_source,
+    )
+    return events, meta
+end
+
 Base.@kwdef struct PAMConfig
     dx::Float64 = 0.2e-3
     dz::Float64 = 0.2e-3
@@ -546,6 +731,15 @@ Base.@kwdef struct PAMConfig
     tukey_ratio::Float64 = 0.25
     peak_suppression_radius::Float64 = 2e-3
     success_tolerance::Float64 = 1e-3
+end
+
+Base.@kwdef struct PAMWindowConfig
+    enabled::Bool = false
+    window_duration::Float64 = 10e-6
+    hop::Float64 = 5e-6
+    taper::Symbol = :hann
+    min_energy_ratio::Float64 = 1e-3
+    accumulation::Symbol = :intensity
 end
 
 function _default_pam_pml_guard(dx::Real)
@@ -921,6 +1115,110 @@ _source_signal(nt::Int, dt::Real, src::PointSource2D) = _tone_burst_signal(nt, d
 _source_signal(nt::Int, dt::Real, src::BubbleCluster2D) = _cluster_emission_signal(nt, dt, src)
 _source_signal(nt::Int, dt::Real, src::GaussianPulseCluster2D) = _cluster_emission_signal(nt, dt, src)
 
+function _stochastic_source_signal(nt::Int, dt::Real, src::StochasticSource2D)
+    signal = zeros(Float64, nt)
+    samples = collect(0:(nt - 1))
+    t = samples .* Float64(dt) .- src.delay
+    active = findall((t .>= 0.0) .& (t .<= src.gate_duration))
+    isempty(active) && return signal
+
+    rng_local = Random.MersenneTwister(src.seed)
+    raw = randn(rng_local, nt)
+
+    df = 1.0 / (nt * Float64(dt))
+    fc = src.center_frequency
+    bw = src.bandwidth
+    spec = fft(raw)
+    weights = zeros(Float64, nt)
+    @inbounds for k in 1:nt
+        f = k <= nt ÷ 2 + 1 ? (k - 1) * df : (k - 1 - nt) * df
+        dist = abs(abs(f) - fc)
+        dist < bw && (weights[k] = cos(π * dist / (2 * bw)))
+    end
+    spec .*= weights
+    bandlimited = real.(ifft(spec))
+    active_noise = bandlimited[active]
+    peak = maximum(abs.(active_noise))
+    peak > eps(Float64) && (active_noise ./= peak)
+
+    envelope = _tukey_window(length(active), 0.25)
+    signal[active] .= src.amplitude .* envelope .* active_noise
+    return signal
+end
+
+_source_signal(nt::Int, dt::Real, src::StochasticSource2D) = _stochastic_source_signal(nt, dt, src)
+
+function _resample_source_phases(
+    sources::AbstractVector{<:EmissionSource2D},
+    rng::Random.AbstractRNG,
+)
+    return map(sources) do src
+        if src isa BubbleCluster2D
+            BubbleCluster2D(
+                depth=src.depth, lateral=src.lateral,
+                fundamental=src.fundamental, amplitude=src.amplitude,
+                n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                harmonic_amplitudes=copy(src.harmonic_amplitudes),
+                harmonic_phases=2π .* rand(rng, length(src.harmonics)),
+                gate_duration=src.gate_duration, taper_ratio=src.taper_ratio,
+                delay=src.delay,
+            )
+        elseif src isa GaussianPulseCluster2D
+            GaussianPulseCluster2D(
+                depth=src.depth, lateral=src.lateral,
+                fundamental=src.fundamental, amplitude=src.amplitude,
+                n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                harmonic_amplitudes=copy(src.harmonic_amplitudes),
+                harmonic_phases=2π .* rand(rng, length(src.harmonics)),
+                gate_duration=src.gate_duration, taper_ratio=src.taper_ratio,
+                delay=src.delay,
+            )
+        elseif src isa PointSource2D
+            PointSource2D(
+                depth=src.depth, lateral=src.lateral,
+                frequency=src.frequency, amplitude=src.amplitude,
+                phase=2π * rand(rng), delay=src.delay, num_cycles=src.num_cycles,
+            )
+        elseif src isa StochasticSource2D
+            StochasticSource2D(
+                depth=src.depth, lateral=src.lateral,
+                amplitude=src.amplitude, center_frequency=src.center_frequency,
+                bandwidth=src.bandwidth, gate_duration=src.gate_duration,
+                delay=src.delay, seed=rand(rng, UInt64),
+            )
+        else
+            src
+        end
+    end
+end
+
+function _to_stochastic_sources(
+    sources::AbstractVector{<:EmissionSource2D},
+    rng::Random.AbstractRNG,
+)
+    return map(sources) do src
+        if src isa StochasticSource2D
+            return StochasticSource2D(
+                depth=src.depth, lateral=src.lateral,
+                amplitude=src.amplitude, center_frequency=src.center_frequency,
+                bandwidth=src.bandwidth, gate_duration=src.gate_duration,
+                delay=src.delay, seed=rand(rng, UInt64),
+            )
+        end
+        freqs = _emission_frequencies(src)
+        fc = sum(freqs) / length(freqs)
+        bw = length(freqs) > 1 ? (maximum(freqs) - minimum(freqs)) / 2 : fc / 2
+        bw = max(bw, fc * 0.1)
+        gate = src isa PointSource2D ? Float64(src.num_cycles) / src.frequency : src.gate_duration
+        StochasticSource2D(
+            depth=src.depth, lateral=src.lateral,
+            amplitude=src.amplitude, center_frequency=fc,
+            bandwidth=bw, gate_duration=gate,
+            delay=src.delay, seed=rand(rng, UInt64),
+        )
+    end
+end
+
 function source_grid_index(src::EmissionSource2D, cfg::PAMConfig, kgrid::KGrid2D)
     src.depth >= 0.0 || error("Source depth must be >= 0.")
     row = receiver_row(cfg) + round(Int, src.depth / cfg.dx)
@@ -1006,6 +1304,82 @@ function _select_frequency_bins(
         end
     end
     return resolved_freqs, bins
+end
+
+function _normalize_reconstruction_mode(reconstruction_mode)
+    mode = Symbol(replace(lowercase(string(reconstruction_mode)), "-" => "_"))
+    mode in (:full, :windowed) ||
+        error("Unknown reconstruction_mode: $reconstruction_mode (expected full or windowed).")
+    return mode
+end
+
+function pam_reconstruction_mode(reconstruction_mode, cluster_model)
+    mode = Symbol(replace(lowercase(string(reconstruction_mode)), "-" => "_"))
+    model = Symbol(replace(lowercase(string(cluster_model)), "-" => "_"))
+    model in (:point, :vascular) ||
+        error("Unknown cluster_model: $cluster_model (expected point or vascular).")
+    mode == :auto && return model == :vascular ? :windowed : :full
+    return _normalize_reconstruction_mode(mode)
+end
+
+function _normalize_window_taper(taper)
+    mode = Symbol(replace(lowercase(string(taper)), "-" => "_"))
+    mode in (:hann, :none, :rect, :rectangular, :tukey) ||
+        error("Unknown PAM window taper: $taper (expected hann, none, rectangular, or tukey).")
+    return mode
+end
+
+function _validate_window_config(config::PAMWindowConfig)
+    config.window_duration > 0 || error("window_duration must be positive.")
+    config.hop > 0 || error("hop must be positive.")
+    config.min_energy_ratio >= 0 || error("min_energy_ratio must be non-negative.")
+    config.accumulation == :intensity ||
+        error("Only intensity accumulation is supported for windowed PAM.")
+    _normalize_window_taper(config.taper)
+    return config
+end
+
+function _pam_window_ranges(nt::Integer, dt::Real, config::PAMWindowConfig)
+    nt_i = Int(nt)
+    nt_i > 0 || error("RF data must contain at least one time sample.")
+    _validate_window_config(config)
+
+    win_n = max(1, round(Int, config.window_duration / Float64(dt)))
+    hop_n = max(1, round(Int, config.hop / Float64(dt)))
+    if nt_i <= win_n
+        return [1:nt_i], nt_i, hop_n
+    end
+
+    last_start = nt_i - win_n + 1
+    starts = collect(1:hop_n:last_start)
+    if last(starts) != last_start
+        push!(starts, last_start)
+    end
+    return [start:(start + win_n - 1) for start in starts], win_n, hop_n
+end
+
+function _pam_temporal_taper(n::Integer, taper)
+    n_i = Int(n)
+    n_i > 0 || error("Temporal taper length must be positive.")
+    mode = _normalize_window_taper(taper)
+    if mode in (:none, :rect, :rectangular)
+        return ones(Float64, n_i)
+    elseif mode == :tukey
+        return _tukey_window(n_i, 0.25)
+    end
+    n_i == 1 && return ones(Float64, 1)
+    return [0.5 * (1 - cos(2π * (idx - 1) / (n_i - 1))) for idx in 1:n_i]
+end
+
+function _window_config_info(config::PAMWindowConfig)
+    return Dict{Symbol, Any}(
+        :enabled => config.enabled,
+        :window_duration_s => config.window_duration,
+        :hop_s => config.hop,
+        :taper => config.taper,
+        :min_energy_ratio => config.min_energy_ratio,
+        :accumulation => config.accumulation,
+    )
 end
 
 function _connected_component(mask::BitMatrix, seed::Tuple{Int, Int})
@@ -1618,6 +1992,7 @@ function reconstruct_pam(
     corrected::Bool=true,
     reference_sound_speed::Union{Nothing, Real}=nothing,
     axial_step::Union{Nothing, Real}=nothing,
+    time_origin::Real=0.0,
 )
     nx, ny = size(c)
     size(rf, 1) == ny || error("RF data must have size (Ny, Nt); expected Ny=$ny, got $(size(rf, 1)).")
@@ -1640,9 +2015,10 @@ function reconstruct_pam(
     intensity_padded = zeros(Float64, nx, padded_ny)
     row_stop = nx
     row_stop > rr || error("No valid reconstruction rows remain below the receiver row.")
+    t0 = Float64(time_origin)
 
     for (freq, bin) in zip(selected_freqs, selected_bins)
-        p0 = rf_fft[:, bin]
+        p0 = rf_fft[:, bin] .* exp(-1im * 2π * freq * t0)
         p0_padded, _ = _zero_pad_receiver_rf(reshape(p0, ny, 1), padded_ny)
         p0_vec = vec(p0_padded[:, 1])
 
@@ -1703,6 +2079,95 @@ function reconstruct_pam(
         :reference_sound_speed => c0,
         :axial_step => effective_axial_step,
         :axial_substeps_per_cell => axial_substeps,
+        :time_origin => t0,
+    )
+    return intensity, kgrid, info
+end
+
+function reconstruct_pam_windowed(
+    rf::AbstractMatrix{<:Real},
+    c::AbstractMatrix{<:Real},
+    cfg::PAMConfig;
+    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    bandwidth::Real=0.0,
+    corrected::Bool=true,
+    reference_sound_speed::Union{Nothing, Real}=nothing,
+    axial_step::Union{Nothing, Real}=nothing,
+    window_config::PAMWindowConfig=PAMWindowConfig(enabled=true),
+)
+    nx, ny = size(c)
+    size(rf, 1) == ny || error("RF data must have size (Ny, Nt); expected Ny=$ny, got $(size(rf, 1)).")
+    nt = size(rf, 2)
+    kgrid = KGrid2D(nx, ny, cfg.dx, cfg.dz; dt=cfg.dt, Nt=nt)
+    config = _validate_window_config(window_config)
+
+    ranges, window_samples, hop_samples = _pam_window_ranges(nt, cfg.dt, config)
+    energies = [sum(abs2, @view rf[:, range]) for range in ranges]
+    max_energy = isempty(energies) ? 0.0 : maximum(energies)
+    threshold = max_energy * config.min_energy_ratio
+
+    intensity = zeros(Float64, nx, ny)
+    used_ranges = UnitRange{Int}[]
+    skipped_ranges = UnitRange{Int}[]
+    window_infos = Dict{Symbol, Any}[]
+    used_energy = Float64[]
+    skipped_energy = Float64[]
+
+    for (range, energy) in zip(ranges, energies)
+        if energy < threshold || energy <= 0
+            push!(skipped_ranges, range)
+            push!(skipped_energy, Float64(energy))
+            continue
+        end
+
+        taper = _pam_temporal_taper(length(range), config.taper)
+        rf_window = Float64.(@view rf[:, range]) .* reshape(taper, 1, :)
+        window_intensity, _, window_info = reconstruct_pam(
+            rf_window,
+            c,
+            cfg;
+            frequencies=frequencies,
+            bandwidth=bandwidth,
+            corrected=corrected,
+            reference_sound_speed=reference_sound_speed,
+            axial_step=axial_step,
+            time_origin=(first(range) - 1) * cfg.dt,
+        )
+        intensity .+= window_intensity
+        push!(used_ranges, range)
+        push!(used_energy, Float64(energy))
+        push!(window_infos, window_info)
+    end
+
+    used_count = length(used_ranges)
+    if used_count > 0
+        intensity ./= used_count
+    end
+    first_info = isempty(window_infos) ? Dict{Symbol, Any}() : first(window_infos)
+    info = Dict{Symbol, Any}(
+        :frequencies => get(first_info, :frequencies, Float64[]),
+        :frequency_bins => get(first_info, :frequency_bins, Int[]),
+        :bandwidth => Float64(bandwidth),
+        :corrected => corrected,
+        :receiver_row => receiver_row(cfg),
+        :reference_sound_speed => isnothing(reference_sound_speed) ? mean(Float64.(c)) : Float64(reference_sound_speed),
+        :axial_step => get(first_info, :axial_step, isnothing(axial_step) ? cfg.dx : Float64(axial_step)),
+        :window_config => _window_config_info(config),
+        :window_samples => window_samples,
+        :hop_samples => hop_samples,
+        :effective_window_duration_s => window_samples * cfg.dt,
+        :effective_hop_s => hop_samples * cfg.dt,
+        :total_window_count => length(ranges),
+        :used_window_count => used_count,
+        :skipped_window_count => length(skipped_ranges),
+        :energy_threshold => threshold,
+        :window_energies => energies,
+        :used_window_energies => used_energy,
+        :skipped_window_energies => skipped_energy,
+        :used_window_ranges => used_ranges,
+        :skipped_window_ranges => skipped_ranges,
+        :window_infos => window_infos,
+        :accumulation => :intensity,
     )
     return intensity, kgrid, info
 end
@@ -1729,6 +2194,45 @@ function _pam_reference_sound_speed(
     return mean(Float64.(view(c, row_start:row_stop, :)))
 end
 
+function _run_pam_multirealization(
+    c::AbstractMatrix{<:Real},
+    rho::AbstractMatrix{<:Real},
+    sources::AbstractVector{<:EmissionSource2D},
+    cfg::PAMConfig;
+    n_realizations::Int,
+    source_phase_mode::Symbol,
+    use_gpu::Bool,
+    rng::Random.AbstractRNG,
+    recon_kwargs::NamedTuple,
+)
+    geo_acc = nothing
+    hasa_acc = nothing
+    last_kgrid = nothing
+    last_results = nothing
+
+    for _ in 1:n_realizations
+        resampled = _resample_source_phases(sources, rng)
+        rf, kgrid, sim_info = simulate_point_sources(c, rho, resampled, cfg; use_gpu=use_gpu)
+        results = reconstruct_pam_case(rf, c, resampled, cfg; simulation_info=sim_info, recon_kwargs...)
+        if isnothing(geo_acc)
+            geo_acc = Float64.(results[:pam_geo])
+            hasa_acc = Float64.(results[:pam_hasa])
+        else
+            geo_acc .+= results[:pam_geo]
+            hasa_acc .+= results[:pam_hasa]
+        end
+        last_kgrid = kgrid
+        last_results = results
+    end
+
+    last_results[:pam_geo] = geo_acc ./ n_realizations
+    last_results[:pam_hasa] = hasa_acc ./ n_realizations
+    last_results[:kgrid] = last_kgrid
+    last_results[:source_phase_mode] = source_phase_mode
+    last_results[:n_realizations] = n_realizations
+    return last_results
+end
+
 function run_pam_case(
     c::AbstractMatrix{<:Real},
     rho::AbstractMatrix{<:Real},
@@ -1748,15 +2252,17 @@ function run_pam_case(
     detection_threshold_ratio::Real=0.2,
     detection_truth_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
     reconstruction_axial_step::Union{Nothing, Real}=50e-6,
+    reconstruction_mode::Symbol=:full,
+    window_config::PAMWindowConfig=PAMWindowConfig(),
+    source_phase_mode::Symbol=:coherent,
+    n_realizations::Int=1,
+    rng::Random.AbstractRNG=Random.default_rng(),
 )
-    recon_freqs = isnothing(frequencies) ? _default_recon_frequencies(sources) : Float64.(frequencies)
-    rf, kgrid, sim_info = simulate_point_sources(c, rho, sources, cfg; use_gpu=use_gpu)
-    results = reconstruct_pam_case(
-        rf,
-        c,
-        sources,
-        cfg;
-        simulation_info=sim_info,
+    phase_mode = _normalize_source_phase_mode(source_phase_mode)
+    effective_sources = phase_mode == :stochastic_broadband ?
+        _to_stochastic_sources(sources, rng) : sources
+    recon_freqs = isnothing(frequencies) ? _default_recon_frequencies(effective_sources) : Float64.(frequencies)
+    recon_kwargs = (
         frequencies=recon_freqs,
         bandwidth=bandwidth,
         analysis_mode=analysis_mode,
@@ -1770,8 +2276,25 @@ function run_pam_case(
         detection_threshold_ratio=detection_threshold_ratio,
         detection_truth_mask=detection_truth_mask,
         reconstruction_axial_step=reconstruction_axial_step,
+        reconstruction_mode=reconstruction_mode,
+        window_config=window_config,
     )
+    if phase_mode in (:random_phase_per_realization, :random_phase_per_window)
+        n_realizations >= 1 || error("n_realizations must be >= 1.")
+        return _run_pam_multirealization(
+            c, rho, effective_sources, cfg;
+            n_realizations=n_realizations,
+            source_phase_mode=phase_mode,
+            use_gpu=use_gpu,
+            rng=rng,
+            recon_kwargs=recon_kwargs,
+        )
+    end
+    rf, kgrid, sim_info = simulate_point_sources(c, rho, effective_sources, cfg; use_gpu=use_gpu)
+    results = reconstruct_pam_case(rf, c, effective_sources, cfg; simulation_info=sim_info, recon_kwargs...)
     results[:kgrid] = kgrid
+    results[:source_phase_mode] = phase_mode
+    results[:n_realizations] = 1
     return results
 end
 
@@ -1798,6 +2321,8 @@ function reconstruct_pam_case(
     detection_threshold_ratio::Real=0.2,
     detection_truth_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
     reconstruction_axial_step::Union{Nothing, Real}=50e-6,
+    reconstruction_mode::Symbol=:full,
+    window_config::PAMWindowConfig=PAMWindowConfig(),
 )
     size(c) == (pam_Nx(cfg), pam_Ny(cfg)) ||
         error("Sound-speed map size $(size(c)) does not match PAMConfig size ($(pam_Nx(cfg)), $(pam_Ny(cfg))).")
@@ -1812,8 +2337,39 @@ function reconstruct_pam_case(
         reference_sound_speed=reference_sound_speed,
         axial_step=reconstruction_axial_step,
     )
-    pam_geo, kgrid, geo_info = reconstruct_pam(rf, c, cfg; recon_kwargs..., corrected=false)
-    pam_hasa, _, hasa_info = reconstruct_pam(rf, c, cfg; recon_kwargs..., corrected=true)
+    recon_mode = _normalize_reconstruction_mode(reconstruction_mode)
+    effective_window_config = PAMWindowConfig(;
+        enabled=recon_mode == :windowed,
+        window_duration=window_config.window_duration,
+        hop=window_config.hop,
+        taper=window_config.taper,
+        min_energy_ratio=window_config.min_energy_ratio,
+        accumulation=window_config.accumulation,
+    )
+    pam_geo, kgrid, geo_info = if recon_mode == :windowed
+        reconstruct_pam_windowed(
+            rf,
+            c,
+            cfg;
+            recon_kwargs...,
+            corrected=false,
+            window_config=effective_window_config,
+        )
+    else
+        reconstruct_pam(rf, c, cfg; recon_kwargs..., corrected=false)
+    end
+    pam_hasa, _, hasa_info = if recon_mode == :windowed
+        reconstruct_pam_windowed(
+            rf,
+            c,
+            cfg;
+            recon_kwargs...,
+            corrected=true,
+            window_config=effective_window_config,
+        )
+    else
+        reconstruct_pam(rf, c, cfg; recon_kwargs..., corrected=true)
+    end
 
     stats_geo, stats_hasa = if analysis_mode == :localization
         analyse_kwargs = (
@@ -1855,6 +2411,8 @@ function reconstruct_pam_case(
         :stats_hasa => stats_hasa,
         :reconstruction_frequencies => recon_freqs,
         :analysis_mode => analysis_mode,
+        :reconstruction_mode => recon_mode,
+        :window_config => _window_config_info(effective_window_config),
     )
 end
 
