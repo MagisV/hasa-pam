@@ -57,6 +57,10 @@ function parse_cli(args)
         "random-seed" => "0",
         "source-phase-mode" => "coherent",
         "n-realizations" => "1",
+        "amplitude-distribution" => "fixed",
+        "amplitude-sigma" => "0.0",
+        "frequency-jitter-percent" => "0.0",
+        "dropout-probability" => "0.0",
         "transducer-mm" => "-30:0",
         "delays-us" => "0",
         "cluster-model" => "vascular",
@@ -939,6 +943,12 @@ if isempty(from_run_dir)
     source_phase_mode = parse_source_phase_mode(opts["source-phase-mode"])
     n_realizations = parse(Int, opts["n-realizations"])
     rng_sim = Random.MersenneTwister(parse(Int, opts["random-seed"]) + 1)
+    source_variability = SourceVariabilityConfig(
+        amplitude_distribution=Symbol(lowercase(strip(opts["amplitude-distribution"]))),
+        amplitude_sigma=parse(Float64, opts["amplitude-sigma"]),
+        frequency_jitter_fraction=parse(Float64, opts["frequency-jitter-percent"]) / 100.0,
+        dropout_probability=parse(Float64, opts["dropout-probability"]),
+    )
 
     results = run_pam_case(
         c,
@@ -962,6 +972,7 @@ if isempty(from_run_dir)
         source_phase_mode=source_phase_mode,
         n_realizations=n_realizations,
         rng=rng_sim,
+        source_variability=source_variability,
     )
     reconstruction_source = Dict("mode" => "simulation")
 else
@@ -1143,6 +1154,12 @@ summary = Dict(
     "reconstruction_mode" => String(results[:reconstruction_mode]),
     "source_phase_mode" => String(get(results, :source_phase_mode, :coherent)),
     "n_realizations" => Int(get(results, :n_realizations, 1)),
+    "source_variability" => Dict(
+        "amplitude_distribution" => String(source_variability.amplitude_distribution),
+        "amplitude_sigma" => source_variability.amplitude_sigma,
+        "frequency_jitter_percent" => source_variability.frequency_jitter_fraction * 100.0,
+        "dropout_probability" => source_variability.dropout_probability,
+    ),
     "window_config" => string_key_dict(results[:window_config]),
     "window_info" => Dict(
         "geometric" => compact_window_info(results[:geo_info]),

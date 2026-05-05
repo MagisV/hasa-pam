@@ -742,6 +742,31 @@ Base.@kwdef struct PAMWindowConfig
     accumulation::Symbol = :intensity
 end
 
+Base.@kwdef struct SourceVariabilityConfig
+    amplitude_distribution::Symbol = :fixed
+    amplitude_sigma::Float64 = 0.0
+    frequency_jitter_fraction::Float64 = 0.0
+    dropout_probability::Float64 = 0.0
+end
+
+function _sample_amplitude(
+    rng::Random.AbstractRNG,
+    base::Float64,
+    dist::Symbol,
+    sigma::Float64,
+)
+    sigma <= 0.0 || dist == :fixed && return base
+    if dist == :uniform
+        return max(0.0, base * (1.0 + sigma * (2.0 * rand(rng) - 1.0)))
+    elseif dist == :lognormal
+        return base * exp(sigma * randn(rng))
+    elseif dist == :gaussian
+        return max(0.0, base * (1.0 + sigma * randn(rng)))
+    else
+        error("Unknown amplitude_distribution: $dist. Expected :fixed, :uniform, :lognormal, or :gaussian.")
+    end
+end
+
 function _default_pam_pml_guard(dx::Real)
     # Keep the default physical guard close to 4 mm across PAM resolutions.
     return max(4, round(Int, 4e-3 / Float64(dx)))
@@ -1224,7 +1249,8 @@ function _expand_sources_per_window(
     window_duration::Real,
     hop::Real,
     t_max::Real,
-    rng::Random.AbstractRNG,
+    rng::Random.AbstractRNG;
+    variability::SourceVariabilityConfig=SourceVariabilityConfig(),
 )
     frame_dur = Float64(window_duration)
     hop_s = Float64(hop)
@@ -1233,13 +1259,20 @@ function _expand_sources_per_window(
     n_frames = max(1, floor(Int, (Float64(t_max) - frame_dur) / hop_s) + 1)
     expanded = EmissionSource2D[]
     sizehint!(expanded, length(sources) * n_frames)
+    adist = variability.amplitude_distribution
+    asigma = variability.amplitude_sigma
+    fjitter = variability.frequency_jitter_fraction
+    pdrop = variability.dropout_probability
     for src in sources
         for k in 1:n_frames
+            pdrop > 0.0 && rand(rng) < pdrop && continue
             d = src.delay + hop_s * (k - 1)
+            amp = _sample_amplitude(rng, Float64(src.amplitude), adist, asigma)
+            fscale = fjitter > 0.0 ? max(0.01, 1.0 + fjitter * randn(rng)) : 1.0
             evt = if src isa BubbleCluster2D
                 BubbleCluster2D(
                     depth=src.depth, lateral=src.lateral,
-                    fundamental=src.fundamental, amplitude=src.amplitude,
+                    fundamental=src.fundamental * fscale, amplitude=amp,
                     n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
                     harmonic_amplitudes=copy(src.harmonic_amplitudes),
                     harmonic_phases=2π .* rand(rng, length(src.harmonics)),
@@ -1249,7 +1282,7 @@ function _expand_sources_per_window(
             elseif src isa GaussianPulseCluster2D
                 GaussianPulseCluster2D(
                     depth=src.depth, lateral=src.lateral,
-                    fundamental=src.fundamental, amplitude=src.amplitude,
+                    fundamental=src.fundamental * fscale, amplitude=amp,
                     n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
                     harmonic_amplitudes=copy(src.harmonic_amplitudes),
                     harmonic_phases=2π .* rand(rng, length(src.harmonics)),
@@ -1257,16 +1290,16 @@ function _expand_sources_per_window(
                     delay=d,
                 )
             elseif src isa PointSource2D
-                nc = max(1, round(Int, min(Float64(src.num_cycles) / src.frequency, frame_dur) * src.frequency))
+                nc = max(1, round(Int, min(Float64(src.num_cycles) / src.frequency, frame_dur) * src.frequency * fscale))
                 PointSource2D(
                     depth=src.depth, lateral=src.lateral,
-                    frequency=src.frequency, amplitude=src.amplitude,
+                    frequency=src.frequency * fscale, amplitude=amp,
                     phase=2π * rand(rng), delay=d, num_cycles=nc,
                 )
             elseif src isa StochasticSource2D
                 StochasticSource2D(
                     depth=src.depth, lateral=src.lateral,
-                    amplitude=src.amplitude, center_frequency=src.center_frequency,
+                    amplitude=amp, center_frequency=src.center_frequency * fscale,
                     bandwidth=src.bandwidth, gate_duration=min(src.gate_duration, frame_dur),
                     delay=d, seed=rand(rng, UInt64),
                 )
@@ -1276,6 +1309,7 @@ function _expand_sources_per_window(
             push!(expanded, evt)
         end
     end
+    isempty(expanded) && error("_expand_sources_per_window: all emissions dropped — dropout_probability too high?")
     return expanded, n_frames
 end
 
@@ -2263,10 +2297,12 @@ function _run_pam_per_window(
     use_gpu::Bool,
     rng::Random.AbstractRNG,
     recon_kwargs::NamedTuple,
+    variability::SourceVariabilityConfig=SourceVariabilityConfig(),
 )
     win_cfg = recon_kwargs.window_config
     expanded, n_frames = _expand_sources_per_window(
-        sources, win_cfg.window_duration, win_cfg.hop, cfg.t_max, rng,
+        sources, win_cfg.window_duration, win_cfg.hop, cfg.t_max, rng;
+        variability=variability,
     )
     eff_window_config = PAMWindowConfig(;
         enabled=true,
@@ -2349,6 +2385,7 @@ function run_pam_case(
     source_phase_mode::Symbol=:coherent,
     n_realizations::Int=1,
     rng::Random.AbstractRNG=Random.default_rng(),
+    source_variability::SourceVariabilityConfig=SourceVariabilityConfig(),
 )
     phase_mode = _normalize_source_phase_mode(source_phase_mode)
     effective_sources = phase_mode == :stochastic_broadband ?
@@ -2388,6 +2425,7 @@ function run_pam_case(
             use_gpu=use_gpu,
             rng=rng,
             recon_kwargs=recon_kwargs,
+            variability=source_variability,
         )
     end
     rf, kgrid, sim_info = simulate_point_sources(c, rho, effective_sources, cfg; use_gpu=use_gpu)

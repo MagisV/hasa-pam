@@ -38,7 +38,7 @@ export load_roi_resample_xy, load_default_ct
 export hu_to_rho_c, find_skull_boundaries, skull_mask_from_c_columnwise
 export make_medium_fixed_distance_from_skull, make_medium_fixed_transducer, make_medium
 export plot_hasa_results, focus, analyse_focus_2d, run_focus_case, kwave_available
-export EmissionSource2D, PointSource2D, BubbleCluster2D, GaussianPulseCluster2D, StochasticSource2D, PAMConfig, PAMWindowConfig, fit_pam_config, pam_Nx, pam_Ny, pam_Nt, pam_grid, receiver_row, receiver_col_range, depth_coordinates
+export EmissionSource2D, PointSource2D, BubbleCluster2D, GaussianPulseCluster2D, StochasticSource2D, PAMConfig, PAMWindowConfig, SourceVariabilityConfig, fit_pam_config, pam_Nx, pam_Ny, pam_Nt, pam_grid, receiver_row, receiver_col_range, depth_coordinates
 export emission_frequencies, cavitation_model
 export make_vascular_bubble_clusters, make_burst_train_sources, make_pam_medium, source_grid_index, simulate_point_sources, reconstruct_pam, reconstruct_pam_windowed, find_pam_peaks, find_pam_peaks_clean
 export pam_truth_mask, pam_centerline_truth_mask, threshold_pam_map, pam_intensity_metrics, analyse_pam_2d, analyse_pam_detection_2d, reconstruct_pam_case, run_pam_case, run_pam_sweep

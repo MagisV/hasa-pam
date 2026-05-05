@@ -466,6 +466,61 @@ end
     @test stoch[1].bandwidth > 0
 end
 
+@testset "SourceVariabilityConfig" begin
+    rng = Random.MersenneTwister(42)
+    src = BubbleCluster2D(depth=0.03, lateral=0.0, fundamental=0.5e6,
+        harmonics=[2, 3], harmonic_amplitudes=[1.0, 0.6],
+        harmonic_phases=[0.1, 0.2], gate_duration=50e-6)
+
+    # defaults: fixed amplitudes, no jitter, no dropout
+    expanded, n = TranscranialFUS._expand_sources_per_window(
+        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(1))
+    @test n == 15
+    @test length(expanded) == 15
+    @test all(s.amplitude == src.amplitude for s in expanded)
+    @test all(s.fundamental == src.fundamental for s in expanded)
+
+    # lognormal amplitude: all positive, values differ across copies
+    exp_ln, _ = TranscranialFUS._expand_sources_per_window(
+        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(7);
+        variability=SourceVariabilityConfig(amplitude_distribution=:lognormal, amplitude_sigma=0.5))
+    @test all(s.amplitude > 0 for s in exp_ln)
+    @test length(unique(round.(Float64[s.amplitude for s in exp_ln]; digits=8))) > 1
+
+    # gaussian amplitude: all non-negative
+    exp_gs, _ = TranscranialFUS._expand_sources_per_window(
+        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(8);
+        variability=SourceVariabilityConfig(amplitude_distribution=:gaussian, amplitude_sigma=0.5))
+    @test all(s.amplitude >= 0 for s in exp_gs)
+
+    # uniform amplitude: all non-negative
+    exp_un, _ = TranscranialFUS._expand_sources_per_window(
+        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(9);
+        variability=SourceVariabilityConfig(amplitude_distribution=:uniform, amplitude_sigma=0.5))
+    @test all(s.amplitude >= 0 for s in exp_un)
+
+    # frequency jitter: fundamentals vary across copies
+    exp_fj, _ = TranscranialFUS._expand_sources_per_window(
+        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(99);
+        variability=SourceVariabilityConfig(frequency_jitter_fraction=0.05))
+    @test length(unique(round.(Float64[s.fundamental for s in exp_fj]; digits=0))) > 1
+
+    # dropout: with many sources and p=0.5, some but not all are dropped
+    many = [BubbleCluster2D(depth=0.03, lateral=i*1e-3, fundamental=0.5e6,
+        harmonics=[2], harmonic_amplitudes=[1.0], harmonic_phases=[0.0],
+        gate_duration=50e-6) for i in 1:20]
+    exp_drop, _ = TranscranialFUS._expand_sources_per_window(
+        many, 10e-6, 5e-6, 80e-6, Random.MersenneTwister(42);
+        variability=SourceVariabilityConfig(dropout_probability=0.5))
+    @test length(exp_drop) < 20 * 15
+    @test length(exp_drop) > 0
+
+    # dropout=1.0 errors
+    @test_throws ErrorException TranscranialFUS._expand_sources_per_window(
+        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(1);
+        variability=SourceVariabilityConfig(dropout_probability=1.0))
+end
+
 @testset "Vascular bubble clusters" begin
     squiggle_clusters, squiggle_meta = make_vascular_bubble_clusters(
         [(0.03, 0.0)];
