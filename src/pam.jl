@@ -1219,6 +1219,66 @@ function _to_stochastic_sources(
     end
 end
 
+function _expand_sources_per_window(
+    sources::AbstractVector{<:EmissionSource2D},
+    window_duration::Real,
+    hop::Real,
+    t_max::Real,
+    rng::Random.AbstractRNG,
+)
+    frame_dur = Float64(window_duration)
+    hop_s = Float64(hop)
+    frame_dur > 0 || error("window_duration must be positive.")
+    hop_s > 0 || error("hop must be positive.")
+    n_frames = max(1, floor(Int, (Float64(t_max) - frame_dur) / hop_s) + 1)
+    expanded = EmissionSource2D[]
+    sizehint!(expanded, length(sources) * n_frames)
+    for src in sources
+        for k in 1:n_frames
+            d = src.delay + hop_s * (k - 1)
+            evt = if src isa BubbleCluster2D
+                BubbleCluster2D(
+                    depth=src.depth, lateral=src.lateral,
+                    fundamental=src.fundamental, amplitude=src.amplitude,
+                    n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                    harmonic_amplitudes=copy(src.harmonic_amplitudes),
+                    harmonic_phases=2π .* rand(rng, length(src.harmonics)),
+                    gate_duration=min(src.gate_duration, frame_dur), taper_ratio=src.taper_ratio,
+                    delay=d,
+                )
+            elseif src isa GaussianPulseCluster2D
+                GaussianPulseCluster2D(
+                    depth=src.depth, lateral=src.lateral,
+                    fundamental=src.fundamental, amplitude=src.amplitude,
+                    n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                    harmonic_amplitudes=copy(src.harmonic_amplitudes),
+                    harmonic_phases=2π .* rand(rng, length(src.harmonics)),
+                    gate_duration=min(src.gate_duration, frame_dur), taper_ratio=src.taper_ratio,
+                    delay=d,
+                )
+            elseif src isa PointSource2D
+                nc = max(1, round(Int, min(Float64(src.num_cycles) / src.frequency, frame_dur) * src.frequency))
+                PointSource2D(
+                    depth=src.depth, lateral=src.lateral,
+                    frequency=src.frequency, amplitude=src.amplitude,
+                    phase=2π * rand(rng), delay=d, num_cycles=nc,
+                )
+            elseif src isa StochasticSource2D
+                StochasticSource2D(
+                    depth=src.depth, lateral=src.lateral,
+                    amplitude=src.amplitude, center_frequency=src.center_frequency,
+                    bandwidth=src.bandwidth, gate_duration=min(src.gate_duration, frame_dur),
+                    delay=d, seed=rand(rng, UInt64),
+                )
+            else
+                src
+            end
+            push!(expanded, evt)
+        end
+    end
+    return expanded, n_frames
+end
+
 function source_grid_index(src::EmissionSource2D, cfg::PAMConfig, kgrid::KGrid2D)
     src.depth >= 0.0 || error("Source depth must be >= 0.")
     row = receiver_row(cfg) + round(Int, src.depth / cfg.dx)
@@ -2194,6 +2254,38 @@ function _pam_reference_sound_speed(
     return mean(Float64.(view(c, row_start:row_stop, :)))
 end
 
+function _run_pam_per_window(
+    c::AbstractMatrix{<:Real},
+    rho::AbstractMatrix{<:Real},
+    sources::AbstractVector{<:EmissionSource2D},
+    cfg::PAMConfig;
+    source_phase_mode::Symbol,
+    use_gpu::Bool,
+    rng::Random.AbstractRNG,
+    recon_kwargs::NamedTuple,
+)
+    win_cfg = recon_kwargs.window_config
+    expanded, n_frames = _expand_sources_per_window(
+        sources, win_cfg.window_duration, win_cfg.hop, cfg.t_max, rng,
+    )
+    eff_window_config = PAMWindowConfig(;
+        enabled=true,
+        window_duration=win_cfg.window_duration,
+        hop=win_cfg.hop,
+        taper=win_cfg.taper,
+        min_energy_ratio=win_cfg.min_energy_ratio,
+        accumulation=win_cfg.accumulation,
+    )
+    eff_recon_kwargs = merge(recon_kwargs, (reconstruction_mode=:windowed, window_config=eff_window_config))
+    rf, kgrid, sim_info = simulate_point_sources(c, rho, expanded, cfg; use_gpu=use_gpu)
+    results = reconstruct_pam_case(rf, c, expanded, cfg; simulation_info=sim_info, eff_recon_kwargs...)
+    results[:kgrid] = kgrid
+    results[:source_phase_mode] = source_phase_mode
+    results[:n_realizations] = 1
+    results[:n_frames] = n_frames
+    return results
+end
+
 function _run_pam_multirealization(
     c::AbstractMatrix{<:Real},
     rho::AbstractMatrix{<:Real},
@@ -2279,11 +2371,19 @@ function run_pam_case(
         reconstruction_mode=reconstruction_mode,
         window_config=window_config,
     )
-    if phase_mode in (:random_phase_per_realization, :random_phase_per_window)
+    if phase_mode == :random_phase_per_realization
         n_realizations >= 1 || error("n_realizations must be >= 1.")
         return _run_pam_multirealization(
             c, rho, effective_sources, cfg;
             n_realizations=n_realizations,
+            source_phase_mode=phase_mode,
+            use_gpu=use_gpu,
+            rng=rng,
+            recon_kwargs=recon_kwargs,
+        )
+    elseif phase_mode == :random_phase_per_window
+        return _run_pam_per_window(
+            c, rho, effective_sources, cfg;
             source_phase_mode=phase_mode,
             use_gpu=use_gpu,
             rng=rng,

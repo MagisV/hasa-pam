@@ -203,6 +203,7 @@ Core types:
 - `PointSource2D`
 - `BubbleCluster2D`
 - `GaussianPulseCluster2D`
+- `StochasticSource2D`
 - `PAMConfig`
 - `PAMWindowConfig`
 
@@ -369,6 +370,85 @@ julia --project=. scripts/run_pam_clusters.jl \
 
 `--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources/clusters, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, time step, and GPU simulation are rejected in this mode; reconstruction and analysis options such as `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, `--peak-method`, and cluster detection thresholds remain adjustable.
 
+### Source Phase Modes
+
+`--source-phase-mode` controls the physical regime being simulated and is reported in `summary.json`.
+
+| Mode | Physical meaning |
+|---|---|
+| `coherent` | All sources share the same phase relation. Contributions add constructively/destructively by geometry. |
+| `random_static_phase` | Each source draws a random phase once at setup and keeps it for the full simulation. |
+| `random_phase_per_window` | Each source emits once per reconstruction window with fresh random phases. A **single** k-Wave simulation spans all windows; windowed reconstruction is forced automatically. |
+| `random_phase_per_realization` | Each of `--n-realizations` k-Wave runs draws fresh random phases; intensity maps are averaged across runs. |
+| `stochastic_broadband` | Each source is replaced with a `StochasticSource2D` that emits independent bandlimited noise centred on the cluster harmonics. |
+
+**Coherent baseline** — sources lock in phase, single simulation:
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=point \
+  --source-phase-mode=coherent \
+  --phase-mode=coherent \
+  --aberrator=none
+```
+
+**Random static phase** — fixed random phases, single simulation:
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=12 \
+  --source-phase-mode=random_static_phase \
+  --phase-mode=random \
+  --random-seed=42 \
+  --aberrator=none
+```
+
+**Incoherent averaging over realizations** — 20 independent phase draws:
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=12 \
+  --source-phase-mode=random_phase_per_realization \
+  --n-realizations=20 \
+  --random-seed=42 \
+  --aberrator=none
+```
+
+**Incoherent averaging per window** — single k-Wave run; each source gets fresh random phases per window:
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=12 \
+  --source-phase-mode=random_phase_per_window \
+  --recon-window-us=10 \
+  --recon-hop-us=5 \
+  --random-seed=42 \
+  --aberrator=none
+```
+
+**Stochastic broadband** — each source emits independent noise centred on its harmonic frequencies:
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=12 \
+  --source-phase-mode=stochastic_broadband \
+  --random-seed=42 \
+  --aberrator=none
+```
+
 ### Run a PAM Sweep
 
 The sweep script runs **single-source** reconstructions over a target grid and compares uncorrected vs corrected localization.
@@ -455,6 +535,7 @@ The tests currently cover:
 - vascular PAM source generation and detection metrics
 - PAM medium fitting and skull placement
 - PAM sweep aggregation and target filtering
+- source phase mode normalisation, `StochasticSource2D` signal generation, phase resampling
 - opt-in k-Wave smoke tests
 
 ## AI Usage

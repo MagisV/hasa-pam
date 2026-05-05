@@ -348,7 +348,9 @@ function parse_clusters(opts, cfg::PAMConfig)
 
     physical_source_count = length(clusters)
     activity_meta_sym = Dict{Symbol, Any}()
-    if cluster_model == :vascular && activity_mode == :burst_train
+    source_phase_mode_for_activity = parse_source_phase_mode(opts["source-phase-mode"])
+    if cluster_model == :vascular && activity_mode == :burst_train &&
+            source_phase_mode_for_activity != :random_phase_per_window
         clusters, activity_meta_sym = make_burst_train_sources(
             clusters;
             activity_mode=:burst_train,
