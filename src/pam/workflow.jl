@@ -129,8 +129,7 @@ function run_pam_case(
     show_progress::Bool=false,
 )
     phase_mode = _normalize_source_phase_mode(source_phase_mode)
-    effective_sources = phase_mode == :stochastic_broadband ?
-        _to_stochastic_sources(sources, rng) : sources
+    effective_sources = sources
     recon_freqs = isnothing(frequencies) ? _default_recon_frequencies(effective_sources) : Float64.(frequencies)
     recon_kwargs = (
         frequencies=recon_freqs,

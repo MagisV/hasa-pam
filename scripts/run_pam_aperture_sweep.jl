@@ -7,10 +7,9 @@ function aperture_sweep_opts(args)
     get!(opts, "max-hours", "8.75")
     get!(opts, "per-run-timeout-min", "90")
     get!(opts, "output-root", "")
-    get!(opts, "clusters-mm", "45:0")
+    get!(opts, "anchors-mm", "45:0")
     get!(opts, "simulation-random-seeds", "42,43,44")
     get!(opts, "apertures-mm", "50,60,100,full,40,30,20")
-    get!(opts, "dropout-probabilities", "0.0,0.25")
     get!(opts, "transverse-mm", "102.4")
     get!(opts, "slice-index", "250")
     get!(opts, "skull-transducer-distance-mm", "30")
@@ -25,22 +24,15 @@ function aperture_label(aperture::AbstractString)
     return replace(lower, "." => "p")
 end
 
-function dropout_label(dropout::AbstractString)
-    return replace(strip(dropout), "." => "p")
-end
-
 function aperture_sweep_jobs(opts)
     apertures = parse_string_list(opts["apertures-mm"])
     seeds = parse_string_list(opts["simulation-random-seeds"])
-    dropouts = parse_string_list(opts["dropout-probabilities"])
     isempty(apertures) && error("--apertures-mm must contain at least one aperture.")
     isempty(seeds) && error("--simulation-random-seeds must contain at least one seed.")
-    isempty(dropouts) && error("--dropout-probabilities must contain at least one value.")
 
     base = Dict(
-        "clusters-mm" => opts["clusters-mm"],
-        "cluster-model" => "vascular",
-        "vascular-topology" => "squiggle",
+        "source-model" => "squiggle",
+        "anchors-mm" => opts["anchors-mm"],
         "vascular-length-mm" => "12",
         "aberrator" => "skull",
         "slice-index" => opts["slice-index"],
@@ -53,7 +45,6 @@ function aperture_sweep_jobs(opts)
         "harmonics" => "2,3,4",
         "harmonic-amplitudes" => "1.0,0.6,0.3",
         "source-phase-mode" => "random_phase_per_window",
-        "activity-mode" => "static",
         "recon-window-us" => "20",
         "recon-hop-us" => "10",
         "recon-bandwidth-khz" => "500",
@@ -63,20 +54,17 @@ function aperture_sweep_jobs(opts)
 
     jobs = Dict{String, Any}[]
     for seed in seeds
-        for dropout in dropouts
-            for aperture in apertures
-                id = "aperture_ap$(aperture_label(aperture))_dropout$(dropout_label(dropout))_seed$(seed)"
-                args = merge_args(
-                    base,
-                    Dict(
-                        "receiver-aperture-mm" => aperture,
-                        "dropout-probability" => dropout,
-                        "random-seed" => seed,
-                    ),
-                )
-                note = "Focused aperture sweep for h234 random-phase-per-window w20/bw500/t500 on a $(opts["transverse-mm"]) mm transverse grid."
-                push!(jobs, sim_job(id, args; note=note))
-            end
+        for aperture in apertures
+            id = "aperture_ap$(aperture_label(aperture))_seed$(seed)"
+            args = merge_args(
+                base,
+                Dict(
+                    "receiver-aperture-mm" => aperture,
+                    "random-seed" => seed,
+                ),
+            )
+            note = "Focused aperture sweep for h234 random-phase-per-window w20/bw500/t500 on a $(opts["transverse-mm"]) mm transverse grid."
+            push!(jobs, sim_job(id, args; note=note))
         end
     end
     return jobs
@@ -100,7 +88,6 @@ function aperture_sweep_main()
         "max_hours" => parse(Float64, opts["max-hours"]),
         "per_run_timeout_min" => parse(Float64, opts["per-run-timeout-min"]),
         "apertures_mm" => parse_string_list(opts["apertures-mm"]),
-        "dropout_probabilities" => parse_string_list(opts["dropout-probabilities"]),
         "simulation_random_seeds" => parse_string_list(opts["simulation-random-seeds"]),
         "transverse_mm" => opts["transverse-mm"],
         "job_count" => length(jobs),
@@ -111,7 +98,6 @@ function aperture_sweep_main()
     println("Output root: ", out_root)
     println("Jobs queued: ", length(jobs))
     println("Apertures mm: ", opts["apertures-mm"])
-    println("Dropout probabilities: ", opts["dropout-probabilities"])
     println("Seeds: ", opts["simulation-random-seeds"])
     println("Transverse grid mm: ", opts["transverse-mm"])
     println("Max hours: ", opts["max-hours"], " | per-run timeout min: ", opts["per-run-timeout-min"])

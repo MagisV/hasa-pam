@@ -393,9 +393,9 @@ end
     @test event_results[:analysis_source_count] == 1
     @test event_results[:stats_geo][:num_truth_sources] == 1
 
-    cluster_script = read(joinpath(@__DIR__, "..", "scripts", "run_pam_clusters.jl"), String)
-    @test occursin("\"recon-progress\" => \"false\"", cluster_script)
-    @test occursin("show_progress=parse_bool(opts[\"recon-progress\"])", cluster_script)
+    pam_script = read(joinpath(@__DIR__, "..", "scripts", "run_pam.jl"), String)
+    @test occursin("\"recon-progress\" => \"false\"", pam_script)
+    @test occursin("show_progress=parse_bool(opts[\"recon-progress\"])", pam_script)
 end
 
 @testset "PAM windowing helpers" begin
@@ -419,9 +419,9 @@ end
     p2 = fill(-1.0 + 0.0im, 2, 2)
     @test all(abs2.(p1 .+ p2) .== 0.0)
     @test all(abs2.(p1) .+ abs2.(p2) .== 2.0)
-    @test TranscranialFUS.pam_reconstruction_mode(:auto, :vascular) == :windowed
+    @test TranscranialFUS.pam_reconstruction_mode(:auto, :squiggle) == :windowed
     @test TranscranialFUS.pam_reconstruction_mode(:auto, :point) == :full
-    @test TranscranialFUS.pam_reconstruction_mode(:full, :vascular) == :full
+    @test TranscranialFUS.pam_reconstruction_mode(:full, :squiggle) == :full
 end
 
 @testset "PAM analysis metrics" begin
@@ -518,49 +518,12 @@ end
     @test TranscranialFUS._normalize_source_phase_mode(:random_static_phase) == :random_static_phase
     @test TranscranialFUS._normalize_source_phase_mode(:random_phase_per_window) == :random_phase_per_window
     @test TranscranialFUS._normalize_source_phase_mode(:random_phase_per_realization) == :random_phase_per_realization
-    @test TranscranialFUS._normalize_source_phase_mode(:stochastic_broadband) == :stochastic_broadband
     @test TranscranialFUS._normalize_source_phase_mode("random-phase-per-realization") == :random_phase_per_realization
     @test_throws ErrorException TranscranialFUS._normalize_source_phase_mode(:unknown_mode)
 
     @test TranscranialFUS._normalize_cluster_phase_mode(:random_static_phase) == :random
     @test TranscranialFUS._normalize_cluster_phase_mode("random_static_phase") == :random
     @test TranscranialFUS._normalize_cluster_phase_mode(:coherent) == :coherent
-
-    dt = 20e-9
-    nt = 2000
-    src_stoch = StochasticSource2D(
-        depth=0.03,
-        lateral=0.0,
-        amplitude=2.0,
-        center_frequency=1.0e6,
-        bandwidth=0.3e6,
-        gate_duration=10e-6,
-        seed=UInt64(42),
-    )
-    sig = TranscranialFUS._source_signal(nt, dt, src_stoch)
-
-    @test length(sig) == nt
-    @test maximum(abs, sig) ≤ 2.0 + eps(Float64)
-    @test maximum(abs, sig) ≥ 2.0 * 0.5
-    @test abs(sig[1]) < 0.05 * maximum(abs, sig)
-    @test emission_frequencies(src_stoch) == [1.0e6]
-
-    sig_same = TranscranialFUS._source_signal(nt, dt, src_stoch)
-    @test sig_same == sig
-
-    src_other = StochasticSource2D(depth=0.03, lateral=0.0, amplitude=2.0,
-        center_frequency=1.0e6, bandwidth=0.3e6, gate_duration=10e-6, seed=UInt64(99))
-    sig_other = TranscranialFUS._source_signal(nt, dt, src_other)
-    @test sig_other != sig
-
-    spectrum = abs.(fft(sig))
-    df = 1.0 / (nt * dt)
-    freq_axis = [(k <= nt ÷ 2 + 1 ? k - 1 : k - 1 - nt) * df for k in 1:nt]
-    pos_bins = findall(f -> 0 < f <= nt ÷ 2 * df, freq_axis)
-    pos_freqs = freq_axis[pos_bins]
-    in_band = findall(f -> abs(f - 1.0e6) < 0.3e6, pos_freqs)
-    out_band = findall(f -> abs(f - 1.0e6) > 0.6e6, pos_freqs)
-    @test mean(spectrum[pos_bins[in_band]]) > mean(spectrum[pos_bins[out_band]])
 
     rng_r = Random.MersenneTwister(7)
     sources_orig = [
@@ -580,13 +543,6 @@ end
     @test resampled[2].phase != sources_orig[2].phase
     @test resampled[3].harmonic_phases != sources_orig[3].harmonic_phases
 
-    rng_s = Random.MersenneTwister(11)
-    stoch = TranscranialFUS._to_stochastic_sources(sources_orig[1:1], rng_s)
-    @test stoch[1] isa StochasticSource2D
-    @test stoch[1].depth == sources_orig[1].depth
-    @test stoch[1].lateral == sources_orig[1].lateral
-    @test stoch[1].center_frequency > 0
-    @test stoch[1].bandwidth > 0
 end
 
 @testset "SourceVariabilityConfig" begin
@@ -595,7 +551,6 @@ end
         harmonics=[2, 3], harmonic_amplitudes=[1.0, 0.6],
         harmonic_phases=[0.1, 0.2], gate_duration=50e-6)
 
-    # defaults: fixed amplitudes, no jitter, no dropout
     expanded, n = TranscranialFUS._expand_sources_per_window(
         [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(1))
     @test n == 15
@@ -603,49 +558,15 @@ end
     @test all(s.amplitude == src.amplitude for s in expanded)
     @test all(s.fundamental == src.fundamental for s in expanded)
 
-    # lognormal amplitude: all positive, values differ across copies
-    exp_ln, _ = TranscranialFUS._expand_sources_per_window(
-        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(7);
-        variability=SourceVariabilityConfig(amplitude_distribution=:lognormal, amplitude_sigma=0.5))
-    @test all(s.amplitude > 0 for s in exp_ln)
-    @test length(unique(round.(Float64[s.amplitude for s in exp_ln]; digits=8))) > 1
-
-    # gaussian amplitude: all non-negative
-    exp_gs, _ = TranscranialFUS._expand_sources_per_window(
-        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(8);
-        variability=SourceVariabilityConfig(amplitude_distribution=:gaussian, amplitude_sigma=0.5))
-    @test all(s.amplitude >= 0 for s in exp_gs)
-
-    # uniform amplitude: all non-negative
-    exp_un, _ = TranscranialFUS._expand_sources_per_window(
-        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(9);
-        variability=SourceVariabilityConfig(amplitude_distribution=:uniform, amplitude_sigma=0.5))
-    @test all(s.amplitude >= 0 for s in exp_un)
-
     # frequency jitter: fundamentals vary across copies
     exp_fj, _ = TranscranialFUS._expand_sources_per_window(
         [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(99);
         variability=SourceVariabilityConfig(frequency_jitter_fraction=0.05))
     @test length(unique(round.(Float64[s.fundamental for s in exp_fj]; digits=0))) > 1
-
-    # dropout: with many sources and p=0.5, some but not all are dropped
-    many = [BubbleCluster2D(depth=0.03, lateral=i*1e-3, fundamental=0.5e6,
-        harmonics=[2], harmonic_amplitudes=[1.0], harmonic_phases=[0.0],
-        gate_duration=50e-6) for i in 1:20]
-    exp_drop, _ = TranscranialFUS._expand_sources_per_window(
-        many, 10e-6, 5e-6, 80e-6, Random.MersenneTwister(42);
-        variability=SourceVariabilityConfig(dropout_probability=0.5))
-    @test length(exp_drop) < 20 * 15
-    @test length(exp_drop) > 0
-
-    # dropout=1.0 errors
-    @test_throws ErrorException TranscranialFUS._expand_sources_per_window(
-        [src], 10e-6, 5e-6, 80e-6, Random.MersenneTwister(1);
-        variability=SourceVariabilityConfig(dropout_probability=1.0))
 end
 
-@testset "Vascular bubble clusters" begin
-    squiggle_clusters, squiggle_meta = make_vascular_bubble_clusters(
+@testset "Squiggle bubble sources" begin
+    squiggle_clusters, squiggle_meta = make_squiggle_bubble_sources(
         [(0.03, 0.0)];
         root_length=12e-3,
         squiggle_amplitude=1.5e-3,
@@ -657,15 +578,14 @@ end
         rng=Random.MersenneTwister(41),
     )
 
-    @test squiggle_meta[:cluster_model] == :vascular
-    @test squiggle_meta[:topology] == :squiggle
+    @test squiggle_meta[:source_model] == :squiggle
     @test squiggle_meta[:cavitation_model] == :harmonic_cos
     @test all(src -> src isa BubbleCluster2D, squiggle_clusters)
     @test length(squiggle_meta[:centerlines]) == 1
     @test maximum(src.lateral for src in squiggle_clusters) - minimum(src.lateral for src in squiggle_clusters) > 10e-3
     @test maximum(src.depth for src in squiggle_clusters) - minimum(src.depth for src in squiggle_clusters) > 2e-3
 
-    pulse_clusters, pulse_meta = make_vascular_bubble_clusters(
+    pulse_clusters, pulse_meta = make_squiggle_bubble_sources(
         [(0.03, 0.0)];
         cavitation_model=:gaussian_pulse,
         root_length=12e-3,
@@ -682,29 +602,9 @@ end
     @test all(src -> src isa GaussianPulseCluster2D, pulse_clusters)
     @test length(pulse_clusters) == length(squiggle_clusters)
 
-    bundle_clusters, bundle_meta = make_vascular_bubble_clusters(
-        [(0.03, 0.0)];
-        topology=:bundle,
-        root_length=12e-3,
-        bundle_count=3,
-        bundle_spacing=2e-3,
-        source_spacing=1e-3,
-        position_jitter=0.0,
-        min_separation=0.0,
-        lateral_bounds=(-0.02, 0.02),
-        rng=Random.MersenneTwister(42),
-    )
-    @test bundle_meta[:topology] == :bundle
-    @test length(bundle_meta[:centerlines]) == 3
-    @test length(bundle_clusters) > length(squiggle_clusters)
-    @test maximum(mean(first.(line)) for line in bundle_meta[:centerlines]) -
-          minimum(mean(first.(line)) for line in bundle_meta[:centerlines]) > 3e-3
-
-    clusters, meta = make_vascular_bubble_clusters(
-        [(0.03, 0.0)];
-        topology=:tree,
+    multi_clusters, multi_meta = make_squiggle_bubble_sources(
+        [(0.03, -0.004), (0.035, 0.004)];
         root_length=8e-3,
-        branch_levels=1,
         source_spacing=1e-3,
         position_jitter=0.0,
         min_separation=0.0,
@@ -712,61 +612,9 @@ end
         lateral_bounds=(-0.02, 0.02),
         rng=Random.MersenneTwister(43),
     )
-
-    @test length(clusters) > 8
-    @test length(clusters) <= 20
-    @test meta[:cluster_model] == :vascular
-    @test meta[:topology] == :tree
-    @test meta[:source_count_by_anchor] == [length(clusters)]
-    @test maximum(src.depth for src in clusters) > minimum(src.depth for src in clusters)
-    @test maximum(abs(src.lateral) for src in clusters) > 0
-
-    burst_base = [
-        GaussianPulseCluster2D(
-            depth=0.03,
-            lateral=0.0,
-            fundamental=0.5e6,
-            harmonics=[2],
-            harmonic_amplitudes=[1.0],
-            harmonic_phases=[0.0],
-            gate_duration=6e-6,
-        ),
-    ]
-    burst_events, burst_meta = make_burst_train_sources(
-        burst_base;
-        frame_duration=2e-6,
-        hop=2e-6,
-        amplitude_jitter=0.0,
-        phase_jitter=0.0,
-        active_probability=1.0,
-        rng=Random.MersenneTwister(11),
-    )
-    @test burst_meta[:physical_source_count] == 1
-    @test burst_meta[:emission_event_count] == 3
-    @test length(burst_events) == 3
-    @test [event.delay for event in burst_events] ≈ [0.0, 2e-6, 4e-6]
-    @test all(event.delay + event.gate_duration <= first(burst_base).gate_duration + eps(Float64) for event in burst_events)
-
-    burst_events_a, _ = make_burst_train_sources(
-        burst_base;
-        frame_duration=2e-6,
-        hop=2e-6,
-        amplitude_jitter=0.5,
-        phase_jitter=0.3,
-        active_probability=1.0,
-        rng=Random.MersenneTwister(12),
-    )
-    burst_events_b, _ = make_burst_train_sources(
-        burst_base;
-        frame_duration=2e-6,
-        hop=2e-6,
-        amplitude_jitter=0.5,
-        phase_jitter=0.3,
-        active_probability=1.0,
-        rng=Random.MersenneTwister(12),
-    )
-    @test [event.amplitude for event in burst_events_a] ≈ [event.amplitude for event in burst_events_b]
-    @test [only(event.harmonic_phases) for event in burst_events_a] ≈ [only(event.harmonic_phases) for event in burst_events_b]
+    @test length(multi_clusters) > length(squiggle_clusters)
+    @test multi_meta[:source_model] == :squiggle
+    @test length(multi_meta[:centerlines]) == 2
 end
 
 @testset "PAM detection metrics" begin

@@ -149,9 +149,9 @@ end
 function pam_reconstruction_mode(reconstruction_mode, cluster_model)
     mode = Symbol(replace(lowercase(string(reconstruction_mode)), "-" => "_"))
     model = Symbol(replace(lowercase(string(cluster_model)), "-" => "_"))
-    model in (:point, :vascular) ||
-        error("Unknown cluster_model: $cluster_model (expected point or vascular).")
-    mode == :auto && return model == :vascular ? :windowed : :full
+    model in (:point, :squiggle) ||
+        error("Unknown source model: $cluster_model (expected point or squiggle).")
+    mode == :auto && return model == :squiggle ? :windowed : :full
     return _normalize_reconstruction_mode(mode)
 end
 
