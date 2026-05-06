@@ -458,7 +458,7 @@ else
             "success-tolerance-mm", "aberrator", "ct-path", "slice-index",
             "skull-transducer-distance-mm", "bottom-margin-mm", "hu-bone-thr",
             "lens-depth-mm", "lens-lateral-mm", "lens-axial-radius-mm", "lens-lateral-radius-mm",
-            "aberrator-c", "aberrator-rho", "use-gpu",
+            "aberrator-c", "aberrator-rho",
         ),
     )
     cached_path = joinpath(from_run_dir, "result.jld2")
@@ -494,6 +494,7 @@ else
         simulation_info=simulation_info,
         frequencies=recon_frequencies,
         bandwidth=recon_bandwidth_hz,
+        use_gpu=parse_bool(opts["use-gpu"]),
         reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
         peak_method=peak_method,
         clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),

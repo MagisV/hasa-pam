@@ -52,6 +52,7 @@ function parse_cli(args)
         "recon-hop-us" => "5",
         "recon-window-taper" => "hann",
         "recon-min-window-energy-ratio" => "0.001",
+        "recon-progress" => "false",
         "phase-mode" => "geometric",
         "phase-jitter-rad" => "0.2",
         "random-seed" => "0",
@@ -933,6 +934,7 @@ if isempty(from_run_dir)
         n_realizations=n_realizations,
         rng=rng_sim,
         source_variability=source_variability,
+        show_progress=parse_bool(opts["recon-progress"]),
     )
     reconstruction_source = Dict("mode" => "simulation")
 else
@@ -946,7 +948,7 @@ else
             "success-tolerance-mm", "aberrator", "ct-path", "slice-index",
             "skull-transducer-distance-mm", "bottom-margin-mm", "hu-bone-thr",
             "lens-depth-mm", "lens-lateral-mm", "lens-axial-radius-mm", "lens-lateral-radius-mm",
-            "aberrator-c", "aberrator-rho", "use-gpu", "phase-mode", "phase-jitter-rad",
+            "aberrator-c", "aberrator-rho", "phase-mode", "phase-jitter-rad",
             "random-seed", "transducer-mm", "delays-us", "cluster-model",
             "vascular-topology", "vascular-length-mm", "vascular-branch-levels", "vascular-branch-angle-deg",
             "vascular-branch-scale", "vascular-squiggle-amplitude-mm", "vascular-squiggle-wavelength-mm",
@@ -1020,6 +1022,7 @@ else
         simulation_info=simulation_info,
         frequencies=recon_frequencies,
         bandwidth=recon_bandwidth_hz,
+        use_gpu=parse_bool(opts["use-gpu"]),
         reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
         analysis_mode=analysis_mode,
         peak_method=peak_method,
@@ -1031,6 +1034,7 @@ else
         detection_truth_mask=detection_truth_mask,
         reconstruction_mode=reconstruction_mode,
         window_config=window_config,
+        show_progress=parse_bool(opts["recon-progress"]),
     )
     reconstruction_source = Dict(
         "mode" => "cached_rf",
@@ -1105,6 +1109,7 @@ summary = Dict(
     "reconstruction_frequencies_hz" => recon_frequencies,
     "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
     "reconstruction_mode" => String(results[:reconstruction_mode]),
+    "reconstruction_progress" => parse_bool(opts["recon-progress"]),
     "source_phase_mode" => String(get(results, :source_phase_mode, :coherent)),
     "n_realizations" => Int(get(results, :n_realizations, 1)),
     "source_variability" => Dict(

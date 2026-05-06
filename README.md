@@ -404,7 +404,7 @@ julia --project=. scripts/run_pam_clusters.jl \
   --recon-bandwidth-khz=20
 ```
 
-`--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources/clusters, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, time step, and GPU simulation are rejected in this mode; reconstruction and analysis options such as `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, `--peak-method`, and cluster detection thresholds remain adjustable.
+`--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources/clusters, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, and time step are rejected in this mode; reconstruction and analysis options such as `--use-gpu`, `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, `--peak-method`, and cluster detection thresholds remain adjustable.
 
 ### Source Phase Modes
 

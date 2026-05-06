@@ -28,6 +28,39 @@ function _edge_pad_lateral(a::AbstractMatrix{<:Real}, target_ny::Int)
     return out, range
 end
 
+function _format_elapsed(seconds::Real)
+    s = Float64(seconds)
+    if s < 1e-3
+        return "$(round(s * 1e6; digits=1)) us"
+    elseif s < 1
+        return "$(round(s * 1e3; digits=1)) ms"
+    elseif s < 60
+        return "$(round(s; digits=2)) s"
+    end
+    minutes = floor(Int, s / 60)
+    rem_s = s - 60 * minutes
+    return "$(minutes)m $(round(rem_s; digits=1))s"
+end
+
+function _format_frequency_mhz(freq::Real)
+    return "$(round(Float64(freq) / 1e6; digits=4)) MHz"
+end
+
+function _format_frequency_list(freqs::AbstractVector{<:Real}; max_items::Int=8)
+    isempty(freqs) && return "none"
+    labels = [_format_frequency_mhz(freq) for freq in freqs]
+    length(labels) <= max_items && return join(labels, ", ")
+    head_count = max(1, max_items - 1)
+    return join(vcat(labels[1:head_count], ["...", labels[end]]), ", ")
+end
+
+function _pam_progress(show::Bool, msg::AbstractString)
+    show || return nothing
+    println(stderr, msg)
+    flush(stderr)
+    return nothing
+end
+
 function _fft_wavenumbers(n::Int, spacing::Real)
     dk = 2π / Float64(spacing)
     start_val = -fld(n, 2)
@@ -87,7 +120,10 @@ function reconstruct_pam(
     reference_sound_speed::Union{Nothing, Real}=nothing,
     axial_step::Union{Nothing, Real}=nothing,
     time_origin::Real=0.0,
+    use_gpu::Bool=false,
+    show_progress::Bool=false,
 )
+    total_start = time()
     nx, ny = size(c)
     size(rf, 1) == ny || error("RF data must have size (Ny, Nt); expected Ny=$ny, got $(size(rf, 1)).")
     nt = size(rf, 2)
@@ -110,8 +146,16 @@ function reconstruct_pam(
     row_stop = nx
     row_stop > rr || error("No valid reconstruction rows remain below the receiver row.")
     t0 = Float64(time_origin)
+    recon_label = corrected ? "HASA" : "geometric ASA"
 
-    for (freq, bin) in zip(selected_freqs, selected_bins)
+    _pam_progress(
+        show_progress,
+        "PAM $recon_label reconstruction: $(length(selected_freqs)) frequency bins ($(_format_frequency_list(selected_freqs))), " *
+        "grid=$(nx)x$(ny), padded_ny=$padded_ny, axial_substeps=$axial_substeps",
+    )
+
+    for (freq_idx, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
+        freq_start = time()
         p0 = rf_fft[:, bin] .* exp(-1im * 2π * freq * t0)
         p0_padded, _ = _zero_pad_receiver_rf(reshape(p0, ny, 1), padded_ny)
         p0_vec = vec(p0_padded[:, 1])
@@ -160,7 +204,18 @@ function reconstruct_pam(
             p_row = ifft(_ifftshift(current))
             intensity_padded[row, :] .+= abs2.(p_row)
         end
+
+        _pam_progress(
+            show_progress,
+            "PAM $recon_label frequency $freq_idx/$(length(selected_freqs)) " *
+            "($(_format_frequency_mhz(freq)), bin $bin) elapsed $(_format_elapsed(time() - freq_start))",
+        )
     end
+
+    _pam_progress(
+        show_progress,
+        "PAM $recon_label reconstruction total elapsed $(_format_elapsed(time() - total_start))",
+    )
 
     intensity = intensity_padded[:, crop_range]
     info = Dict{Symbol, Any}(
@@ -174,6 +229,8 @@ function reconstruct_pam(
         :axial_step => effective_axial_step,
         :axial_substeps_per_cell => axial_substeps,
         :time_origin => t0,
+        :use_gpu => use_gpu,
+        :show_progress => show_progress,
     )
     return intensity, kgrid, info
 end
@@ -188,7 +245,10 @@ function reconstruct_pam_windowed(
     reference_sound_speed::Union{Nothing, Real}=nothing,
     axial_step::Union{Nothing, Real}=nothing,
     window_config::PAMWindowConfig=PAMWindowConfig(enabled=true),
+    use_gpu::Bool=false,
+    show_progress::Bool=false,
 )
+    total_start = time()
     nx, ny = size(c)
     size(rf, 1) == ny || error("RF data must have size (Ny, Nt); expected Ny=$ny, got $(size(rf, 1)).")
     nt = size(rf, 2)
@@ -199,6 +259,13 @@ function reconstruct_pam_windowed(
     energies = [sum(abs2, @view rf[:, range]) for range in ranges]
     max_energy = isempty(energies) ? 0.0 : maximum(energies)
     threshold = max_energy * config.min_energy_ratio
+    recon_label = corrected ? "HASA" : "geometric ASA"
+
+    _pam_progress(
+        show_progress,
+        "PAM $recon_label windowed reconstruction: $(length(ranges)) windows, " *
+        "window_samples=$window_samples, hop_samples=$hop_samples, energy_threshold=$threshold",
+    )
 
     intensity = zeros(Float64, nx, ny)
     used_ranges = UnitRange{Int}[]
@@ -207,13 +274,19 @@ function reconstruct_pam_windowed(
     used_energy = Float64[]
     skipped_energy = Float64[]
 
-    for (range, energy) in zip(ranges, energies)
+    for (window_idx, (range, energy)) in enumerate(zip(ranges, energies))
         if energy < threshold || energy <= 0
             push!(skipped_ranges, range)
             push!(skipped_energy, Float64(energy))
+            _pam_progress(
+                show_progress,
+                "PAM $recon_label window $window_idx/$(length(ranges)) skipped, " *
+                "samples=$(first(range)):$(last(range)), energy=$energy",
+            )
             continue
         end
 
+        window_start = time()
         taper = _pam_temporal_taper(length(range), config.taper)
         rf_window = Float64.(@view rf[:, range]) .* reshape(taper, 1, :)
         window_intensity, _, window_info = reconstruct_pam(
@@ -226,11 +299,19 @@ function reconstruct_pam_windowed(
             reference_sound_speed=reference_sound_speed,
             axial_step=axial_step,
             time_origin=(first(range) - 1) * cfg.dt,
+            use_gpu=use_gpu,
+            show_progress=false,
         )
         intensity .+= window_intensity
         push!(used_ranges, range)
         push!(used_energy, Float64(energy))
         push!(window_infos, window_info)
+        _pam_progress(
+            show_progress,
+            "PAM $recon_label window $window_idx/$(length(ranges)), " *
+            "$(length(window_info[:frequency_bins])) bins, samples=$(first(range)):$(last(range)), " *
+            "elapsed $(_format_elapsed(time() - window_start))",
+        )
     end
 
     used_count = length(used_ranges)
@@ -247,6 +328,8 @@ function reconstruct_pam_windowed(
         :reference_sound_speed => isnothing(reference_sound_speed) ? mean(Float64.(c)) : Float64(reference_sound_speed),
         :axial_step => get(first_info, :axial_step, isnothing(axial_step) ? cfg.dx : Float64(axial_step)),
         :window_config => _window_config_info(config),
+        :use_gpu => use_gpu,
+        :show_progress => show_progress,
         :window_samples => window_samples,
         :hop_samples => hop_samples,
         :effective_window_duration_s => window_samples * cfg.dt,
@@ -263,6 +346,10 @@ function reconstruct_pam_windowed(
         :window_infos => window_infos,
         :accumulation => :intensity,
     )
+    _pam_progress(
+        show_progress,
+        "PAM $recon_label windowed reconstruction complete: used=$used_count, " *
+        "skipped=$(length(skipped_ranges)), total elapsed $(_format_elapsed(time() - total_start))",
+    )
     return intensity, kgrid, info
 end
-

@@ -2,15 +2,12 @@ module TranscranialFUS
 
 using Statistics
 using Random
-using DICOM
 using FFTW
-using Interpolations
-import CairoMakie
-import CondaPkg
 if !haskey(ENV, "SSL_CERT_FILE") && isfile("/etc/ssl/cert.pem")
     ENV["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
 end
-import PythonCall
+
+_require_pkg(name::Symbol) = Base.require(@__MODULE__, name)
 
 const DEFAULT_CT_PATH = normpath(joinpath(homedir(), "Desktop", "OBJ_0001"))
 const DEFAULT_ROI_INDEX_XYZ = (170, 190, 400)

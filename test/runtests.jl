@@ -62,6 +62,17 @@ function fake_pam_sweep_runner(c, rho, sources, cfg; frequencies=nothing, use_gp
     )
 end
 
+function capture_stderr_result(f::Function)
+    mktemp() do _, io
+        result = redirect_stderr(io) do
+            f()
+        end
+        flush(io)
+        seekstart(io)
+        return result, read(io, String)
+    end
+end
+
 @testset "HU conversion" begin
     hu = Float32[-1000 0 300 1200]
     rho, c = hu_to_rho_c(hu)
@@ -205,9 +216,24 @@ end
     c, _, _ = make_pam_medium(cfg; aberrator=:none)
     rf, kgrid = analytic_rf_for_point_source(cfg, source)
 
-    intensity, _, info = reconstruct_pam(rf, c, cfg; frequencies=[source.frequency], corrected=false)
+    quiet_result, quiet_progress = capture_stderr_result() do
+        reconstruct_pam(rf, c, cfg; frequencies=[source.frequency], corrected=false)
+    end
+    intensity, _, info = quiet_result
+    @test quiet_progress == ""
     stats = analyse_pam_2d(intensity, kgrid, cfg, [source])
-    intensity_hasa, _, info_hasa = reconstruct_pam(rf, c, cfg; frequencies=[source.frequency], corrected=true)
+    hasa_result, hasa_progress = capture_stderr_result() do
+        reconstruct_pam(
+            rf,
+            c,
+            cfg;
+            frequencies=[source.frequency],
+            corrected=true,
+            use_gpu=true,
+            show_progress=true,
+        )
+    end
+    intensity_hasa, _, info_hasa = hasa_result
     stats_hasa = analyse_pam_2d(intensity_hasa, kgrid, cfg, [source])
     one_window = PAMWindowConfig(
         enabled=true,
@@ -216,14 +242,19 @@ end
         taper=:none,
         min_energy_ratio=0.0,
     )
-    intensity_windowed, _, info_windowed = reconstruct_pam_windowed(
-        rf,
-        c,
-        cfg;
-        frequencies=[source.frequency],
-        corrected=false,
-        window_config=one_window,
-    )
+    windowed_result, windowed_progress = capture_stderr_result() do
+        reconstruct_pam_windowed(
+            rf,
+            c,
+            cfg;
+            frequencies=[source.frequency],
+            corrected=false,
+            window_config=one_window,
+            use_gpu=true,
+            show_progress=true,
+        )
+    end
+    intensity_windowed, _, info_windowed = windowed_result
     cropped_range = 101:500
     cropped_origin = (first(cropped_range) - 1) * cfg.dt
     intensity_cropped, _, info_cropped = reconstruct_pam(
@@ -231,22 +262,35 @@ end
         c,
         cfg;
         frequencies=[source.frequency],
+        use_gpu=true,
         corrected=false,
         time_origin=cropped_origin,
     )
     stats_cropped = analyse_pam_2d(intensity_cropped, kgrid, cfg, [source])
 
     @test info[:corrected] == false
+    @test info[:show_progress] == false
     @test stats[:mean_radial_error_mm] < 1.0
     @test stats[:success_rate] == 1.0
     @test stats[:mean_norm_peak_intensity] > 0.5
     @test info_hasa[:corrected] == true
+    @test info_hasa[:use_gpu] == true
+    @test info_hasa[:show_progress] == true
+    @test occursin("PAM HASA reconstruction", hasa_progress)
+    @test occursin("frequency 1/", hasa_progress)
+    @test occursin("total elapsed", hasa_progress)
     @test stats_hasa[:mean_radial_error_mm] < 1.0
     @test stats_hasa[:success_rate] == 1.0
     @test intensity_windowed ≈ intensity
+    @test info_windowed[:use_gpu] == true
+    @test info_windowed[:show_progress] == true
+    @test occursin("PAM geometric ASA windowed reconstruction", windowed_progress)
+    @test occursin("window 1/1", windowed_progress)
+    @test occursin("complete", windowed_progress)
     @test info_windowed[:used_window_count] == 1
     @test info_windowed[:skipped_window_count] == 0
     @test info_cropped[:time_origin] ≈ cropped_origin
+    @test info_cropped[:use_gpu] == true
     @test stats_cropped[:success_rate] == 1.0
 
     cached_results = reconstruct_pam_case(
@@ -256,8 +300,13 @@ end
         cfg;
         simulation_info=Dict(:receiver_row => receiver_row(cfg), :receiver_cols => receiver_col_range(cfg)),
         frequencies=[source.frequency],
+        use_gpu=true,
     )
     @test cached_results[:simulation][:receiver_row] == receiver_row(cfg)
+    @test cached_results[:use_gpu] == true
+    @test cached_results[:show_progress] == false
+    @test cached_results[:geo_info][:use_gpu] == true
+    @test cached_results[:hasa_info][:use_gpu] == true
     @test cached_results[:stats_geo][:success_rate] == 1.0
     @test cached_results[:stats_hasa][:success_rate] == 1.0
 
@@ -289,6 +338,10 @@ end
     )
     @test event_results[:analysis_source_count] == 1
     @test event_results[:stats_geo][:num_truth_sources] == 1
+
+    cluster_script = read(joinpath(@__DIR__, "..", "scripts", "run_pam_clusters.jl"), String)
+    @test occursin("\"recon-progress\" => \"false\"", cluster_script)
+    @test occursin("show_progress=parse_bool(opts[\"recon-progress\"])", cluster_script)
 end
 
 @testset "PAM windowing helpers" begin

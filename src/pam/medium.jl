@@ -5,11 +5,18 @@ function _resample_pam_slice(
     new_row_mm::Float64,
     new_col_mm::Float64,
 )
+    Interpolations = _require_pkg(:Interpolations)
     out_rows = round(Int, size(slice, 1) * spacing_row_mm / new_row_mm)
     out_cols = round(Int, size(slice, 2) * spacing_col_mm / new_col_mm)
     row_coords = 1 .+ (0:(out_rows - 1)) .* (new_row_mm / spacing_row_mm)
     col_coords = 1 .+ (0:(out_cols - 1)) .* (new_col_mm / spacing_col_mm)
-    itp = extrapolate(interpolate(Float32.(slice), BSpline(Linear())), Flat())
+    itp = Interpolations.extrapolate(
+        Interpolations.interpolate(
+            Float32.(slice),
+            Interpolations.BSpline(Interpolations.Linear()),
+        ),
+        Interpolations.Flat(),
+    )
 
     out = Matrix{Float32}(undef, out_rows, out_cols)
     @inbounds for row in 1:out_rows

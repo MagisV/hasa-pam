@@ -126,6 +126,7 @@ function run_pam_case(
     n_realizations::Int=1,
     rng::Random.AbstractRNG=Random.default_rng(),
     source_variability::SourceVariabilityConfig=SourceVariabilityConfig(),
+    show_progress::Bool=false,
 )
     phase_mode = _normalize_source_phase_mode(source_phase_mode)
     effective_sources = phase_mode == :stochastic_broadband ?
@@ -147,6 +148,8 @@ function run_pam_case(
         reconstruction_axial_step=reconstruction_axial_step,
         reconstruction_mode=reconstruction_mode,
         window_config=window_config,
+        use_gpu=use_gpu,
+        show_progress=show_progress,
     )
     if phase_mode == :random_phase_per_realization
         n_realizations >= 1 || error("n_realizations must be >= 1.")
@@ -201,6 +204,8 @@ function reconstruct_pam_case(
     reconstruction_axial_step::Union{Nothing, Real}=50e-6,
     reconstruction_mode::Symbol=:full,
     window_config::PAMWindowConfig=PAMWindowConfig(),
+    use_gpu::Bool=false,
+    show_progress::Bool=false,
     analysis_sources::Union{Nothing, AbstractVector{<:EmissionSource2D}}=nothing,
 )
     size(c) == (pam_Nx(cfg), pam_Ny(cfg)) ||
@@ -215,6 +220,8 @@ function reconstruct_pam_case(
         bandwidth=bandwidth,
         reference_sound_speed=reference_sound_speed,
         axial_step=reconstruction_axial_step,
+        use_gpu=use_gpu,
+        show_progress=show_progress,
     )
     recon_mode = _normalize_reconstruction_mode(reconstruction_mode)
     effective_window_config = PAMWindowConfig(;
@@ -299,6 +306,7 @@ function reconstruct_pam_case(
         :analysis_source_count => length(truth_sources),
         :reconstruction_mode => recon_mode,
         :window_config => _window_config_info(effective_window_config),
+        :use_gpu => use_gpu,
+        :show_progress => show_progress,
     )
 end
-
