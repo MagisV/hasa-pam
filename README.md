@@ -299,6 +299,35 @@ Use `--vascular-topology=bundle --vascular-bundle-count=3 --vascular-bundle-spac
 
 The one-emitter-per-aggregate behavior is available with `--cluster-model=point --analysis-mode=localization`.
 
+Best completed setting from the `20260506_103348_pam_aperture_sweep` run, ranked by `best_hasa_f1`, using full receiver aperture and no dropout:
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --aberrator=skull \
+  --activity-mode=static \
+  --boundary-threshold-ratios=0.6,0.65,0.7 \
+  --cavitation-model=harmonic-cos \
+  --cluster-model=vascular \
+  --clusters-mm=45:0 \
+  --dropout-probability=0.0 \
+  --frequency-jitter-percent=1 \
+  --harmonic-amplitudes=1.0,0.6,0.3 \
+  --harmonics=2,3,4 \
+  --random-seed=42 \
+  --receiver-aperture-mm=full \
+  --recon-bandwidth-khz=500 \
+  --recon-hop-us=10 \
+  --recon-min-window-energy-ratio=0.001 \
+  --recon-window-us=20 \
+  --skull-transducer-distance-mm=30 \
+  --slice-index=250 \
+  --source-phase-mode=random_phase_per_window \
+  --t-max-us=500 \
+  --transverse-mm=102.4 \
+  --vascular-length-mm=12 \
+  --vascular-topology=squiggle
+```
+
 The PAM run scripts write:
 
 - `overview.png`
