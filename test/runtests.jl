@@ -4,6 +4,11 @@ using Statistics
 using FFTW
 using TranscranialFUS
 
+function pam_gpu_maps_approx(a, b; rtol::Real=1e-2)
+    scale = max(maximum(abs.(a)), maximum(abs.(b)), 1.0)
+    return isapprox(a, b; rtol=rtol, atol=1e-5 * scale)
+end
+
 function synthetic_hu_volume(nslices::Int=5, rows::Int=80, cols::Int=60)
     hu = fill(Float32(-1000), nslices, rows, cols)
     for z in 1:nslices
@@ -215,6 +220,7 @@ end
     source = PointSource2D(depth=0.015, lateral=0.003, frequency=0.4e6, amplitude=1.0, num_cycles=5)
     c, _, _ = make_pam_medium(cfg; aberrator=:none)
     rf, kgrid = analytic_rf_for_point_source(cfg, source)
+    cuda_ok = TranscranialFUS._pam_cuda_functional()
 
     quiet_result, quiet_progress = capture_stderr_result() do
         reconstruct_pam(rf, c, cfg; frequencies=[source.frequency], corrected=false)
@@ -229,7 +235,7 @@ end
             cfg;
             frequencies=[source.frequency],
             corrected=true,
-            use_gpu=true,
+            use_gpu=cuda_ok,
             show_progress=true,
         )
     end
@@ -250,7 +256,7 @@ end
             frequencies=[source.frequency],
             corrected=false,
             window_config=one_window,
-            use_gpu=true,
+            use_gpu=cuda_ok,
             show_progress=true,
         )
     end
@@ -262,7 +268,7 @@ end
         c,
         cfg;
         frequencies=[source.frequency],
-        use_gpu=true,
+        use_gpu=cuda_ok,
         corrected=false,
         time_origin=cropped_origin,
     )
@@ -274,15 +280,60 @@ end
     @test stats[:success_rate] == 1.0
     @test stats[:mean_norm_peak_intensity] > 0.5
     @test info_hasa[:corrected] == true
-    @test info_hasa[:use_gpu] == true
+    @test info_hasa[:use_gpu] == cuda_ok
+    @test info_hasa[:backend] == (cuda_ok ? :cuda : :cpu)
+    @test info_hasa[:gpu_precision] == (cuda_ok ? Float32 : nothing)
     @test info_hasa[:show_progress] == true
     @test occursin("PAM HASA reconstruction", hasa_progress)
     @test occursin("frequency 1/", hasa_progress)
     @test occursin("total elapsed", hasa_progress)
     @test stats_hasa[:mean_radial_error_mm] < 1.0
     @test stats_hasa[:success_rate] == 1.0
-    @test intensity_windowed ≈ intensity
-    @test info_windowed[:use_gpu] == true
+    if cuda_ok
+        @test pam_gpu_maps_approx(intensity_windowed, intensity)
+        intensity_hasa_cpu, _, _ = reconstruct_pam(
+            rf,
+            c,
+            cfg;
+            frequencies=[source.frequency],
+            corrected=true,
+            use_gpu=false,
+        )
+        @test pam_gpu_maps_approx(intensity_hasa, intensity_hasa_cpu)
+
+        c_lens = copy(c)
+        c_lens[20:30, 25:35] .= 1700.0
+        intensity_lens_cpu, _, _ = reconstruct_pam(
+            rf,
+            c_lens,
+            cfg;
+            frequencies=[source.frequency],
+            corrected=true,
+            use_gpu=false,
+        )
+        intensity_lens_gpu, _, info_lens_gpu = reconstruct_pam(
+            rf,
+            c_lens,
+            cfg;
+            frequencies=[source.frequency],
+            corrected=true,
+            use_gpu=true,
+        )
+        @test info_lens_gpu[:backend] == :cuda
+        @test pam_gpu_maps_approx(intensity_lens_gpu, intensity_lens_cpu)
+    else
+        @test intensity_windowed ≈ intensity
+        err = try
+            reconstruct_pam(rf, c, cfg; frequencies=[source.frequency], corrected=false, use_gpu=true)
+            nothing
+        catch err
+            err
+        end
+        @test err isa ErrorException
+        @test occursin("functional NVIDIA CUDA GPU", sprint(showerror, err))
+    end
+    @test info_windowed[:use_gpu] == cuda_ok
+    @test info_windowed[:backend] == (cuda_ok ? :cuda : :cpu)
     @test info_windowed[:show_progress] == true
     @test occursin("PAM geometric ASA windowed reconstruction", windowed_progress)
     @test occursin("window 1/1", windowed_progress)
@@ -290,7 +341,8 @@ end
     @test info_windowed[:used_window_count] == 1
     @test info_windowed[:skipped_window_count] == 0
     @test info_cropped[:time_origin] ≈ cropped_origin
-    @test info_cropped[:use_gpu] == true
+    @test info_cropped[:use_gpu] == cuda_ok
+    @test info_cropped[:backend] == (cuda_ok ? :cuda : :cpu)
     @test stats_cropped[:success_rate] == 1.0
 
     cached_results = reconstruct_pam_case(
@@ -300,13 +352,15 @@ end
         cfg;
         simulation_info=Dict(:receiver_row => receiver_row(cfg), :receiver_cols => receiver_col_range(cfg)),
         frequencies=[source.frequency],
-        use_gpu=true,
+        use_gpu=cuda_ok,
     )
     @test cached_results[:simulation][:receiver_row] == receiver_row(cfg)
-    @test cached_results[:use_gpu] == true
+    @test cached_results[:use_gpu] == cuda_ok
     @test cached_results[:show_progress] == false
-    @test cached_results[:geo_info][:use_gpu] == true
-    @test cached_results[:hasa_info][:use_gpu] == true
+    @test cached_results[:geo_info][:use_gpu] == cuda_ok
+    @test cached_results[:hasa_info][:use_gpu] == cuda_ok
+    @test cached_results[:geo_info][:backend] == (cuda_ok ? :cuda : :cpu)
+    @test cached_results[:hasa_info][:backend] == (cuda_ok ? :cuda : :cpu)
     @test cached_results[:stats_geo][:success_rate] == 1.0
     @test cached_results[:stats_hasa][:success_rate] == 1.0
 

@@ -386,7 +386,36 @@ julia --project=. scripts/run_pam_clusters.jl \
   --t-max-us=500 \
   --transverse-mm=102.4 \
   --vascular-length-mm=12 \
-  --vascular-topology=squiggle
+  --vascular-topology=squiggle 
+```
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl `
+  --aberrator=skull `
+  --activity-mode=static `
+  --boundary-threshold-ratios=0.6,0.65,0.7 `
+  --cavitation-model=harmonic-cos `
+  --cluster-model=vascular `
+  --clusters-mm=45:0 `
+  --dropout-probability=0.0 `
+  --frequency-jitter-percent=1 `
+  --harmonic-amplitudes=1.0,0.6,0.3 `
+  --harmonics=2,3,4 `
+  --random-seed=42 `
+  --receiver-aperture-mm=full `
+  --recon-bandwidth-khz=500 `
+  --recon-hop-us=10 `
+  --recon-min-window-energy-ratio=0.001 `
+  --recon-window-us=20 `
+  --skull-transducer-distance-mm=30 `
+  --slice-index=250 `
+  --source-phase-mode=random_phase_per_window `
+  --t-max-us=500 `
+  --transverse-mm=102.4 `
+  --vascular-length-mm=12 `
+  --recon-progress=true `
+  --vascular-topology=squiggle `
+  --use-gpu=true
 ```
 
 The PAM run scripts write:
@@ -405,6 +434,10 @@ julia --project=. scripts/run_pam_clusters.jl \
 ```
 
 `--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources/clusters, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, and time step are rejected in this mode; reconstruction and analysis options such as `--use-gpu`, `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, `--peak-method`, and cluster detection thresholds remain adjustable.
+
+### CUDA PAM Reconstruction
+
+`--use-gpu=true` enables the CUDA.jl PAM reconstruction backend. It requires a functional NVIDIA CUDA GPU; if CUDA.jl cannot see one, reconstruction errors clearly instead of silently falling back to CPU. The first CUDA path uses Float32 device arithmetic, keeps the existing shifted FFT convention (`fftshift`/`ifftshift`) for CPU/GPU parity, and still marches corrected HASA rows serially while running the lateral FFTs and per-row vector operations on the GPU.
 
 ### Source Phase Modes
 

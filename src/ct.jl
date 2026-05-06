@@ -21,14 +21,11 @@ end
 _to_float(x) = x isa AbstractString ? parse(Float64, x) : Float64(x)
 _to_int(x) = x isa AbstractString ? parse(Int, x) : Int(x)
 
-_dicom() = _require_pkg(:DICOM)
-_dcm_parse(path::AbstractString) = getproperty(_dicom(), :dcm_parse)(path)
-
-function _series_uid(meta)
+function _series_uid(meta::DICOM.DICOMData)
     string(meta[(0x0020, 0x000e)])
 end
 
-function _slice_z_position_mm(meta)
+function _slice_z_position_mm(meta::DICOM.DICOMData)
     if haskey(meta, (0x0020, 0x0032))
         pos = meta[(0x0020, 0x0032)]
         return _to_float(pos[3])
@@ -52,7 +49,7 @@ function _scan_dicom_series(dicom_dir::AbstractString)
     metas = DICOMSliceMeta[]
     uid_counts = Dict{String, Int}()
     for path in files
-        meta = _dcm_parse(path)
+        meta = dcm_parse(path)
         rows = _to_int(meta[(0x0028, 0x0010)])
         cols = _to_int(meta[(0x0028, 0x0011)])
         spacing = meta[(0x0028, 0x0030)]
@@ -106,16 +103,9 @@ function _resample_xy_slice(
     out_y::Int,
     out_x::Int,
 )
-    Interpolations = _require_pkg(:Interpolations)
     y_coords = 1 .+ (0:(out_y - 1)) .* (new_spacing_xy_mm / spacing_y_mm)
     x_coords = 1 .+ (0:(out_x - 1)) .* (new_spacing_xy_mm / spacing_x_mm)
-    itp = Interpolations.extrapolate(
-        Interpolations.interpolate(
-            Float32.(slice),
-            Interpolations.BSpline(Interpolations.Linear()),
-        ),
-        Interpolations.Flat(),
-    )
+    itp = extrapolate(interpolate(Float32.(slice), BSpline(Linear())), Flat())
 
     out = Matrix{Float32}(undef, out_y, out_x)
     @inbounds for iy in 1:out_y
@@ -154,7 +144,7 @@ function load_roi_resample_xy(
 
     hu = Array{Float32}(undef, out_z, out_y, out_x)
     for (out_idx, slice_idx) in enumerate(z_range)
-        meta = _dcm_parse(selected[slice_idx].path)
+        meta = dcm_parse(selected[slice_idx].path)
         raw = meta[(0x7fe0, 0x0010)]
         slope = haskey(meta, (0x0028, 0x1053)) ? _to_float(meta[(0x0028, 0x1053)]) : 1.0
         intercept = haskey(meta, (0x0028, 0x1052)) ? _to_float(meta[(0x0028, 0x1052)]) : 0.0

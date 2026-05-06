@@ -110,6 +110,136 @@ function _select_frequency_bins(
     return resolved_freqs, bins
 end
 
+const _PAM_CUDA_PRECISION = Float32
+const _PAM_CUDA_COMPLEX = ComplexF32
+
+function _pam_cuda_functional()
+    try
+        return CUDA.functional()
+    catch
+        return false
+    end
+end
+
+function _assert_pam_cuda_available()
+    _pam_cuda_functional() && return nothing
+    error(
+        "PAM CUDA reconstruction requested with use_gpu=true, but CUDA.jl " *
+        "does not see a functional NVIDIA CUDA GPU. Configure CUDA.jl on " *
+        "a machine with an NVIDIA GPU, or run with use_gpu=false.",
+    )
+end
+
+function _circshift_indices(n::Int, shift::Int)
+    n > 0 || error("n must be positive.")
+    s = mod(shift, n)
+    s == 0 && return collect(1:n)
+    return vcat((n - s + 1):n, 1:(n - s))
+end
+
+function _reconstruct_pam_cuda(
+    rf::AbstractMatrix{<:Real},
+    c_padded::AbstractMatrix{<:Real},
+    cfg::PAMConfig,
+    selected_freqs::AbstractVector{<:Real},
+    selected_bins::AbstractVector{<:Integer},
+    crop_range::UnitRange{Int},
+    nx::Int,
+    padded_ny::Int,
+    rr::Int,
+    row_stop::Int,
+    c0::Float64,
+    effective_axial_step::Float64,
+    axial_substeps::Int,
+    t0::Float64,
+    corrected::Bool,
+    recon_label::AbstractString,
+    show_progress::Bool,
+)
+    _assert_pam_cuda_available()
+
+    T = _PAM_CUDA_PRECISION
+    CT = _PAM_CUDA_COMPLEX
+    rf_d = CUDA.CuArray(T.(rf))
+    rf_fft_d = fft(rf_d, 2)
+    eta_yx_d = CUDA.CuArray(T.(permutedims(1 .- (c0 ./ c_padded) .^ 2)))
+    intensity_yx_d = CUDA.zeros(T, padded_ny, nx)
+
+    p0_d = CUDA.zeros(CT, padded_ny)
+    next_d = similar(p0_d)
+    tmp_d = similar(p0_d)
+    fftshift_idx_d = CUDA.CuArray(_circshift_indices(padded_ny, fld(padded_ny, 2)))
+    ifftshift_idx_d = CUDA.CuArray(_circshift_indices(padded_ny, -fld(padded_ny, 2)))
+    k = _fft_wavenumbers(padded_ny, cfg.dz)
+
+    for (freq_idx, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
+        freq_start = time()
+        fill!(p0_d, zero(CT))
+        phase = CT(cis(-T(2 * pi) * T(freq) * T(t0)))
+        p0_d[crop_range] .= rf_fft_d[:, bin] .* phase
+
+        k0 = 2 * pi * Float64(freq) / c0
+        kz = sqrt.(complex.(k0^2 .- k .^ 2, 0.0))
+        propagator = exp.(1im .* kz .* effective_axial_step)
+
+        real_inds = findall(real.(kz ./ k0) .> 0.0)
+        propagating = falses(padded_ny)
+        propagating[real_inds] .= true
+        weighting = zeros(Float64, padded_ny)
+        weighting[real_inds] .= _tukey_window(length(real_inds), cfg.tukey_ratio)
+
+        correction = zeros(ComplexF64, padded_ny)
+        for idx in real_inds
+            abs(kz[idx]) > sqrt(eps(Float64)) || continue
+            correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
+        end
+
+        propagator_d = CUDA.CuArray(CT.(propagator))
+        correction_d = CUDA.CuArray(CT.(correction))
+        propagating_d = CUDA.CuArray(T.(propagating))
+        weighting_d = CUDA.CuArray(T.(weighting))
+
+        current_d = fft(p0_d)
+        current_d = current_d[fftshift_idx_d]
+        current_d .*= weighting_d
+
+        for row in (rr + 1):row_stop
+            for _ in 1:axial_substeps
+                if corrected
+                    p_space_d = ifft(current_d[ifftshift_idx_d])
+                    eta_row_d = @view eta_yx_d[:, row]
+                    tmp_d .= T(k0^2) .* eta_row_d .* p_space_d
+                    conv_term_d = fft(tmp_d)
+                    conv_term_d = conv_term_d[fftshift_idx_d]
+                    next_d .= current_d .* propagator_d
+                    next_d .+= correction_d .* conv_term_d
+                else
+                    next_d .= current_d .* propagator_d
+                end
+                next_d .*= propagating_d
+                current_d, next_d = next_d, current_d
+            end
+            # Keep the same shifted spectral taper schedule as the CPU path.
+            current_d .*= weighting_d
+
+            p_row_d = ifft(current_d[ifftshift_idx_d])
+            intensity_yx_d[:, row] .+= abs2.(p_row_d)
+        end
+
+        if show_progress
+            CUDA.synchronize()
+        end
+        _pam_progress(
+            show_progress,
+            "PAM $recon_label frequency $freq_idx/$(length(selected_freqs)) " *
+            "($(_format_frequency_mhz(freq)), bin $bin) elapsed $(_format_elapsed(time() - freq_start))",
+        )
+    end
+
+    CUDA.synchronize()
+    return Float64.(permutedims(Array(intensity_yx_d)))
+end
+
 function reconstruct_pam(
     rf::AbstractMatrix{<:Real},
     c::AbstractMatrix{<:Real},
@@ -132,7 +262,6 @@ function reconstruct_pam(
     rr <= nx || error("Receiver row lies outside the computational grid.")
 
     selected_freqs, selected_bins = _select_frequency_bins(rf, cfg.dt, frequencies; bandwidth=bandwidth)
-    rf_fft = fft(Float64.(rf), 2)
     padded_ny = cfg.zero_pad_factor > 1 ? cfg.zero_pad_factor * ny : ny
     _, crop_range = _zero_pad_receiver_rf(rf, padded_ny)
     c_padded, _ = _edge_pad_lateral(c, padded_ny)
@@ -142,7 +271,6 @@ function reconstruct_pam(
     0 < target_axial_step <= cfg.dx || error("axial_step must lie in (0, cfg.dx].")
     axial_substeps = _pam_axial_substeps(cfg.dx, target_axial_step)
     effective_axial_step = cfg.dx / axial_substeps
-    intensity_padded = zeros(Float64, nx, padded_ny)
     row_stop = nx
     row_stop > rr || error("No valid reconstruction rows remain below the receiver row.")
     t0 = Float64(time_origin)
@@ -154,62 +282,88 @@ function reconstruct_pam(
         "grid=$(nx)x$(ny), padded_ny=$padded_ny, axial_substeps=$axial_substeps",
     )
 
-    for (freq_idx, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
-        freq_start = time()
-        p0 = rf_fft[:, bin] .* exp(-1im * 2π * freq * t0)
-        p0_padded, _ = _zero_pad_receiver_rf(reshape(p0, ny, 1), padded_ny)
-        p0_vec = vec(p0_padded[:, 1])
+    intensity_padded = if use_gpu
+        _reconstruct_pam_cuda(
+            rf,
+            c_padded,
+            cfg,
+            selected_freqs,
+            selected_bins,
+            crop_range,
+            nx,
+            padded_ny,
+            rr,
+            row_stop,
+            c0,
+            effective_axial_step,
+            axial_substeps,
+            t0,
+            corrected,
+            recon_label,
+            show_progress,
+        )
+    else
+        rf_fft = fft(Float64.(rf), 2)
+        out = zeros(Float64, nx, padded_ny)
 
-        k0 = 2π * freq / c0
-        k = _fft_wavenumbers(padded_ny, cfg.dz)
-        kz = sqrt.(complex.(k0^2 .- k .^ 2, 0.0))
-        propagator = exp.(1im .* kz .* effective_axial_step)
+        for (freq_idx, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
+            freq_start = time()
+            p0 = rf_fft[:, bin] .* exp(-1im * 2π * freq * t0)
+            p0_padded, _ = _zero_pad_receiver_rf(reshape(p0, ny, 1), padded_ny)
+            p0_vec = vec(p0_padded[:, 1])
 
-        real_inds = findall(real.(kz ./ k0) .> 0.0)
-        propagating = falses(padded_ny)
-        propagating[real_inds] .= true
-        evanescent_inds = findall(x -> !x, propagating)
-        weighting = zeros(Float64, padded_ny)
-        weighting[real_inds] .= _tukey_window(length(real_inds), cfg.tukey_ratio)
+            k0 = 2π * freq / c0
+            k = _fft_wavenumbers(padded_ny, cfg.dz)
+            kz = sqrt.(complex.(k0^2 .- k .^ 2, 0.0))
+            propagator = exp.(1im .* kz .* effective_axial_step)
 
-        current = _fftshift(fft(p0_vec))
-        current .*= weighting
+            real_inds = findall(real.(kz ./ k0) .> 0.0)
+            propagating = falses(padded_ny)
+            propagating[real_inds] .= true
+            evanescent_inds = findall(x -> !x, propagating)
+            weighting = zeros(Float64, padded_ny)
+            weighting[real_inds] .= _tukey_window(length(real_inds), cfg.tukey_ratio)
 
-        mu = (c0 ./ c_padded) .^ 2
-        lambda = (k0^2) .* (1 .- mu)
-
-        correction = zeros(ComplexF64, padded_ny)
-        for idx in real_inds
-            abs(kz[idx]) > sqrt(eps(Float64)) || continue
-            correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
-        end
-
-        for row in (rr + 1):row_stop
-            for _ in 1:axial_substeps
-                if corrected
-                    p_space = ifft(_ifftshift(current))
-                    conv_term = _fftshift(fft(lambda[row, :] .* p_space))
-                    next = current .* propagator
-                    next .+= correction .* conv_term
-                else
-                    next = current .* propagator
-                end
-                next[evanescent_inds] .= 0.0
-                current = next
-            end
-            # Taper once per reconstruction row to suppress long-range numerical
-            # growth without making damping depend on substep count.
+            current = _fftshift(fft(p0_vec))
             current .*= weighting
 
-            p_row = ifft(_ifftshift(current))
-            intensity_padded[row, :] .+= abs2.(p_row)
-        end
+            mu = (c0 ./ c_padded) .^ 2
+            lambda = (k0^2) .* (1 .- mu)
 
-        _pam_progress(
-            show_progress,
-            "PAM $recon_label frequency $freq_idx/$(length(selected_freqs)) " *
-            "($(_format_frequency_mhz(freq)), bin $bin) elapsed $(_format_elapsed(time() - freq_start))",
-        )
+            correction = zeros(ComplexF64, padded_ny)
+            for idx in real_inds
+                abs(kz[idx]) > sqrt(eps(Float64)) || continue
+                correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
+            end
+
+            for row in (rr + 1):row_stop
+                for _ in 1:axial_substeps
+                    if corrected
+                        p_space = ifft(_ifftshift(current))
+                        conv_term = _fftshift(fft(lambda[row, :] .* p_space))
+                        next = current .* propagator
+                        next .+= correction .* conv_term
+                    else
+                        next = current .* propagator
+                    end
+                    next[evanescent_inds] .= 0.0
+                    current = next
+                end
+                # Taper once per reconstruction row to suppress long-range numerical
+                # growth without making damping depend on substep count.
+                current .*= weighting
+
+                p_row = ifft(_ifftshift(current))
+                out[row, :] .+= abs2.(p_row)
+            end
+
+            _pam_progress(
+                show_progress,
+                "PAM $recon_label frequency $freq_idx/$(length(selected_freqs)) " *
+                "($(_format_frequency_mhz(freq)), bin $bin) elapsed $(_format_elapsed(time() - freq_start))",
+            )
+        end
+        out
     end
 
     _pam_progress(
@@ -230,6 +384,8 @@ function reconstruct_pam(
         :axial_substeps_per_cell => axial_substeps,
         :time_origin => t0,
         :use_gpu => use_gpu,
+        :backend => use_gpu ? :cuda : :cpu,
+        :gpu_precision => use_gpu ? _PAM_CUDA_PRECISION : nothing,
         :show_progress => show_progress,
     )
     return intensity, kgrid, info
@@ -254,6 +410,9 @@ function reconstruct_pam_windowed(
     nt = size(rf, 2)
     kgrid = KGrid2D(nx, ny, cfg.dx, cfg.dz; dt=cfg.dt, Nt=nt)
     config = _validate_window_config(window_config)
+    if use_gpu
+        _assert_pam_cuda_available()
+    end
 
     ranges, window_samples, hop_samples = _pam_window_ranges(nt, cfg.dt, config)
     energies = [sum(abs2, @view rf[:, range]) for range in ranges]
@@ -329,6 +488,8 @@ function reconstruct_pam_windowed(
         :axial_step => get(first_info, :axial_step, isnothing(axial_step) ? cfg.dx : Float64(axial_step)),
         :window_config => _window_config_info(config),
         :use_gpu => use_gpu,
+        :backend => get(first_info, :backend, use_gpu ? :cuda : :cpu),
+        :gpu_precision => get(first_info, :gpu_precision, use_gpu ? _PAM_CUDA_PRECISION : nothing),
         :show_progress => show_progress,
         :window_samples => window_samples,
         :hop_samples => hop_samples,
