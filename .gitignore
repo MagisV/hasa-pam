@@ -13,3 +13,5 @@ LocalPreferences.toml
 
 # Generated outputs from the project scripts
 outputs/
+
+*.jld2
