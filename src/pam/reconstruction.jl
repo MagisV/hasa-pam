@@ -130,13 +130,6 @@ function _assert_pam_cuda_available()
     )
 end
 
-function _circshift_indices(n::Int, shift::Int)
-    n > 0 || error("n must be positive.")
-    s = mod(shift, n)
-    s == 0 && return collect(1:n)
-    return vcat((n - s + 1):n, 1:(n - s))
-end
-
 function _reconstruct_pam_cuda(
     rf::AbstractMatrix{<:Real},
     c_padded::AbstractMatrix{<:Real},
@@ -157,6 +150,10 @@ function _reconstruct_pam_cuda(
     show_progress::Bool,
 )
     _assert_pam_cuda_available()
+    let dev = CUDA.device()
+        println("[ PAM ] $recon_label: GPU $(CUDA.name(dev)) (device $(CUDA.deviceid(dev))), $(_PAM_CUDA_PRECISION) arithmetic, $(length(selected_freqs)) freq bins")
+        flush(stdout)
+    end
 
     T = _PAM_CUDA_PRECISION
     CT = _PAM_CUDA_COMPLEX
@@ -168,8 +165,6 @@ function _reconstruct_pam_cuda(
     p0_d = CUDA.zeros(CT, padded_ny)
     next_d = similar(p0_d)
     tmp_d = similar(p0_d)
-    fftshift_idx_d = CUDA.CuArray(_circshift_indices(padded_ny, fld(padded_ny, 2)))
-    ifftshift_idx_d = CUDA.CuArray(_circshift_indices(padded_ny, -fld(padded_ny, 2)))
     k = _fft_wavenumbers(padded_ny, cfg.dz)
 
     for (freq_idx, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
@@ -194,23 +189,23 @@ function _reconstruct_pam_cuda(
             correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
         end
 
-        propagator_d = CUDA.CuArray(CT.(propagator))
-        correction_d = CUDA.CuArray(CT.(correction))
-        propagating_d = CUDA.CuArray(T.(propagating))
-        weighting_d = CUDA.CuArray(T.(weighting))
+        # Permute centered-order arrays to FFT order once per frequency bin so the
+        # propagation loop needs no per-step fftshift/ifftshift (gather) operations.
+        propagator_d = CUDA.CuArray(CT.(_ifftshift(propagator)))
+        correction_d = CUDA.CuArray(CT.(_ifftshift(correction)))
+        propagating_d = CUDA.CuArray(T.(_ifftshift(propagating)))
+        weighting_d = CUDA.CuArray(T.(_ifftshift(weighting)))
 
         current_d = fft(p0_d)
-        current_d = current_d[fftshift_idx_d]
         current_d .*= weighting_d
 
         for row in (rr + 1):row_stop
             for _ in 1:axial_substeps
                 if corrected
-                    p_space_d = ifft(current_d[ifftshift_idx_d])
+                    p_space_d = ifft(current_d)
                     eta_row_d = @view eta_yx_d[:, row]
                     tmp_d .= T(k0^2) .* eta_row_d .* p_space_d
                     conv_term_d = fft(tmp_d)
-                    conv_term_d = conv_term_d[fftshift_idx_d]
                     next_d .= current_d .* propagator_d
                     next_d .+= correction_d .* conv_term_d
                 else
@@ -222,7 +217,7 @@ function _reconstruct_pam_cuda(
             # Keep the same shifted spectral taper schedule as the CPU path.
             current_d .*= weighting_d
 
-            p_row_d = ifft(current_d[ifftshift_idx_d])
+            p_row_d = ifft(current_d)
             intensity_yx_d[:, row] .+= abs2.(p_row_d)
         end
 
@@ -320,12 +315,8 @@ function reconstruct_pam(
             real_inds = findall(real.(kz ./ k0) .> 0.0)
             propagating = falses(padded_ny)
             propagating[real_inds] .= true
-            evanescent_inds = findall(x -> !x, propagating)
             weighting = zeros(Float64, padded_ny)
             weighting[real_inds] .= _tukey_window(length(real_inds), cfg.tukey_ratio)
-
-            current = _fftshift(fft(p0_vec))
-            current .*= weighting
 
             mu = (c0 ./ c_padded) .^ 2
             lambda = (k0^2) .* (1 .- mu)
@@ -336,11 +327,21 @@ function reconstruct_pam(
                 correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
             end
 
+            # Permute centered-order arrays to FFT order once per frequency bin so the
+            # propagation loop needs no per-step fftshift/ifftshift operations.
+            propagator = _ifftshift(propagator)
+            weighting = _ifftshift(weighting)
+            correction = _ifftshift(correction)
+            evanescent_inds = findall(_ifftshift(.!propagating))
+
+            current = fft(p0_vec)
+            current .*= weighting
+
             for row in (rr + 1):row_stop
                 for _ in 1:axial_substeps
                     if corrected
-                        p_space = ifft(_ifftshift(current))
-                        conv_term = _fftshift(fft(lambda[row, :] .* p_space))
+                        p_space = ifft(current)
+                        conv_term = fft(lambda[row, :] .* p_space)
                         next = current .* propagator
                         next .+= correction .* conv_term
                     else
@@ -353,7 +354,7 @@ function reconstruct_pam(
                 # growth without making damping depend on substep count.
                 current .*= weighting
 
-                p_row = ifft(_ifftshift(current))
+                p_row = ifft(current)
                 out[row, :] .+= abs2.(p_row)
             end
 

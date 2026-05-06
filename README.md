@@ -325,6 +325,20 @@ julia --project=. scripts/run_pam.jl \
 
 `--use-gpu=true` enables the CUDA.jl PAM reconstruction backend. It requires a functional NVIDIA CUDA GPU; if CUDA.jl cannot see one, reconstruction errors clearly instead of silently falling back to CPU. The first CUDA path uses Float32 device arithmetic, keeps the existing shifted FFT convention (`fftshift`/`ifftshift`) for CPU/GPU parity, and still marches corrected HASA rows serially while running the lateral FFTs and per-row vector operations on the GPU.
 
+Small case for fast CUDA iteration (no CT data required, ~10 s end-to-end):
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --source-model=point `
+  --sources-mm=30:0 `
+  --aberrator=none `
+  --axial-mm=40 `
+  --transverse-mm=51.2 `
+  --t-max-us=100 `
+  --use-gpu=true `
+  --recon-progress=true
+```
+
 ### Source Phase Modes
 
 `--source-phase-mode` controls the physical regime being simulated and is reported in `summary.json`.

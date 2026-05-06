@@ -15,3 +15,5 @@ LocalPreferences.toml
 outputs/
 
 *.jld2
+
+.claude/

@@ -634,7 +634,7 @@ function add_threshold_table!(fig, row, col, title, stats)
             Float64(entry[:jaccard]),
         ))
     end
-    Label(fig[row, col], title * "\n" * join(lines, "\n"); font=:monospace, tellwidth=false, halign=:left)
+    Label(fig[row, col], title * "\n" * join(lines, "\n"); font="DejaVu Sans Mono", tellwidth=false, halign=:left)
 end
 
 function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, sources; threshold_ratios, truth_radius, truth_mask, truth_centerlines, frequencies)
