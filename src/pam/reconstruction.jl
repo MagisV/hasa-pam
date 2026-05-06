@@ -148,8 +148,10 @@ function _reconstruct_pam_cuda(
     corrected::Bool,
     recon_label::AbstractString,
     show_progress::Bool,
+    benchmark::Bool,
 )
     _assert_pam_cuda_available()
+    fn_start = time()
     nfreq = length(selected_freqs)
     let dev = CUDA.device()
         println(
@@ -221,34 +223,92 @@ function _reconstruct_pam_cuda(
     next_d = similar(current_d)
     tmp_d  = similar(current_d)
 
-    march_start = time()
-    for row in (rr + 1):row_stop
-        for _ in 1:axial_substeps
-            if corrected
-                p_space_d = ifft(current_d, 1)
-                # eta_yx_d[:, row:row] is padded_ny × 1; broadcasts with 1 × nfreq and
-                # padded_ny × nfreq to give padded_ny × nfreq without an explicit reshape.
-                tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d
-                conv_d = fft(tmp_d, 1)
-                next_d .= current_d .* prop_d .+ corr_d .* conv_d
-            else
-                next_d .= current_d .* prop_d
-            end
-            next_d .*= mask_d
-            current_d, next_d = next_d, current_d
-        end
-        current_d .*= weight_d
-        p_row_d = ifft(current_d, 1)
-        # Sum intensity contributions across all frequencies into this row.
-        intensity_yx_d[:, row] .+= dropdims(sum(abs2.(p_row_d); dims=2); dims=2)
-    end
+    t_setup = time() - fn_start
 
-    CUDA.synchronize()
+    # March: two paths share identical GPU logic; the benchmark path inserts CUDA
+    # event pairs around each section type to split FFT vs elementwise time.
+    # The non-benchmark path wraps the whole loop in a single CUDA.@elapsed so
+    # there is zero per-iteration overhead on the hot path.
+    t_fft_s = 0.0
+    t_ew_s  = 0.0
+    march_wall_start = time()
+
+    if benchmark
+        for row in (rr + 1):row_stop
+            for _ in 1:axial_substeps
+                if corrected
+                    t_fft_s += CUDA.@elapsed p_space_d = ifft(current_d, 1)
+                    t_ew_s  += CUDA.@elapsed (tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d)
+                    t_fft_s += CUDA.@elapsed conv_d = fft(tmp_d, 1)
+                    t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d .+ corr_d .* conv_d)
+                else
+                    t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d)
+                end
+                t_ew_s += CUDA.@elapsed (next_d .*= mask_d)
+                current_d, next_d = next_d, current_d
+            end
+            t_ew_s  += CUDA.@elapsed (current_d .*= weight_d)
+            t_fft_s += CUDA.@elapsed p_row_d = ifft(current_d, 1)
+            t_ew_s  += CUDA.@elapsed (intensity_yx_d[:, row] .+= dropdims(sum(abs2.(p_row_d); dims=2); dims=2))
+        end
+        march_gpu_s = t_fft_s + t_ew_s
+    else
+        march_gpu_s = CUDA.@elapsed for row in (rr + 1):row_stop
+            for _ in 1:axial_substeps
+                if corrected
+                    p_space_d = ifft(current_d, 1)
+                    tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d
+                    conv_d = fft(tmp_d, 1)
+                    next_d .= current_d .* prop_d .+ corr_d .* conv_d
+                else
+                    next_d .= current_d .* prop_d
+                end
+                next_d .*= mask_d
+                current_d, next_d = next_d, current_d
+            end
+            current_d .*= weight_d
+            p_row_d = ifft(current_d, 1)
+            intensity_yx_d[:, row] .+= dropdims(sum(abs2.(p_row_d); dims=2); dims=2)
+        end
+    end
+    march_wall_s = time() - march_wall_start
+
+    # Estimate memory bandwidth from counted DRAM read+write passes.
+    # corrected: ifft(2) + tmp_ew(4) + fft(2) + next_ew(5) + mask(3) = 16 per substep
+    # uncorrected: next_ew(3) + mask(3) = 6 per substep
+    # per row (after inner loop): weight(3) + ifft_row(2) + intensity_sum(2) = 7
+    passes_substep = corrected ? 16 : 6
+    bytes_march = Int64(row_stop - rr) * (
+        Int64(axial_substeps) * passes_substep * padded_ny * nfreq * sizeof(CT) +
+        7 * padded_ny * nfreq * sizeof(CT)
+    )
+    bandwidth_GBps = bytes_march / march_gpu_s / 1e9
+
+    t_download = @elapsed result = Float64.(permutedims(Array(intensity_yx_d)))
+
     _pam_progress(
         show_progress,
-        "PAM $recon_label $nfreq freq batch march elapsed $(_format_elapsed(time() - march_start))",
+        "PAM $recon_label $nfreq freq batch: march $(round(march_gpu_s * 1e3; digits=1)) ms GPU / " *
+        "$(round(march_wall_s * 1e3; digits=1)) ms wall, " *
+        "BW ~$(round(bandwidth_GBps; digits=0)) GB/s" *
+        (benchmark ? ", FFT $(round(100 * t_fft_s / march_gpu_s; digits=1))% / EW $(round(100 * t_ew_s / march_gpu_s; digits=1))%" : ""),
     )
-    return Float64.(permutedims(Array(intensity_yx_d)))
+
+    timing = Dict{Symbol, Any}(
+        :setup_s         => t_setup,
+        :march_gpu_s     => march_gpu_s,
+        :march_wall_s    => march_wall_s,
+        :download_s      => t_download,
+        :bandwidth_GBps  => bandwidth_GBps,
+        :fft_s           => benchmark ? t_fft_s : nothing,
+        :elementwise_s   => benchmark ? t_ew_s  : nothing,
+        :nrows           => row_stop - rr,
+        :nfreq           => nfreq,
+        :padded_ny       => padded_ny,
+        :axial_substeps  => axial_substeps,
+        :bytes_march_est => bytes_march,
+    )
+    return result, timing
 end
 
 function reconstruct_pam(
@@ -263,6 +323,7 @@ function reconstruct_pam(
     time_origin::Real=0.0,
     use_gpu::Bool=false,
     show_progress::Bool=false,
+    benchmark::Bool=false,
 )
     total_start = time()
     nx, ny = size(c)
@@ -293,8 +354,9 @@ function reconstruct_pam(
         "grid=$(nx)x$(ny), padded_ny=$padded_ny, axial_substeps=$axial_substeps",
     )
 
+    gpu_timing = nothing
     intensity_padded = if use_gpu
-        _reconstruct_pam_cuda(
+        raw, timing = _reconstruct_pam_cuda(
             rf,
             c_padded,
             cfg,
@@ -312,7 +374,10 @@ function reconstruct_pam(
             corrected,
             recon_label,
             show_progress,
+            benchmark,
         )
+        gpu_timing = timing
+        raw
     else
         rf_fft = fft(Float64.(rf), 2)
         out = zeros(Float64, nx, padded_ny)
@@ -404,6 +469,8 @@ function reconstruct_pam(
         :backend => use_gpu ? :cuda : :cpu,
         :gpu_precision => use_gpu ? _PAM_CUDA_PRECISION : nothing,
         :show_progress => show_progress,
+        :benchmark => benchmark,
+        :gpu_timing => gpu_timing,
     )
     return intensity, kgrid, info
 end
