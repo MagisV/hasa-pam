@@ -39,7 +39,14 @@ The PAM workflow uses the complementary problem. Here the sources are real emitt
 - `src/ct.jl`: DICOM loading, ROI crop, and XY resampling
 - `src/medium.jl`: HU conversion, skull masking, and focusing-medium construction
 - `src/focus.jl`: focusing configs, placement handling, HASA/geometric delays, and plotting helpers
-- `src/pam.jl`: PAM configs, point-source models, skull/lens medium generation, reconstruction, metrics, and sweeps
+- `src/pam.jl`: compatibility include for the split PAM implementation under `src/pam/`
+- `src/pam/sources.jl`: PAM source models, vascular source construction, source signals, and phase variability
+- `src/pam/config.jl`: PAM configs, grid helpers, fitting, and source indexing
+- `src/pam/medium.jl`: skull/lens PAM medium generation
+- `src/pam/reconstruction.jl`: geometric ASA/HASA propagation and windowed reconstruction loop
+- `src/pam/analysis.jl`: PAM peaks, masks, PSF helpers, localization metrics, and detection metrics
+- `src/pam/workflow.jl`: case-level simulation/reconstruction orchestration
+- `src/pam/sweep.jl`: PAM sweep helpers and aggregation
 - `src/kwave_wrapper.jl`: Julia-to-`k-wave-python` bridge
 - `src/analysis.jl`: focusing analysis helpers and `run_focus_case`
 - `scripts/run_focus_case.jl`: run one focusing case
@@ -67,9 +74,9 @@ The first call into the k-Wave wrapper may need to resolve Python packages and k
 
 ## CT Data
 
-The default CT path mirrors the local notebook setup:
+The default CT path points to the local DICOM folder:
 
-`../Ultrasound/DIRU_20240404_human_skull_phase_correction_1_2_(skull_Normal)/DICOM/PAT_0000/STD_0000/SER_0002/OBJ_0001`
+`C:\Users\AU-FUS-Valentin\Desktop\OBJ_0001`
 
 You can override it in the scripts with `--ct-path=...`.
 
@@ -481,64 +488,6 @@ julia --project=. scripts/run_pam_clusters.jl \
   --frequency-jitter-percent=5 \
   --dropout-probability=0.5 \
   --t-max-us=200 \
-  --random-seed=42 \
-  --aberrator=none
-```
-1
-```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
-  --vascular-length-mm=12 \
-  --source-phase-mode=random_phase_per_window \
-  --recon-window-us=10 \
-  --recon-hop-us=5 \
-  --amplitude-distribution=lognormal \
-  --amplitude-sigma=0.5 \
-  --frequency-jitter-percent=5 \
-  --dropout-probability=0 \
-  --t-max-us=500 \
-  --random-seed=42 \
-  --aberrator=none
-```
-
-2
-
-3
-```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
-  --vascular-length-mm=12 \
-  --source-phase-mode=random_phase_per_window \
-  --recon-window-us=10 \
-  --recon-hop-us=5 \
-  --amplitude-distribution=fixed \
-  --amplitude-sigma=0.5 \
-  --frequency-jitter-percent=5 \
-  --dropout-probability=0 \
-  --t-max-us=500 \
-  --random-seed=42 \
-  --aberrator=none
-```
-
-4
-```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
-  --vascular-length-mm=12 \
-  --source-phase-mode=random_phase_per_window \
-  --recon-window-us=10 \
-  --recon-hop-us=5 \
-  --amplitude-distribution=fixed \
-  --amplitude-sigma=0.5 \
-  --frequency-jitter-percent=0 \
-  --dropout-probability=0 \
-  --t-max-us=500 \
   --random-seed=42 \
   --aberrator=none
 ```

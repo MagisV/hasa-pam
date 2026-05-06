@@ -12,20 +12,7 @@ if !haskey(ENV, "SSL_CERT_FILE") && isfile("/etc/ssl/cert.pem")
 end
 import PythonCall
 
-const DEFAULT_CT_PATH = normpath(
-    joinpath(
-        @__DIR__,
-        "..",
-        "..",
-        "Ultrasound",
-        "DIRU_20240404_human_skull_phase_correction_1_2_(skull_Normal)",
-        "DICOM",
-        "PAT_0000",
-        "STD_0000",
-        "SER_0002",
-        "OBJ_0001",
-    ),
-)
+const DEFAULT_CT_PATH = normpath(joinpath(homedir(), "Desktop", "OBJ_0001"))
 const DEFAULT_ROI_INDEX_XYZ = (170, 190, 400)
 const DEFAULT_ROI_SIZE_XYZ = (705, 360, 450)
 
