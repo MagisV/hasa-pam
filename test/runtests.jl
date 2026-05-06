@@ -285,7 +285,13 @@ end
     @test info_hasa[:gpu_precision] == (cuda_ok ? Float32 : nothing)
     @test info_hasa[:show_progress] == true
     @test occursin("PAM HASA reconstruction", hasa_progress)
-    @test occursin("frequency 1/", hasa_progress)
+    # GPU path batches all frequencies together and emits a single march summary;
+    # CPU path still reports per-frequency progress.
+    if cuda_ok
+        @test occursin("freq batch march elapsed", hasa_progress)
+    else
+        @test occursin("frequency 1/", hasa_progress)
+    end
     @test occursin("total elapsed", hasa_progress)
     @test stats_hasa[:mean_radial_error_mm] < 1.0
     @test stats_hasa[:success_rate] == 1.0

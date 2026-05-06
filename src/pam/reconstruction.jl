@@ -150,8 +150,12 @@ function _reconstruct_pam_cuda(
     show_progress::Bool,
 )
     _assert_pam_cuda_available()
+    nfreq = length(selected_freqs)
     let dev = CUDA.device()
-        println("[ PAM ] $recon_label: GPU $(CUDA.name(dev)) (device $(CUDA.deviceid(dev))), $(_PAM_CUDA_PRECISION) arithmetic, $(length(selected_freqs)) freq bins")
+        println(
+            "[ PAM ] $recon_label: GPU $(CUDA.name(dev)) (device $(CUDA.deviceid(dev))), " *
+            "$(_PAM_CUDA_PRECISION) arithmetic, $nfreq freq bins batched",
+        )
         flush(stdout)
     end
 
@@ -159,20 +163,20 @@ function _reconstruct_pam_cuda(
     CT = _PAM_CUDA_COMPLEX
     rf_d = CUDA.CuArray(T.(rf))
     rf_fft_d = fft(rf_d, 2)
+    # Speed-contrast field transposed to padded_ny × nx for contiguous column access.
     eta_yx_d = CUDA.CuArray(T.(permutedims(1 .- (c0 ./ c_padded) .^ 2)))
     intensity_yx_d = CUDA.zeros(T, padded_ny, nx)
 
-    p0_d = CUDA.zeros(CT, padded_ny)
-    next_d = similar(p0_d)
-    tmp_d = similar(p0_d)
+    # Build per-frequency spectral arrays (CPU, centered order → ifftshift to FFT order)
+    # into padded_ny × nfreq matrices, then upload once.
     k = _fft_wavenumbers(padded_ny, cfg.dz)
+    prop_cpu   = zeros(ComplexF64, padded_ny, nfreq)
+    corr_cpu   = zeros(ComplexF64, padded_ny, nfreq)
+    mask_cpu   = zeros(Float64, padded_ny, nfreq)
+    weight_cpu = zeros(Float64, padded_ny, nfreq)
+    k0_sq_cpu  = zeros(Float64, nfreq)
 
-    for (freq_idx, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
-        freq_start = time()
-        fill!(p0_d, zero(CT))
-        phase = CT(cis(-T(2 * pi) * T(freq) * T(t0)))
-        p0_d[crop_range] .= rf_fft_d[:, bin] .* phase
-
+    for (f, freq) in enumerate(selected_freqs)
         k0 = 2 * pi * Float64(freq) / c0
         kz = sqrt.(complex.(k0^2 .- k .^ 2, 0.0))
         propagator = exp.(1im .* kz .* effective_axial_step)
@@ -189,49 +193,61 @@ function _reconstruct_pam_cuda(
             correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
         end
 
-        # Permute centered-order arrays to FFT order once per frequency bin so the
-        # propagation loop needs no per-step fftshift/ifftshift (gather) operations.
-        propagator_d = CUDA.CuArray(CT.(_ifftshift(propagator)))
-        correction_d = CUDA.CuArray(CT.(_ifftshift(correction)))
-        propagating_d = CUDA.CuArray(T.(_ifftshift(propagating)))
-        weighting_d = CUDA.CuArray(T.(_ifftshift(weighting)))
+        prop_cpu[:, f]   .= _ifftshift(propagator)
+        corr_cpu[:, f]   .= _ifftshift(correction)
+        mask_cpu[:, f]   .= _ifftshift(propagating)
+        weight_cpu[:, f] .= _ifftshift(weighting)
+        k0_sq_cpu[f]      = k0^2
+    end
 
-        current_d = fft(p0_d)
-        current_d .*= weighting_d
+    # Upload batched spectral arrays: padded_ny × nfreq.
+    prop_d   = CUDA.CuArray(CT.(prop_cpu))
+    corr_d   = CUDA.CuArray(CT.(corr_cpu))
+    mask_d   = CUDA.CuArray(T.(mask_cpu))
+    weight_d = CUDA.CuArray(T.(weight_cpu))
+    # k0_sq_d shaped 1 × nfreq so it broadcasts against padded_ny × nfreq arrays.
+    k0_sq_d  = reshape(CUDA.CuArray(T.(k0_sq_cpu)), 1, nfreq)
 
-        for row in (rr + 1):row_stop
-            for _ in 1:axial_substeps
-                if corrected
-                    p_space_d = ifft(current_d)
-                    eta_row_d = @view eta_yx_d[:, row]
-                    tmp_d .= T(k0^2) .* eta_row_d .* p_space_d
-                    conv_term_d = fft(tmp_d)
-                    next_d .= current_d .* propagator_d
-                    next_d .+= correction_d .* conv_term_d
-                else
-                    next_d .= current_d .* propagator_d
-                end
-                next_d .*= propagating_d
-                current_d, next_d = next_d, current_d
+    # Build batched initial conditions: padded_ny × nfreq.
+    p0_d = CUDA.zeros(CT, padded_ny, nfreq)
+    for (f, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
+        phase = CT(cis(-T(2 * pi) * T(freq) * T(t0)))
+        p0_d[crop_range, f] .= rf_fft_d[:, bin] .* phase
+    end
+
+    # Batched 1D FFTs along dim 1 (each column is one frequency's lateral spectrum).
+    current_d = fft(p0_d, 1)    # padded_ny × nfreq
+    current_d .*= weight_d
+    next_d = similar(current_d)
+    tmp_d  = similar(current_d)
+
+    march_start = time()
+    for row in (rr + 1):row_stop
+        for _ in 1:axial_substeps
+            if corrected
+                p_space_d = ifft(current_d, 1)
+                # eta_yx_d[:, row:row] is padded_ny × 1; broadcasts with 1 × nfreq and
+                # padded_ny × nfreq to give padded_ny × nfreq without an explicit reshape.
+                tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d
+                conv_d = fft(tmp_d, 1)
+                next_d .= current_d .* prop_d .+ corr_d .* conv_d
+            else
+                next_d .= current_d .* prop_d
             end
-            # Keep the same shifted spectral taper schedule as the CPU path.
-            current_d .*= weighting_d
-
-            p_row_d = ifft(current_d)
-            intensity_yx_d[:, row] .+= abs2.(p_row_d)
+            next_d .*= mask_d
+            current_d, next_d = next_d, current_d
         end
-
-        if show_progress
-            CUDA.synchronize()
-        end
-        _pam_progress(
-            show_progress,
-            "PAM $recon_label frequency $freq_idx/$(length(selected_freqs)) " *
-            "($(_format_frequency_mhz(freq)), bin $bin) elapsed $(_format_elapsed(time() - freq_start))",
-        )
+        current_d .*= weight_d
+        p_row_d = ifft(current_d, 1)
+        # Sum intensity contributions across all frequencies into this row.
+        intensity_yx_d[:, row] .+= dropdims(sum(abs2.(p_row_d); dims=2); dims=2)
     end
 
     CUDA.synchronize()
+    _pam_progress(
+        show_progress,
+        "PAM $recon_label $nfreq freq batch march elapsed $(_format_elapsed(time() - march_start))",
+    )
     return Float64.(permutedims(Array(intensity_yx_d)))
 end
 
