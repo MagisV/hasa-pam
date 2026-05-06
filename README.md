@@ -353,7 +353,7 @@ Use `--vascular-topology=bundle --vascular-bundle-count=3 --vascular-bundle-spac
 
 The one-emitter-per-aggregate behavior is available with `--cluster-model=point --analysis-mode=localization`.
 
-Best completed setting from the `20260506_103348_pam_aperture_sweep` run, ranked by `best_hasa_f1`, using full receiver aperture and no dropout:
+Current leading setting from the `20260506_103348_pam_aperture_sweep` run, ranked by `best_hasa_f1`, uses a wide receiver aperture with no dropout. In the first completed seed, `--receiver-aperture-mm=100` and `--receiver-aperture-mm=full` are effectively tied (`best_hasa_f1` about `0.428`), and both are clearly better than the earlier `50 mm` aperture:
 
 ```bash
 julia --project=. scripts/run_pam_clusters.jl \
@@ -368,7 +368,7 @@ julia --project=. scripts/run_pam_clusters.jl \
   --harmonic-amplitudes=1.0,0.6,0.3 \
   --harmonics=2,3,4 \
   --random-seed=42 \
-  --receiver-aperture-mm=full \
+  --receiver-aperture-mm=100 \
   --recon-bandwidth-khz=500 \
   --recon-hop-us=10 \
   --recon-min-window-energy-ratio=0.001 \
