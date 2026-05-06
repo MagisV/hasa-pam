@@ -1,0 +1,2622 @@
+{
+    "reconstruction_bandwidth_hz": 500000,
+    "reconstruction_source": {
+        "mode": "simulation"
+    },
+    "clusters": [
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.0060327725038961015,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -320.691671411612,
+                -481.03750711741804,
+                -641.383342823224
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.046321440287638786
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.005272737898667883,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -320.2235738069466,
+                -480.33536071041993,
+                -640.4471476138932
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04626569514702229
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.0047312694272838695,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -317.8032279388882,
+                -476.70484190833236,
+                -635.6064558777764
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04572226666640846
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.004200866487451935,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -315.3467548948123,
+                -473.0201323422185,
+                -630.6935097896246
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04516619536230458
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.0036565083902456493,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -312.9314759402867,
+                -469.39721391043014,
+                -625.8629518805734
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04461734980426383
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.0031861889638953003,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -310.20409603501,
+                -465.3061440525151,
+                -620.40819207002
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04398719954353102
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.00256652716942303,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -308.0188633679521,
+                -462.0282950519281,
+                -616.0377267359042
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04348928418531734
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.0017486279796490286,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -308.1907975338834,
+                -462.2861963008251,
+                -616.3815950677669
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04355435089147969
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.001125078113947233,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -309.8379271124607,
+                -464.75689066869114,
+                -619.6758542249214
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.043959799624315364
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -0.0006028161597729909,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -312.11941106984887,
+                -468.17911660477336,
+                -624.2388221396977
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04451058220522799
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": -2.401284689886321e-5,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -314.2460812377018,
+                -471.3691218565527,
+                -628.4921624754036
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.045020721921306135
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.0004173119265126402,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -316.95746044523713,
+                -475.4361906678557,
+                -633.9149208904743
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04566686911546983
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.0011125489663053104,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -318.6137903276162,
+                -477.9206854914243,
+                -637.2275806552324
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04605530266618959
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.0017115638060362216,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -321.1407190707501,
+                -481.7110786061252,
+                -642.2814381415002
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04664759181635218
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.0024823400105268,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -319.9942647843374,
+                -479.99139717650615,
+                -639.9885295686748
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.0463526618538167
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.0031517892589508424,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -318.5017269206361,
+                -477.7525903809542,
+                -637.0034538412722
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04597133599677839
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.003865963263819151,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -316.9332073482421,
+                -475.3998110223631,
+                -633.8664146964842
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04556339958483016
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.0043121080495665395,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -314.38452223900595,
+                -471.576783358509,
+                -628.7690444780119
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04492980070620905
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.004534541578681507,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -310.9262770322773,
+                -466.389415548416,
+                -621.8525540645546
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.044089545625208976
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.005237053357696269,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -309.35567932143914,
+                -464.03351898215874,
+                -618.7113586428783
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.04366731027665283
+        },
+        {
+            "harmonics": [
+                2,
+                3,
+                4
+            ],
+            "lateral_m": 0.005975114360697463,
+            "amplitude_pa": 1,
+            "harmonic_amplitudes": [
+                1,
+                0.6,
+                0.3
+            ],
+            "n_bubbles": 10,
+            "harmonic_phases_rad": [
+                -308.32565851717015,
+                -462.4884877757553,
+                -616.6513170343403
+            ],
+            "gate_duration_s": 4.9999999999999996e-5,
+            "cavitation_model": "harmonic_cos",
+            "delay_s": 0,
+            "fundamental_hz": 500000,
+            "depth_m": 0.0433644115625137
+        }
+    ],
+    "source_phase_mode": "random_phase_per_window",
+    "reconstruction_axial_step_m": 5.0e-5,
+    "detection_truth_mode": "centerline_tube",
+    "medium": {
+        "outer_row": 151,
+        "receiver_row": 1,
+        "hu_bone_thr": 200,
+        "slice_index": 250,
+        "inner_row": 186,
+        "aberrator": "skull",
+        "skull_to_transducer": 0.03,
+        "ct_path": "/Users/vm/INI_code/Ultrasound/DIRU_20240404_human_skull_phase_correction_1_2_(skull_Normal)/DICOM/PAT_0000/STD_0000/SER_0002/OBJ_0001"
+    },
+    "analysis_mode": "detection",
+    "detection_threshold_ratio": 0.2,
+    "clean_threshold_ratio": 0.01,
+    "physical_source_count": 21,
+    "reconstruction_mode": "windowed",
+    "out_dir": "/Users/vm/INI_code/Julia II/outputs/20260506_103348_pam_aperture_sweep/01_aperture_ap50_dropout0p0_seed42/run",
+    "window_info": {
+        "geometric": {
+            "effective_window_duration_s": 2.0e-5,
+            "used_window_ranges": [
+                [
+                    501,
+                    1500
+                ],
+                [
+                    1001,
+                    2000
+                ],
+                [
+                    1501,
+                    2500
+                ],
+                [
+                    2001,
+                    3000
+                ],
+                [
+                    2501,
+                    3500
+                ],
+                [
+                    3001,
+                    4000
+                ],
+                [
+                    3501,
+                    4500
+                ],
+                [
+                    4001,
+                    5000
+                ],
+                [
+                    4501,
+                    5500
+                ],
+                [
+                    5001,
+                    6000
+                ],
+                [
+                    5501,
+                    6500
+                ],
+                [
+                    6001,
+                    7000
+                ],
+                [
+                    6501,
+                    7500
+                ],
+                [
+                    7001,
+                    8000
+                ],
+                [
+                    7501,
+                    8500
+                ],
+                [
+                    8001,
+                    9000
+                ],
+                [
+                    8501,
+                    9500
+                ],
+                [
+                    9001,
+                    10000
+                ],
+                [
+                    9501,
+                    10500
+                ],
+                [
+                    10001,
+                    11000
+                ],
+                [
+                    10501,
+                    11500
+                ],
+                [
+                    11001,
+                    12000
+                ],
+                [
+                    11501,
+                    12500
+                ],
+                [
+                    12001,
+                    13000
+                ],
+                [
+                    12501,
+                    13500
+                ],
+                [
+                    13001,
+                    14000
+                ],
+                [
+                    13501,
+                    14500
+                ],
+                [
+                    14001,
+                    15000
+                ],
+                [
+                    14501,
+                    15500
+                ],
+                [
+                    15001,
+                    16000
+                ],
+                [
+                    15501,
+                    16500
+                ],
+                [
+                    16001,
+                    17000
+                ],
+                [
+                    16501,
+                    17500
+                ],
+                [
+                    17001,
+                    18000
+                ],
+                [
+                    17501,
+                    18500
+                ],
+                [
+                    18001,
+                    19000
+                ],
+                [
+                    18501,
+                    19500
+                ],
+                [
+                    19001,
+                    20000
+                ],
+                [
+                    19501,
+                    20500
+                ],
+                [
+                    20001,
+                    21000
+                ],
+                [
+                    20501,
+                    21500
+                ],
+                [
+                    21001,
+                    22000
+                ],
+                [
+                    21501,
+                    22500
+                ],
+                [
+                    22001,
+                    23000
+                ],
+                [
+                    22501,
+                    23500
+                ],
+                [
+                    23001,
+                    24000
+                ],
+                [
+                    23501,
+                    24500
+                ],
+                [
+                    24001,
+                    25000
+                ]
+            ],
+            "used_window_count": 48,
+            "skipped_window_ranges": [
+                [
+                    1,
+                    1000
+                ]
+            ],
+            "window_samples": 1000,
+            "effective_hop_s": 1.0e-5,
+            "energy_threshold": 384.0531655369217,
+            "skipped_window_count": 1,
+            "accumulation": "intensity",
+            "total_window_count": 49,
+            "hop_samples": 500
+        },
+        "hasa": {
+            "effective_window_duration_s": 2.0e-5,
+            "used_window_ranges": [
+                [
+                    501,
+                    1500
+                ],
+                [
+                    1001,
+                    2000
+                ],
+                [
+                    1501,
+                    2500
+                ],
+                [
+                    2001,
+                    3000
+                ],
+                [
+                    2501,
+                    3500
+                ],
+                [
+                    3001,
+                    4000
+                ],
+                [
+                    3501,
+                    4500
+                ],
+                [
+                    4001,
+                    5000
+                ],
+                [
+                    4501,
+                    5500
+                ],
+                [
+                    5001,
+                    6000
+                ],
+                [
+                    5501,
+                    6500
+                ],
+                [
+                    6001,
+                    7000
+                ],
+                [
+                    6501,
+                    7500
+                ],
+                [
+                    7001,
+                    8000
+                ],
+                [
+                    7501,
+                    8500
+                ],
+                [
+                    8001,
+                    9000
+                ],
+                [
+                    8501,
+                    9500
+                ],
+                [
+                    9001,
+                    10000
+                ],
+                [
+                    9501,
+                    10500
+                ],
+                [
+                    10001,
+                    11000
+                ],
+                [
+                    10501,
+                    11500
+                ],
+                [
+                    11001,
+                    12000
+                ],
+                [
+                    11501,
+                    12500
+                ],
+                [
+                    12001,
+                    13000
+                ],
+                [
+                    12501,
+                    13500
+                ],
+                [
+                    13001,
+                    14000
+                ],
+                [
+                    13501,
+                    14500
+                ],
+                [
+                    14001,
+                    15000
+                ],
+                [
+                    14501,
+                    15500
+                ],
+                [
+                    15001,
+                    16000
+                ],
+                [
+                    15501,
+                    16500
+                ],
+                [
+                    16001,
+                    17000
+                ],
+                [
+                    16501,
+                    17500
+                ],
+                [
+                    17001,
+                    18000
+                ],
+                [
+                    17501,
+                    18500
+                ],
+                [
+                    18001,
+                    19000
+                ],
+                [
+                    18501,
+                    19500
+                ],
+                [
+                    19001,
+                    20000
+                ],
+                [
+                    19501,
+                    20500
+                ],
+                [
+                    20001,
+                    21000
+                ],
+                [
+                    20501,
+                    21500
+                ],
+                [
+                    21001,
+                    22000
+                ],
+                [
+                    21501,
+                    22500
+                ],
+                [
+                    22001,
+                    23000
+                ],
+                [
+                    22501,
+                    23500
+                ],
+                [
+                    23001,
+                    24000
+                ],
+                [
+                    23501,
+                    24500
+                ],
+                [
+                    24001,
+                    25000
+                ]
+            ],
+            "used_window_count": 48,
+            "skipped_window_ranges": [
+                [
+                    1,
+                    1000
+                ]
+            ],
+            "window_samples": 1000,
+            "effective_hop_s": 1.0e-5,
+            "energy_threshold": 384.0531655369217,
+            "skipped_window_count": 1,
+            "accumulation": "intensity",
+            "total_window_count": 49,
+            "hop_samples": 500
+        }
+    },
+    "window_config": {
+        "window_duration_s": 1.9999999999999998e-5,
+        "enabled": true,
+        "hop_s": 9.999999999999999e-6,
+        "min_energy_ratio": 0.001,
+        "taper": "hann",
+        "accumulation": "intensity"
+    },
+    "activity_boundary_figure": "/Users/vm/INI_code/Julia II/outputs/20260506_103348_pam_aperture_sweep/01_aperture_ap50_dropout0p0_seed42/run/activity_boundaries.png",
+    "reference_sound_speed_m_per_s": 1551.0647917287392,
+    "emission_event_count": 21,
+    "hasa": {
+        "truth_components": 1,
+        "true_negative_pixels": 180994,
+        "energy_outside_predicted_mask": 1.2160141405400944e10,
+        "centroid_depth_mm": 45.50438583563683,
+        "energy_total": 3.222824694406598e10,
+        "false_negative_area_mm2": 1.08,
+        "centroid_error_mm": 0.9850847735466974,
+        "target_axial_spread_mm": 1.3028997817899934,
+        "prediction_components": 3,
+        "false_negative_pixels": 27,
+        "psf_target_ssim_like": 0.26321673225208475,
+        "matched_prediction_components": 1,
+        "recall": 0.968421052631579,
+        "f1": 0.06722416172769342,
+        "energy_fraction_outside_predicted_mask": 0.3773131509916002,
+        "psf_target_mode": "provided_mask",
+        "energy_outside_mask": 3.105834942496367e10,
+        "energy_fraction_inside_predicted_mask": 0.6226868490083998,
+        "axial_spread_mm": 22.069387711062245,
+        "false_positive_area_mm2": 918.04,
+        "missed_truth_components": 0,
+        "psf_target_normalized_l2_error": 0.967300772825553,
+        "psf_target_correlation": 0.2917420463453979,
+        "true_positive_pixels": 828,
+        "target_centroid_depth_mm": 44.999999999999915,
+        "energy_fraction_outside_mask": 0.9636996228453649,
+        "num_truth_sources": 21,
+        "recovered_truth_components": 1,
+        "target_centroid_lateral_mm": -3.6804216213733665e-19,
+        "psf_axial_fwhm_mm": 0.75,
+        "energy_inside_mask": 1.16989751910231e9,
+        "precision": 0.034820640060557635,
+        "dice": 0.06722416172769344,
+        "jaccard": 0.034781147609846255,
+        "centroid_lateral_mm": -0.846160114802392,
+        "peak_mm": [
+            47.4,
+            -4.6
+        ],
+        "truth_mm": [
+            [
+                46.32144028763879,
+                -6.032772503896101
+            ],
+            [
+                46.26569514702229,
+                -5.272737898667883
+            ],
+            [
+                45.72226666640846,
+                -4.73126942728387
+            ],
+            [
+                45.166195362304585,
+                -4.200866487451935
+            ],
+            [
+                44.61734980426383,
+                -3.656508390245649
+            ],
+            [
+                43.98719954353103,
+                -3.1861889638953005
+            ],
+            [
+                43.48928418531734,
+                -2.56652716942303
+            ],
+            [
+                43.554350891479686,
+                -1.7486279796490285
+            ],
+            [
+                43.959799624315366,
+                -1.125078113947233
+            ],
+            [
+                44.51058220522799,
+                -0.6028161597729909
+            ],
+            [
+                45.020721921306134,
+                -0.02401284689886321
+            ],
+            [
+                45.66686911546983,
+                0.4173119265126402
+            ],
+            [
+                46.05530266618959,
+                1.1125489663053103
+            ],
+            [
+                46.64759181635218,
+                1.7115638060362217
+            ],
+            [
+                46.3526618538167,
+                2.4823400105268
+            ],
+            [
+                45.97133599677839,
+                3.1517892589508425
+            ],
+            [
+                45.56339958483016,
+                3.8659632638191512
+            ],
+            [
+                44.92980070620905,
+                4.31210804956654
+            ],
+            [
+                44.08954562520898,
+                4.534541578681507
+            ],
+            [
+                43.667310276652834,
+                5.237053357696269
+            ],
+            [
+                43.3644115625137,
+                5.9751143606974635
+            ]
+        ],
+        "predicted_area_mm2": 951.16,
+        "overlap_area_mm2": 33.12,
+        "max_intensity": 2.1970094036380644e6,
+        "threshold_ratio": 0.2,
+        "false_positive_pixels": 22951,
+        "threshold_db": -6.9897000433601875,
+        "truth_mask_mode": "provided",
+        "energy_inside_predicted_mask": 2.0068105538665035e10,
+        "truth_radius_mm": 1,
+        "energy_fraction_inside_mask": 0.03630037715463506,
+        "psf_target_integral": 854.9999999999999,
+        "truth_area_mm2": 34.2,
+        "spurious_prediction_components": 2,
+        "target_lateral_spread_mm": 3.8127694595420865,
+        "psf_lateral_fwhm_mm": 0.44999999999999996,
+        "lateral_spread_mm": 9.331526523807156,
+        "peak_intensity": 2.1970094036380644e6
+    },
+    "config": {
+        "axial_dim": 0.08,
+        "dt": 2.0e-8,
+        "bottom_margin": 0.01,
+        "rho0": 1000,
+        "success_tolerance": 0.0015,
+        "dx": 0.0002,
+        "receiver_aperture": 0.05,
+        "dz": 0.0002,
+        "zero_pad_factor": 4,
+        "transverse_dim": 0.1024,
+        "t_max": 0.0005,
+        "c0": 1500,
+        "peak_suppression_radius": 0.008
+    },
+    "peak_method": "argmax",
+    "clean_loop_gain": 0.1,
+    "geometric": {
+        "truth_components": 1,
+        "true_negative_pixels": 162097,
+        "energy_outside_predicted_mask": 4.35705512114312e9,
+        "centroid_depth_mm": 39.984398371080154,
+        "energy_total": 2.160146744086769e10,
+        "false_negative_area_mm2": 0,
+        "centroid_error_mm": 5.015617813618699,
+        "target_axial_spread_mm": 1.3028997817899934,
+        "prediction_components": 2,
+        "false_negative_pixels": 0,
+        "psf_target_ssim_like": 0.24637032608151105,
+        "matched_prediction_components": 1,
+        "recall": 1,
+        "f1": 0.03925800082648423,
+        "energy_fraction_outside_predicted_mask": 0.20170181183617333,
+        "psf_target_mode": "provided_mask",
+        "energy_outside_mask": 2.1019082240380314e10,
+        "energy_fraction_inside_predicted_mask": 0.7982981881638267,
+        "axial_spread_mm": 23.033017216387158,
+        "false_positive_area_mm2": 1673.92,
+        "missed_truth_components": 0,
+        "psf_target_normalized_l2_error": 0.977073974795333,
+        "psf_target_correlation": 0.2293872621287592,
+        "true_positive_pixels": 855,
+        "target_centroid_depth_mm": 44.999999999999915,
+        "energy_fraction_outside_mask": 0.9730395538135725,
+        "num_truth_sources": 21,
+        "recovered_truth_components": 1,
+        "target_centroid_lateral_mm": -3.6804216213733665e-19,
+        "psf_axial_fwhm_mm": 0.75,
+        "energy_inside_mask": 5.823852004873776e8,
+        "precision": 0.02002201250497623,
+        "dice": 0.03925800082648423,
+        "jaccard": 0.02002201250497623,
+        "centroid_lateral_mm": 0.012741752888224985,
+        "peak_mm": [
+            35.2,
+            0.4
+        ],
+        "truth_mm": [
+            [
+                46.32144028763879,
+                -6.032772503896101
+            ],
+            [
+                46.26569514702229,
+                -5.272737898667883
+            ],
+            [
+                45.72226666640846,
+                -4.73126942728387
+            ],
+            [
+                45.166195362304585,
+                -4.200866487451935
+            ],
+            [
+                44.61734980426383,
+                -3.656508390245649
+            ],
+            [
+                43.98719954353103,
+                -3.1861889638953005
+            ],
+            [
+                43.48928418531734,
+                -2.56652716942303
+            ],
+            [
+                43.554350891479686,
+                -1.7486279796490285
+            ],
+            [
+                43.959799624315366,
+                -1.125078113947233
+            ],
+            [
+                44.51058220522799,
+                -0.6028161597729909
+            ],
+            [
+                45.020721921306134,
+                -0.02401284689886321
+            ],
+            [
+                45.66686911546983,
+                0.4173119265126402
+            ],
+            [
+                46.05530266618959,
+                1.1125489663053103
+            ],
+            [
+                46.64759181635218,
+                1.7115638060362217
+            ],
+            [
+                46.3526618538167,
+                2.4823400105268
+            ],
+            [
+                45.97133599677839,
+                3.1517892589508425
+            ],
+            [
+                45.56339958483016,
+                3.8659632638191512
+            ],
+            [
+                44.92980070620905,
+                4.31210804956654
+            ],
+            [
+                44.08954562520898,
+                4.534541578681507
+            ],
+            [
+                43.667310276652834,
+                5.237053357696269
+            ],
+            [
+                43.3644115625137,
+                5.9751143606974635
+            ]
+        ],
+        "predicted_area_mm2": 1708.1200000000001,
+        "overlap_area_mm2": 34.2,
+        "max_intensity": 1.1120660380130445e6,
+        "threshold_ratio": 0.2,
+        "false_positive_pixels": 41848,
+        "threshold_db": -6.9897000433601875,
+        "truth_mask_mode": "provided",
+        "energy_inside_predicted_mask": 1.724441231972457e10,
+        "truth_radius_mm": 1,
+        "energy_fraction_inside_mask": 0.02696044618642743,
+        "psf_target_integral": 854.9999999999999,
+        "truth_area_mm2": 34.2,
+        "spurious_prediction_components": 1,
+        "target_lateral_spread_mm": 3.8127694595420865,
+        "psf_lateral_fwhm_mm": 0.44999999999999996,
+        "lateral_spread_mm": 9.556075061984597,
+        "peak_intensity": 1.1120660380130445e6
+    },
+    "clean_max_iter": 500,
+    "source_variability": {
+        "amplitude_distribution": "fixed",
+        "frequency_jitter_percent": 1,
+        "amplitude_sigma": 0,
+        "dropout_probability": 0
+    },
+    "emission_meta": {
+        "emission_event_count": 21,
+        "random_seed": 42,
+        "harmonics": [
+            2,
+            3,
+            4
+        ],
+        "phase_jitter_rad": 0.2,
+        "n_bubbles_per_cluster": [
+            10
+        ],
+        "cluster_model": "vascular",
+        "phase_mode": "geometric",
+        "n_emission_sources": 21,
+        "cavitation_model": "harmonic_cos",
+        "gate_duration_s": 4.9999999999999996e-5,
+        "delays_s": [
+            0
+        ],
+        "activity_model": {
+            "emission_event_count": 21,
+            "activity_mode": "static",
+            "phase_jitter_rad": 0,
+            "active_probability": 1,
+            "physical_source_count": 21,
+            "hop_s": null,
+            "amplitude_jitter": 0,
+            "frame_duration_s": null
+        },
+        "transducer_m": [
+            -0.03,
+            0.0
+        ],
+        "fundamental_hz": 500000,
+        "harmonic_amplitudes": [
+            1,
+            0.6,
+            0.3
+        ],
+        "vascular": {
+            "branch_levels": 2,
+            "source_spacing_m": 0.0008,
+            "bundle_count": 3,
+            "centerlines_m": [
+                [
+                    [
+                        0.0465,
+                        -0.006
+                    ],
+                    [
+                        0.046426584774442725,
+                        -0.0056
+                    ],
+                    [
+                        0.04621352549156242,
+                        -0.0052
+                    ],
+                    [
+                        0.045881677878438706,
+                        -0.0048
+                    ],
+                    [
+                        0.04546352549156242,
+                        -0.0044
+                    ],
+                    [
+                        0.045,
+                        -0.004
+                    ],
+                    [
+                        0.044536474508437576,
+                        -0.0036
+                    ],
+                    [
+                        0.04411832212156129,
+                        -0.0032
+                    ],
+                    [
+                        0.043786474508437576,
+                        -0.0028
+                    ],
+                    [
+                        0.043573415225557265,
+                        -0.0024
+                    ],
+                    [
+                        0.0435,
+                        -0.002
+                    ],
+                    [
+                        0.04357341522555727,
+                        -0.0016
+                    ],
+                    [
+                        0.043786474508437576,
+                        -0.0012
+                    ],
+                    [
+                        0.04411832212156129,
+                        -0.0008
+                    ],
+                    [
+                        0.044536474508437576,
+                        -0.0004
+                    ],
+                    [
+                        0.045,
+                        0.0
+                    ],
+                    [
+                        0.04546352549156242,
+                        0.0004
+                    ],
+                    [
+                        0.045881677878438706,
+                        0.0008
+                    ],
+                    [
+                        0.04621352549156242,
+                        0.0012
+                    ],
+                    [
+                        0.046426584774442725,
+                        0.0016
+                    ],
+                    [
+                        0.0465,
+                        0.002
+                    ],
+                    [
+                        0.04642658477444273,
+                        0.0024
+                    ],
+                    [
+                        0.04621352549156242,
+                        0.0028
+                    ],
+                    [
+                        0.045881677878438706,
+                        0.0032
+                    ],
+                    [
+                        0.04546352549156242,
+                        0.0036
+                    ],
+                    [
+                        0.045,
+                        0.004
+                    ],
+                    [
+                        0.044536474508437576,
+                        0.0044
+                    ],
+                    [
+                        0.04411832212156129,
+                        0.0048
+                    ],
+                    [
+                        0.043786474508437576,
+                        0.0052
+                    ],
+                    [
+                        0.04357341522555727,
+                        0.0056
+                    ],
+                    [
+                        0.0435,
+                        0.006
+                    ]
+                ]
+            ],
+            "min_separation_m": 0.0003,
+            "branch_angle_rad": 0.5235987755982988,
+            "position_jitter_m": 0.00015,
+            "squiggle_amplitude_m": 0.0015,
+            "anchors": [
+                {
+                    "segments_m": [
+                    ],
+                    "anchor_m": [
+                        0.045,
+                        0.0
+                    ],
+                    "source_count": 21,
+                    "centerlines_m": [
+                        [
+                            [
+                                0.0465,
+                                -0.006
+                            ],
+                            [
+                                0.046426584774442725,
+                                -0.0056
+                            ],
+                            [
+                                0.04621352549156242,
+                                -0.0052
+                            ],
+                            [
+                                0.045881677878438706,
+                                -0.0048
+                            ],
+                            [
+                                0.04546352549156242,
+                                -0.0044
+                            ],
+                            [
+                                0.045,
+                                -0.004
+                            ],
+                            [
+                                0.044536474508437576,
+                                -0.0036
+                            ],
+                            [
+                                0.04411832212156129,
+                                -0.0032
+                            ],
+                            [
+                                0.043786474508437576,
+                                -0.0028
+                            ],
+                            [
+                                0.043573415225557265,
+                                -0.0024
+                            ],
+                            [
+                                0.0435,
+                                -0.002
+                            ],
+                            [
+                                0.04357341522555727,
+                                -0.0016
+                            ],
+                            [
+                                0.043786474508437576,
+                                -0.0012
+                            ],
+                            [
+                                0.04411832212156129,
+                                -0.0008
+                            ],
+                            [
+                                0.044536474508437576,
+                                -0.0004
+                            ],
+                            [
+                                0.045,
+                                0.0
+                            ],
+                            [
+                                0.04546352549156242,
+                                0.0004
+                            ],
+                            [
+                                0.045881677878438706,
+                                0.0008
+                            ],
+                            [
+                                0.04621352549156242,
+                                0.0012
+                            ],
+                            [
+                                0.046426584774442725,
+                                0.0016
+                            ],
+                            [
+                                0.0465,
+                                0.002
+                            ],
+                            [
+                                0.04642658477444273,
+                                0.0024
+                            ],
+                            [
+                                0.04621352549156242,
+                                0.0028
+                            ],
+                            [
+                                0.045881677878438706,
+                                0.0032
+                            ],
+                            [
+                                0.04546352549156242,
+                                0.0036
+                            ],
+                            [
+                                0.045,
+                                0.004
+                            ],
+                            [
+                                0.044536474508437576,
+                                0.0044
+                            ],
+                            [
+                                0.04411832212156129,
+                                0.0048
+                            ],
+                            [
+                                0.043786474508437576,
+                                0.0052
+                            ],
+                            [
+                                0.04357341522555727,
+                                0.0056
+                            ],
+                            [
+                                0.0435,
+                                0.006
+                            ]
+                        ]
+                    ]
+                }
+            ],
+            "branch_scale": 0.65,
+            "topology": "squiggle",
+            "max_sources_per_anchor": 0,
+            "truth_radius_m": 0.001,
+            "squiggle_wavelength_m": 0.008,
+            "length_m": 0.012,
+            "squiggle_slope": 0,
+            "bundle_spacing_m": 0.002
+        },
+        "n_anchor_clusters": 1,
+        "physical_source_count": 21,
+        "anchor_clusters_m": [
+            [
+                0.045,
+                0.0
+            ]
+        ]
+    },
+    "n_realizations": 1,
+    "activity_model": {
+        "emission_event_count": 21,
+        "activity_mode": "static",
+        "phase_jitter_rad": 0,
+        "active_probability": 1,
+        "physical_source_count": 21,
+        "hop_s": null,
+        "amplitude_jitter": 0,
+        "frame_duration_s": null
+    },
+    "detection_truth_radius_m": 0.001,
+    "boundary_threshold_ratios": [
+        0.6,
+        0.65,
+        0.7
+    ],
+    "simulation": {
+        "receiver_row": 1,
+        "source_indices": [
+            [
+                233,
+                227
+            ],
+            [
+                232,
+                231
+            ],
+            [
+                230,
+                233
+            ],
+            [
+                227,
+                236
+            ],
+            [
+                224,
+                239
+            ],
+            [
+                221,
+                241
+            ],
+            [
+                218,
+                244
+            ],
+            [
+                219,
+                248
+            ],
+            [
+                221,
+                251
+            ],
+            [
+                224,
+                254
+            ],
+            [
+                226,
+                257
+            ],
+            [
+                229,
+                259
+            ],
+            [
+                231,
+                263
+            ],
+            [
+                234,
+                266
+            ],
+            [
+                233,
+                269
+            ],
+            [
+                231,
+                273
+            ],
+            [
+                229,
+                276
+            ],
+            [
+                226,
+                279
+            ],
+            [
+                221,
+                280
+            ],
+            [
+                219,
+                283
+            ],
+            [
+                218,
+                287
+            ]
+        ],
+        "receiver_cols": [
+            132,
+            381
+        ]
+    },
+    "reconstruction_frequencies_hz": [
+        1000000,
+        1500000,
+        2000000
+    ],
+    "activity_boundary_metrics": {
+        "geometric": [
+            {
+                "target_centroid_lateral_mm": -3.6804216213733665e-19,
+                "axial_spread_mm": 23.033017216387158,
+                "peak_intensity": 1.1120660380130445e6,
+                "dice": 0.19970845481049562,
+                "false_positive_area_mm2": 163.4,
+                "energy_inside_predicted_mask": 3.5808849899908175e9,
+                "overlap_area_mm2": 21.92,
+                "psf_target_mode": "provided_mask",
+                "energy_fraction_outside_predicted_mask": 0.8342295494603222,
+                "centroid_lateral_mm": 0.012741752888224985,
+                "f1": 0.19970845481049565,
+                "threshold_ratio": 0.6,
+                "false_positive_pixels": 4085,
+                "missed_truth_components": 0,
+                "psf_lateral_fwhm_mm": 0.44999999999999996,
+                "truth_mask_mode": "provided",
+                "target_centroid_depth_mm": 44.999999999999915,
+                "true_negative_pixels": 199860,
+                "energy_outside_predicted_mask": 1.8020582450876873e10,
+                "truth_radius_mm": 1,
+                "truth_mm": [
+                    [
+                        46.32144028763879,
+                        -6.032772503896101
+                    ],
+                    [
+                        46.26569514702229,
+                        -5.272737898667883
+                    ],
+                    [
+                        45.72226666640846,
+                        -4.73126942728387
+                    ],
+                    [
+                        45.166195362304585,
+                        -4.200866487451935
+                    ],
+                    [
+                        44.61734980426383,
+                        -3.656508390245649
+                    ],
+                    [
+                        43.98719954353103,
+                        -3.1861889638953005
+                    ],
+                    [
+                        43.48928418531734,
+                        -2.56652716942303
+                    ],
+                    [
+                        43.554350891479686,
+                        -1.7486279796490285
+                    ],
+                    [
+                        43.959799624315366,
+                        -1.125078113947233
+                    ],
+                    [
+                        44.51058220522799,
+                        -0.6028161597729909
+                    ],
+                    [
+                        45.020721921306134,
+                        -0.02401284689886321
+                    ],
+                    [
+                        45.66686911546983,
+                        0.4173119265126402
+                    ],
+                    [
+                        46.05530266618959,
+                        1.1125489663053103
+                    ],
+                    [
+                        46.64759181635218,
+                        1.7115638060362217
+                    ],
+                    [
+                        46.3526618538167,
+                        2.4823400105268
+                    ],
+                    [
+                        45.97133599677839,
+                        3.1517892589508425
+                    ],
+                    [
+                        45.56339958483016,
+                        3.8659632638191512
+                    ],
+                    [
+                        44.92980070620905,
+                        4.31210804956654
+                    ],
+                    [
+                        44.08954562520898,
+                        4.534541578681507
+                    ],
+                    [
+                        43.667310276652834,
+                        5.237053357696269
+                    ],
+                    [
+                        43.3644115625137,
+                        5.9751143606974635
+                    ]
+                ],
+                "energy_total": 2.160146744086769e10,
+                "psf_target_integral": 854.9999999999999,
+                "spurious_prediction_components": 4,
+                "truth_components": 1,
+                "target_axial_spread_mm": 1.3028997817899934,
+                "jaccard": 0.11093117408906883,
+                "psf_target_correlation": 0.2293872621287592,
+                "psf_target_ssim_like": 0.24637032608151105,
+                "precision": 0.1182818907835096,
+                "peak_mm": [
+                    35.2,
+                    0.4
+                ],
+                "energy_fraction_inside_predicted_mask": 0.1657704505396778,
+                "recovered_truth_components": 1,
+                "lateral_spread_mm": 9.556075061984597,
+                "true_positive_pixels": 548,
+                "centroid_error_mm": 5.015617813618699,
+                "recall": 0.6409356725146199,
+                "matched_prediction_components": 1,
+                "prediction_components": 5,
+                "false_negative_pixels": 307,
+                "energy_fraction_inside_mask": 0.02696044618642743,
+                "predicted_area_mm2": 185.32,
+                "energy_fraction_outside_mask": 0.9730395538135725,
+                "max_intensity": 1.1120660380130445e6,
+                "energy_inside_mask": 5.823852004873776e8,
+                "centroid_depth_mm": 39.984398371080154,
+                "truth_area_mm2": 34.2,
+                "target_lateral_spread_mm": 3.8127694595420865,
+                "psf_target_normalized_l2_error": 0.977073974795333,
+                "psf_axial_fwhm_mm": 0.75,
+                "false_negative_area_mm2": 12.280000000000001,
+                "energy_outside_mask": 2.1019082240380314e10,
+                "num_truth_sources": 21,
+                "threshold_db": -2.218487496163564
+            },
+            {
+                "target_centroid_lateral_mm": -3.6804216213733665e-19,
+                "axial_spread_mm": 23.033017216387158,
+                "peak_intensity": 1.1120660380130445e6,
+                "dice": 0.22765902652588205,
+                "false_positive_area_mm2": 103.44,
+                "energy_inside_predicted_mask": 2.468741993344998e9,
+                "overlap_area_mm2": 17.68,
+                "psf_target_mode": "provided_mask",
+                "energy_fraction_outside_predicted_mask": 0.8857141534433721,
+                "centroid_lateral_mm": 0.012741752888224985,
+                "f1": 0.22765902652588207,
+                "threshold_ratio": 0.65,
+                "false_positive_pixels": 2586,
+                "missed_truth_components": 0,
+                "psf_lateral_fwhm_mm": 0.44999999999999996,
+                "truth_mask_mode": "provided",
+                "target_centroid_depth_mm": 44.999999999999915,
+                "true_negative_pixels": 201359,
+                "energy_outside_predicted_mask": 1.9132725447522694e10,
+                "truth_radius_mm": 1,
+                "truth_mm": [
+                    [
+                        46.32144028763879,
+                        -6.032772503896101
+                    ],
+                    [
+                        46.26569514702229,
+                        -5.272737898667883
+                    ],
+                    [
+                        45.72226666640846,
+                        -4.73126942728387
+                    ],
+                    [
+                        45.166195362304585,
+                        -4.200866487451935
+                    ],
+                    [
+                        44.61734980426383,
+                        -3.656508390245649
+                    ],
+                    [
+                        43.98719954353103,
+                        -3.1861889638953005
+                    ],
+                    [
+                        43.48928418531734,
+                        -2.56652716942303
+                    ],
+                    [
+                        43.554350891479686,
+                        -1.7486279796490285
+                    ],
+                    [
+                        43.959799624315366,
+                        -1.125078113947233
+                    ],
+                    [
+                        44.51058220522799,
+                        -0.6028161597729909
+                    ],
+                    [
+                        45.020721921306134,
+                        -0.02401284689886321
+                    ],
+                    [
+                        45.66686911546983,
+                        0.4173119265126402
+                    ],
+                    [
+                        46.05530266618959,
+                        1.1125489663053103
+                    ],
+                    [
+                        46.64759181635218,
+                        1.7115638060362217
+                    ],
+                    [
+                        46.3526618538167,
+                        2.4823400105268
+                    ],
+                    [
+                        45.97133599677839,
+                        3.1517892589508425
+                    ],
+                    [
+                        45.56339958483016,
+                        3.8659632638191512
+                    ],
+                    [
+                        44.92980070620905,
+                        4.31210804956654
+                    ],
+                    [
+                        44.08954562520898,
+                        4.534541578681507
+                    ],
+                    [
+                        43.667310276652834,
+                        5.237053357696269
+                    ],
+                    [
+                        43.3644115625137,
+                        5.9751143606974635
+                    ]
+                ],
+                "energy_total": 2.160146744086769e10,
+                "psf_target_integral": 854.9999999999999,
+                "spurious_prediction_components": 1,
+                "truth_components": 1,
+                "target_axial_spread_mm": 1.3028997817899934,
+                "jaccard": 0.12845103167683813,
+                "psf_target_correlation": 0.2293872621287592,
+                "psf_target_ssim_like": 0.24637032608151105,
+                "precision": 0.14597093791281374,
+                "peak_mm": [
+                    35.2,
+                    0.4
+                ],
+                "energy_fraction_inside_predicted_mask": 0.11428584655662787,
+                "recovered_truth_components": 1,
+                "lateral_spread_mm": 9.556075061984597,
+                "true_positive_pixels": 442,
+                "centroid_error_mm": 5.015617813618699,
+                "recall": 0.5169590643274854,
+                "matched_prediction_components": 1,
+                "prediction_components": 2,
+                "false_negative_pixels": 413,
+                "energy_fraction_inside_mask": 0.02696044618642743,
+                "predicted_area_mm2": 121.12,
+                "energy_fraction_outside_mask": 0.9730395538135725,
+                "max_intensity": 1.1120660380130445e6,
+                "energy_inside_mask": 5.823852004873776e8,
+                "centroid_depth_mm": 39.984398371080154,
+                "truth_area_mm2": 34.2,
+                "target_lateral_spread_mm": 3.8127694595420865,
+                "psf_target_normalized_l2_error": 0.977073974795333,
+                "psf_axial_fwhm_mm": 0.75,
+                "false_negative_area_mm2": 16.52,
+                "energy_outside_mask": 2.1019082240380314e10,
+                "num_truth_sources": 21,
+                "threshold_db": -1.8708664335714442
+            },
+            {
+                "target_centroid_lateral_mm": -3.6804216213733665e-19,
+                "axial_spread_mm": 23.033017216387158,
+                "peak_intensity": 1.1120660380130445e6,
+                "dice": 0.23684210526315788,
+                "false_positive_area_mm2": 62.28,
+                "energy_inside_predicted_mask": 1.6101352557280283e9,
+                "overlap_area_mm2": 12.96,
+                "psf_target_mode": "provided_mask",
+                "energy_fraction_outside_predicted_mask": 0.9254617650335263,
+                "centroid_lateral_mm": 0.012741752888224985,
+                "f1": 0.23684210526315785,
+                "threshold_ratio": 0.7,
+                "false_positive_pixels": 1557,
+                "missed_truth_components": 0,
+                "psf_lateral_fwhm_mm": 0.44999999999999996,
+                "truth_mask_mode": "provided",
+                "target_centroid_depth_mm": 44.999999999999915,
+                "true_negative_pixels": 202388,
+                "energy_outside_predicted_mask": 1.9991332185139664e10,
+                "truth_radius_mm": 1,
+                "truth_mm": [
+                    [
+                        46.32144028763879,
+                        -6.032772503896101
+                    ],
+                    [
+                        46.26569514702229,
+                        -5.272737898667883
+                    ],
+                    [
+                        45.72226666640846,
+                        -4.73126942728387
+                    ],
+                    [
+                        45.166195362304585,
+                        -4.200866487451935
+                    ],
+                    [
+                        44.61734980426383,
+                        -3.656508390245649
+                    ],
+                    [
+                        43.98719954353103,
+                        -3.1861889638953005
+                    ],
+                    [
+                        43.48928418531734,
+                        -2.56652716942303
+                    ],
+                    [
+                        43.554350891479686,
+                        -1.7486279796490285
+                    ],
+                    [
+                        43.959799624315366,
+                        -1.125078113947233
+                    ],
+                    [
+                        44.51058220522799,
+                        -0.6028161597729909
+                    ],
+                    [
+                        45.020721921306134,
+                        -0.02401284689886321
+                    ],
+                    [
+                        45.66686911546983,
+                        0.4173119265126402
+                    ],
+                    [
+                        46.05530266618959,
+                        1.1125489663053103
+                    ],
+                    [
+                        46.64759181635218,
+                        1.7115638060362217
+                    ],
+                    [
+                        46.3526618538167,
+                        2.4823400105268
+                    ],
+                    [
+                        45.97133599677839,
+                        3.1517892589508425
+                    ],
+                    [
+                        45.56339958483016,
+                        3.8659632638191512
+                    ],
+                    [
+                        44.92980070620905,
+                        4.31210804956654
+                    ],
+                    [
+                        44.08954562520898,
+                        4.534541578681507
+                    ],
+                    [
+                        43.667310276652834,
+                        5.237053357696269
+                    ],
+                    [
+                        43.3644115625137,
+                        5.9751143606974635
+                    ]
+                ],
+                "energy_total": 2.160146744086769e10,
+                "psf_target_integral": 854.9999999999999,
+                "spurious_prediction_components": 4,
+                "truth_components": 1,
+                "target_axial_spread_mm": 1.3028997817899934,
+                "jaccard": 0.13432835820895522,
+                "psf_target_correlation": 0.2293872621287592,
+                "psf_target_ssim_like": 0.24637032608151105,
+                "precision": 0.1722488038277512,
+                "peak_mm": [
+                    35.2,
+                    0.4
+                ],
+                "energy_fraction_inside_predicted_mask": 0.07453823496647374,
+                "recovered_truth_components": 1,
+                "lateral_spread_mm": 9.556075061984597,
+                "true_positive_pixels": 324,
+                "centroid_error_mm": 5.015617813618699,
+                "recall": 0.37894736842105264,
+                "matched_prediction_components": 2,
+                "prediction_components": 6,
+                "false_negative_pixels": 531,
+                "energy_fraction_inside_mask": 0.02696044618642743,
+                "predicted_area_mm2": 75.24,
+                "energy_fraction_outside_mask": 0.9730395538135725,
+                "max_intensity": 1.1120660380130445e6,
+                "energy_inside_mask": 5.823852004873776e8,
+                "centroid_depth_mm": 39.984398371080154,
+                "truth_area_mm2": 34.2,
+                "target_lateral_spread_mm": 3.8127694595420865,
+                "psf_target_normalized_l2_error": 0.977073974795333,
+                "psf_axial_fwhm_mm": 0.75,
+                "false_negative_area_mm2": 21.240000000000002,
+                "energy_outside_mask": 2.1019082240380314e10,
+                "num_truth_sources": 21,
+                "threshold_db": -1.5490195998574319
+            }
+        ],
+        "hasa": [
+            {
+                "target_centroid_lateral_mm": -3.6804216213733665e-19,
+                "axial_spread_mm": 22.069387711062245,
+                "peak_intensity": 2.1970094036380644e6,
+                "dice": 0.30932999373825926,
+                "false_positive_area_mm2": 73.8,
+                "energy_inside_predicted_mask": 3.591303367810137e9,
+                "overlap_area_mm2": 19.76,
+                "psf_target_mode": "provided_mask",
+                "energy_fraction_outside_predicted_mask": 0.888566592714675,
+                "centroid_lateral_mm": -0.846160114802392,
+                "f1": 0.3093299937382592,
+                "threshold_ratio": 0.6,
+                "false_positive_pixels": 1845,
+                "missed_truth_components": 0,
+                "psf_lateral_fwhm_mm": 0.44999999999999996,
+                "truth_mask_mode": "provided",
+                "target_centroid_depth_mm": 44.999999999999915,
+                "true_negative_pixels": 202100,
+                "energy_outside_predicted_mask": 2.8636943576255844e10,
+                "truth_radius_mm": 1,
+                "truth_mm": [
+                    [
+                        46.32144028763879,
+                        -6.032772503896101
+                    ],
+                    [
+                        46.26569514702229,
+                        -5.272737898667883
+                    ],
+                    [
+                        45.72226666640846,
+                        -4.73126942728387
+                    ],
+                    [
+                        45.166195362304585,
+                        -4.200866487451935
+                    ],
+                    [
+                        44.61734980426383,
+                        -3.656508390245649
+                    ],
+                    [
+                        43.98719954353103,
+                        -3.1861889638953005
+                    ],
+                    [
+                        43.48928418531734,
+                        -2.56652716942303
+                    ],
+                    [
+                        43.554350891479686,
+                        -1.7486279796490285
+                    ],
+                    [
+                        43.959799624315366,
+                        -1.125078113947233
+                    ],
+                    [
+                        44.51058220522799,
+                        -0.6028161597729909
+                    ],
+                    [
+                        45.020721921306134,
+                        -0.02401284689886321
+                    ],
+                    [
+                        45.66686911546983,
+                        0.4173119265126402
+                    ],
+                    [
+                        46.05530266618959,
+                        1.1125489663053103
+                    ],
+                    [
+                        46.64759181635218,
+                        1.7115638060362217
+                    ],
+                    [
+                        46.3526618538167,
+                        2.4823400105268
+                    ],
+                    [
+                        45.97133599677839,
+                        3.1517892589508425
+                    ],
+                    [
+                        45.56339958483016,
+                        3.8659632638191512
+                    ],
+                    [
+                        44.92980070620905,
+                        4.31210804956654
+                    ],
+                    [
+                        44.08954562520898,
+                        4.534541578681507
+                    ],
+                    [
+                        43.667310276652834,
+                        5.237053357696269
+                    ],
+                    [
+                        43.3644115625137,
+                        5.9751143606974635
+                    ]
+                ],
+                "energy_total": 3.222824694406598e10,
+                "psf_target_integral": 854.9999999999999,
+                "spurious_prediction_components": 5,
+                "truth_components": 1,
+                "target_axial_spread_mm": 1.3028997817899934,
+                "jaccard": 0.18296296296296297,
+                "psf_target_correlation": 0.2917420463453979,
+                "psf_target_ssim_like": 0.26321673225208475,
+                "precision": 0.21120136810602821,
+                "peak_mm": [
+                    47.4,
+                    -4.6
+                ],
+                "energy_fraction_inside_predicted_mask": 0.11143340728532505,
+                "recovered_truth_components": 1,
+                "lateral_spread_mm": 9.331526523807156,
+                "true_positive_pixels": 494,
+                "centroid_error_mm": 0.9850847735466974,
+                "recall": 0.5777777777777777,
+                "matched_prediction_components": 2,
+                "prediction_components": 7,
+                "false_negative_pixels": 361,
+                "energy_fraction_inside_mask": 0.03630037715463506,
+                "predicted_area_mm2": 93.56,
+                "energy_fraction_outside_mask": 0.9636996228453649,
+                "max_intensity": 2.1970094036380644e6,
+                "energy_inside_mask": 1.16989751910231e9,
+                "centroid_depth_mm": 45.50438583563683,
+                "truth_area_mm2": 34.2,
+                "target_lateral_spread_mm": 3.8127694595420865,
+                "psf_target_normalized_l2_error": 0.967300772825553,
+                "psf_axial_fwhm_mm": 0.75,
+                "false_negative_area_mm2": 14.44,
+                "energy_outside_mask": 3.105834942496367e10,
+                "num_truth_sources": 21,
+                "threshold_db": -2.218487496163564
+            },
+            {
+                "target_centroid_lateral_mm": -3.6804216213733665e-19,
+                "axial_spread_mm": 22.069387711062245,
+                "peak_intensity": 2.1970094036380644e6,
+                "dice": 0.35970561177552896,
+                "false_positive_area_mm2": 37.12,
+                "energy_inside_predicted_mask": 2.2016289271673765e9,
+                "overlap_area_mm2": 15.64,
+                "psf_target_mode": "provided_mask",
+                "energy_fraction_outside_predicted_mask": 0.9316863579024812,
+                "centroid_lateral_mm": -0.846160114802392,
+                "f1": 0.359705611775529,
+                "threshold_ratio": 0.65,
+                "false_positive_pixels": 928,
+                "missed_truth_components": 0,
+                "psf_lateral_fwhm_mm": 0.44999999999999996,
+                "truth_mask_mode": "provided",
+                "target_centroid_depth_mm": 44.999999999999915,
+                "true_negative_pixels": 203017,
+                "energy_outside_predicted_mask": 3.00266180168986e10,
+                "truth_radius_mm": 1,
+                "truth_mm": [
+                    [
+                        46.32144028763879,
+                        -6.032772503896101
+                    ],
+                    [
+                        46.26569514702229,
+                        -5.272737898667883
+                    ],
+                    [
+                        45.72226666640846,
+                        -4.73126942728387
+                    ],
+                    [
+                        45.166195362304585,
+                        -4.200866487451935
+                    ],
+                    [
+                        44.61734980426383,
+                        -3.656508390245649
+                    ],
+                    [
+                        43.98719954353103,
+                        -3.1861889638953005
+                    ],
+                    [
+                        43.48928418531734,
+                        -2.56652716942303
+                    ],
+                    [
+                        43.554350891479686,
+                        -1.7486279796490285
+                    ],
+                    [
+                        43.959799624315366,
+                        -1.125078113947233
+                    ],
+                    [
+                        44.51058220522799,
+                        -0.6028161597729909
+                    ],
+                    [
+                        45.020721921306134,
+                        -0.02401284689886321
+                    ],
+                    [
+                        45.66686911546983,
+                        0.4173119265126402
+                    ],
+                    [
+                        46.05530266618959,
+                        1.1125489663053103
+                    ],
+                    [
+                        46.64759181635218,
+                        1.7115638060362217
+                    ],
+                    [
+                        46.3526618538167,
+                        2.4823400105268
+                    ],
+                    [
+                        45.97133599677839,
+                        3.1517892589508425
+                    ],
+                    [
+                        45.56339958483016,
+                        3.8659632638191512
+                    ],
+                    [
+                        44.92980070620905,
+                        4.31210804956654
+                    ],
+                    [
+                        44.08954562520898,
+                        4.534541578681507
+                    ],
+                    [
+                        43.667310276652834,
+                        5.237053357696269
+                    ],
+                    [
+                        43.3644115625137,
+                        5.9751143606974635
+                    ]
+                ],
+                "energy_total": 3.222824694406598e10,
+                "psf_target_integral": 854.9999999999999,
+                "spurious_prediction_components": 2,
+                "truth_components": 1,
+                "target_axial_spread_mm": 1.3028997817899934,
+                "jaccard": 0.21929332585530006,
+                "psf_target_correlation": 0.2917420463453979,
+                "psf_target_ssim_like": 0.26321673225208475,
+                "precision": 0.2964366944655042,
+                "peak_mm": [
+                    47.4,
+                    -4.6
+                ],
+                "energy_fraction_inside_predicted_mask": 0.06831364209751878,
+                "recovered_truth_components": 1,
+                "lateral_spread_mm": 9.331526523807156,
+                "true_positive_pixels": 391,
+                "centroid_error_mm": 0.9850847735466974,
+                "recall": 0.45730994152046783,
+                "matched_prediction_components": 2,
+                "prediction_components": 4,
+                "false_negative_pixels": 464,
+                "energy_fraction_inside_mask": 0.03630037715463506,
+                "predicted_area_mm2": 52.76,
+                "energy_fraction_outside_mask": 0.9636996228453649,
+                "max_intensity": 2.1970094036380644e6,
+                "energy_inside_mask": 1.16989751910231e9,
+                "centroid_depth_mm": 45.50438583563683,
+                "truth_area_mm2": 34.2,
+                "target_lateral_spread_mm": 3.8127694595420865,
+                "psf_target_normalized_l2_error": 0.967300772825553,
+                "psf_axial_fwhm_mm": 0.75,
+                "false_negative_area_mm2": 18.56,
+                "energy_outside_mask": 3.105834942496367e10,
+                "num_truth_sources": 21,
+                "threshold_db": -1.8708664335714442
+            },
+            {
+                "target_centroid_lateral_mm": -3.6804216213733665e-19,
+                "axial_spread_mm": 22.069387711062245,
+                "peak_intensity": 2.1970094036380644e6,
+                "dice": 0.3213885778275476,
+                "false_positive_area_mm2": 25.76,
+                "energy_inside_predicted_mask": 1.6274823594380238e9,
+                "overlap_area_mm2": 11.48,
+                "psf_target_mode": "provided_mask",
+                "energy_fraction_outside_predicted_mask": 0.9495013687135198,
+                "centroid_lateral_mm": -0.846160114802392,
+                "f1": 0.3213885778275476,
+                "threshold_ratio": 0.7,
+                "false_positive_pixels": 644,
+                "missed_truth_components": 0,
+                "psf_lateral_fwhm_mm": 0.44999999999999996,
+                "truth_mask_mode": "provided",
+                "target_centroid_depth_mm": 44.999999999999915,
+                "true_negative_pixels": 203301,
+                "energy_outside_predicted_mask": 3.0600764584627956e10,
+                "truth_radius_mm": 1,
+                "truth_mm": [
+                    [
+                        46.32144028763879,
+                        -6.032772503896101
+                    ],
+                    [
+                        46.26569514702229,
+                        -5.272737898667883
+                    ],
+                    [
+                        45.72226666640846,
+                        -4.73126942728387
+                    ],
+                    [
+                        45.166195362304585,
+                        -4.200866487451935
+                    ],
+                    [
+                        44.61734980426383,
+                        -3.656508390245649
+                    ],
+                    [
+                        43.98719954353103,
+                        -3.1861889638953005
+                    ],
+                    [
+                        43.48928418531734,
+                        -2.56652716942303
+                    ],
+                    [
+                        43.554350891479686,
+                        -1.7486279796490285
+                    ],
+                    [
+                        43.959799624315366,
+                        -1.125078113947233
+                    ],
+                    [
+                        44.51058220522799,
+                        -0.6028161597729909
+                    ],
+                    [
+                        45.020721921306134,
+                        -0.02401284689886321
+                    ],
+                    [
+                        45.66686911546983,
+                        0.4173119265126402
+                    ],
+                    [
+                        46.05530266618959,
+                        1.1125489663053103
+                    ],
+                    [
+                        46.64759181635218,
+                        1.7115638060362217
+                    ],
+                    [
+                        46.3526618538167,
+                        2.4823400105268
+                    ],
+                    [
+                        45.97133599677839,
+                        3.1517892589508425
+                    ],
+                    [
+                        45.56339958483016,
+                        3.8659632638191512
+                    ],
+                    [
+                        44.92980070620905,
+                        4.31210804956654
+                    ],
+                    [
+                        44.08954562520898,
+                        4.534541578681507
+                    ],
+                    [
+                        43.667310276652834,
+                        5.237053357696269
+                    ],
+                    [
+                        43.3644115625137,
+                        5.9751143606974635
+                    ]
+                ],
+                "energy_total": 3.222824694406598e10,
+                "psf_target_integral": 854.9999999999999,
+                "spurious_prediction_components": 0,
+                "truth_components": 1,
+                "target_axial_spread_mm": 1.3028997817899934,
+                "jaccard": 0.1914609739826551,
+                "psf_target_correlation": 0.2917420463453979,
+                "psf_target_ssim_like": 0.26321673225208475,
+                "precision": 0.3082706766917293,
+                "peak_mm": [
+                    47.4,
+                    -4.6
+                ],
+                "energy_fraction_inside_predicted_mask": 0.050498631286480314,
+                "recovered_truth_components": 1,
+                "lateral_spread_mm": 9.331526523807156,
+                "true_positive_pixels": 287,
+                "centroid_error_mm": 0.9850847735466974,
+                "recall": 0.33567251461988307,
+                "matched_prediction_components": 2,
+                "prediction_components": 2,
+                "false_negative_pixels": 568,
+                "energy_fraction_inside_mask": 0.03630037715463506,
+                "predicted_area_mm2": 37.24,
+                "energy_fraction_outside_mask": 0.9636996228453649,
+                "max_intensity": 2.1970094036380644e6,
+                "energy_inside_mask": 1.16989751910231e9,
+                "centroid_depth_mm": 45.50438583563683,
+                "truth_area_mm2": 34.2,
+                "target_lateral_spread_mm": 3.8127694595420865,
+                "psf_target_normalized_l2_error": 0.967300772825553,
+                "psf_axial_fwhm_mm": 0.75,
+                "false_negative_area_mm2": 22.72,
+                "energy_outside_mask": 3.105834942496367e10,
+                "num_truth_sources": 21,
+                "threshold_db": -1.5490195998574319
+            }
+        ],
+        "threshold_ratios": [
+            0.6,
+            0.65,
+            0.7
+        ]
+    }
+}
