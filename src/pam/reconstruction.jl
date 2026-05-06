@@ -487,6 +487,7 @@ function reconstruct_pam_windowed(
     window_config::PAMWindowConfig=PAMWindowConfig(enabled=true),
     use_gpu::Bool=false,
     show_progress::Bool=false,
+    benchmark::Bool=false,
 )
     total_start = time()
     nx, ny = size(c)
@@ -544,6 +545,7 @@ function reconstruct_pam_windowed(
             time_origin=(first(range) - 1) * cfg.dt,
             use_gpu=use_gpu,
             show_progress=false,
+            benchmark=benchmark,
         )
         intensity .+= window_intensity
         push!(used_ranges, range)

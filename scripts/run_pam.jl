@@ -60,6 +60,7 @@ function parse_cli(args)
         "recon-window-taper" => "hann",
         "recon-min-window-energy-ratio" => "0.001",
         "recon-progress" => "false",
+        "benchmark" => "false",
         "phase-mode" => "geometric",
         "phase-jitter-rad" => "0.2",
         "random-seed" => "42",
@@ -842,6 +843,7 @@ if isempty(from_run_dir)
         rng=rng_sim,
         source_variability=source_variability,
         show_progress=parse_bool(opts["recon-progress"]),
+        benchmark=parse_bool(opts["benchmark"]),
     )
     reconstruction_source = Dict("mode" => "simulation")
 else
@@ -929,6 +931,7 @@ else
         reconstruction_mode=reconstruction_mode,
         window_config=window_config,
         show_progress=parse_bool(opts["recon-progress"]),
+        benchmark=parse_bool(opts["benchmark"]),
     )
     reconstruction_source = Dict(
         "mode" => "cached_rf",
@@ -1001,6 +1004,11 @@ summary = Dict(
     "window_info" => Dict(
         "geometric" => compact_window_info(results[:geo_info]),
         "hasa" => compact_window_info(results[:hasa_info]),
+    ),
+    "benchmark" => parse_bool(opts["benchmark"]),
+    "gpu_timing" => Dict(
+        "geometric" => get(results[:geo_info], :gpu_timing, nothing),
+        "hasa" => get(results[:hasa_info], :gpu_timing, nothing),
     ),
     "reconstruction_axial_step_m" => results[:geo_info][:axial_step],
     "reference_sound_speed_m_per_s" => results[:geo_info][:reference_sound_speed],
