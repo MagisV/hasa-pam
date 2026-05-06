@@ -616,8 +616,9 @@ function add_threshold_panel!(
         contour!(ax, lateral_mm, depth_mm, Float64.(truth_mask)'; levels=[0.5], color=(:white, 0.85), linewidth=2.3, linestyle=:dash)
     end
     lines_centerlines!(ax, truth_centerlines; color=(:white, 0.7), linewidth=1.3)
+    local_ref = max(maximum(Float64.(intensity)), eps(Float64))
     for (idx, ratio) in pairs(threshold_ratios)
-        contour!(ax, lateral_mm, depth_mm, Float64.(intensity .>= ratio * global_ref)'; levels=[0.5], color=colors[idx], linewidth=2)
+        contour!(ax, lateral_mm, depth_mm, Float64.(intensity .>= ratio * local_ref)'; levels=[0.5], color=colors[idx], linewidth=2)
     end
     scatter_sources!(ax, sources; color=(:white, 0.55), marker=:circle, markersize=2.5, strokewidth=0)
     return hm

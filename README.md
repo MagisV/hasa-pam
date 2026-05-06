@@ -301,7 +301,8 @@ julia --project=. scripts/run_pam.jl `
   --transverse-mm=102.4 `
   --vascular-length-mm=12 `
   --recon-progress=true `
-  --use-gpu=true
+  --use-gpu=true `
+  --benchmark=true
 ```
 
 The PAM run scripts write:
