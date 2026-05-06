@@ -206,6 +206,7 @@ Core types:
 - `StochasticSource2D`
 - `PAMConfig`
 - `PAMWindowConfig`
+- `SourceVariabilityConfig`
 
 Key helpers:
 
@@ -355,8 +356,7 @@ The one-emitter-per-aggregate behavior is available with `--cluster-model=point 
 The PAM run scripts write:
 
 - `overview.png`
-- `pam_heatmap.png` with stacked uncorrected/corrected reconstructed PAM intensity fields on a shared 0-1 scale
-- `paper_style.png` for cluster runs, with stacked uncorrected/corrected detection scatter panels and a faint skull/lens medium overlay
+- `activity_boundaries.png` for vascular cluster runs, with threshold-dependent active-region boundaries overlaid on the heatmaps plus a quantitative metrics table
 - `summary.json`
 - `result.jld2`
 
@@ -435,6 +435,86 @@ julia --project=. scripts/run_pam_clusters.jl \
   --random-seed=42 \
   --aberrator=none
 ```
+
+Per-window source variability can be added to the same mode. Dropout is off by default with `--dropout-probability=0.0`; amplitudes are fixed by default with `--amplitude-distribution=fixed`; frequency jitter is off by default with `--frequency-jitter-percent=0.0`.
+
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=12 \
+  --source-phase-mode=random_phase_per_window \
+  --recon-window-us=10 \
+  --recon-hop-us=5 \
+  --amplitude-distribution=lognormal \
+  --amplitude-sigma=0.5 \
+  --frequency-jitter-percent=5 \
+  --dropout-probability=0.5 \
+  --t-max-us=200 \
+  --random-seed=42 \
+  --aberrator=none
+```
+1
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=12 \
+  --source-phase-mode=random_phase_per_window \
+  --recon-window-us=10 \
+  --recon-hop-us=5 \
+  --amplitude-distribution=lognormal \
+  --amplitude-sigma=0.5 \
+  --frequency-jitter-percent=5 \
+  --dropout-probability=0 \
+  --t-max-us=500 \
+  --random-seed=42 \
+  --aberrator=none
+```
+
+2
+
+3
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=12 \
+  --source-phase-mode=random_phase_per_window \
+  --recon-window-us=10 \
+  --recon-hop-us=5 \
+  --amplitude-distribution=fixed \
+  --amplitude-sigma=0.5 \
+  --frequency-jitter-percent=5 \
+  --dropout-probability=0 \
+  --t-max-us=500 \
+  --random-seed=42 \
+  --aberrator=none
+```
+
+4
+```bash
+julia --project=. scripts/run_pam_clusters.jl \
+  --clusters-mm=30:0 \
+  --cluster-model=vascular \
+  --vascular-topology=squiggle \
+  --vascular-length-mm=12 \
+  --source-phase-mode=random_phase_per_window \
+  --recon-window-us=10 \
+  --recon-hop-us=5 \
+  --amplitude-distribution=fixed \
+  --amplitude-sigma=0.5 \
+  --frequency-jitter-percent=0 \
+  --dropout-probability=0 \
+  --t-max-us=500 \
+  --random-seed=42 \
+  --aberrator=none
+```
+
+Supported amplitude distributions are `fixed`, `uniform`, `lognormal`, and `gaussian`. For `uniform`, `--amplitude-sigma` is the relative half-width around each source amplitude. For `lognormal`, it is the log-space standard deviation. For `gaussian`, it is the relative standard deviation and sampled amplitudes are clipped at zero. `--frequency-jitter-percent` applies a multiplicative jitter to each source fundamental frequency, so harmonic frequencies shift with it. The selected settings are written to `summary.json` under `source_variability`.
 
 **Stochastic broadband** — each source emits independent noise centred on its harmonic frequencies:
 

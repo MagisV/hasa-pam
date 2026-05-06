@@ -87,6 +87,7 @@ function parse_cli(args)
         "activity-active-probability" => "1.0",
         "analysis-mode" => "auto",
         "detection-threshold-ratio" => "0.2",
+        "boundary-threshold-ratios" => "0.6,0.65,0.7,0.75,0.8",
         "peak-method" => "argmax",
         "clean-loop-gain" => "0.1",
         "clean-max-iter" => "500",
@@ -111,6 +112,13 @@ parse_bool(s::AbstractString) = lowercase(strip(s)) in ("1", "true", "yes", "on"
 function parse_float_list(spec::AbstractString)
     isempty(strip(spec)) && return Float64[]
     return [parse(Float64, strip(item)) for item in split(spec, ",") if !isempty(strip(item))]
+end
+
+function parse_threshold_ratios(spec::AbstractString)
+    ratios = parse_float_list(spec)
+    isempty(ratios) && error("At least one threshold ratio is required.")
+    all(r -> r > 0, ratios) || error("Threshold ratios must be positive.")
+    return sort(unique(ratios))
 end
 
 function parse_int_list(spec::AbstractString)
@@ -159,6 +167,28 @@ function parse_source_phase_mode(s::AbstractString)
         "random_phase_per_window, random_phase_per_realization, stochastic_broadband, got: $s",
     )
     return value
+end
+
+function parse_source_variability(opts)
+    return SourceVariabilityConfig(
+        amplitude_distribution=Symbol(lowercase(strip(opts["amplitude-distribution"]))),
+        amplitude_sigma=parse(Float64, opts["amplitude-sigma"]),
+        frequency_jitter_fraction=parse(Float64, opts["frequency-jitter-percent"]) / 100.0,
+        dropout_probability=parse(Float64, opts["dropout-probability"]),
+    )
+end
+
+function source_variability_from_summary(summary)
+    if isnothing(summary) || !hasproperty(summary, :source_variability)
+        return SourceVariabilityConfig()
+    end
+    sv = summary.source_variability
+    return SourceVariabilityConfig(
+        amplitude_distribution=Symbol(String(sv.amplitude_distribution)),
+        amplitude_sigma=Float64(sv.amplitude_sigma),
+        frequency_jitter_fraction=Float64(sv.frequency_jitter_percent) / 100.0,
+        dropout_probability=Float64(sv.dropout_probability),
+    )
 end
 
 function parse_analysis_mode(s::AbstractString, cluster_model::Symbol)
@@ -579,14 +609,65 @@ function overlay_medium_contour!(ax, c::AbstractMatrix{<:Real}, lateral_mm, dept
     return nothing
 end
 
-function pam_heatmap_title(label::AbstractString, metrics)
-    rel_peak = round(metrics[:relative_peak_intensity]; digits=2)
-    peak = format_sci(metrics[:peak_intensity])
-    total = format_sci(metrics[:integrated_intensity_m2])
-    return "$label | rel peak=$rel_peak, peak=$peak, sum=$total"
+function threshold_boundary_metrics(
+    intensity::AbstractMatrix{<:Real},
+    kgrid,
+    cfg,
+    clusters;
+    threshold_ratios,
+    truth_radius::Real,
+    truth_mask,
+    frequencies,
+)
+    return [
+        analyse_pam_detection_2d(
+            intensity,
+            kgrid,
+            cfg,
+            clusters;
+            truth_radius=truth_radius,
+            threshold_ratio=ratio,
+            truth_mask=truth_mask,
+            frequencies=frequencies,
+        )
+        for ratio in threshold_ratios
+    ]
 end
 
-function add_pam_heatmap_panel!(
+function threshold_table_rows(stats_by_threshold)
+    return [
+        [
+            @sprintf("%.2f", stats[:threshold_ratio]),
+            @sprintf("%.1f", stats[:predicted_area_mm2]),
+            @sprintf("%.0f", 100 * stats[:energy_fraction_inside_predicted_mask]),
+            @sprintf("%.2f", stats[:dice]),
+            @sprintf("%.2f", stats[:jaccard]),
+            @sprintf("%.2f", stats[:precision]),
+            @sprintf("%.2f", stats[:recall]),
+            @sprintf("%.2f", stats[:f1]),
+        ]
+        for stats in stats_by_threshold
+    ]
+end
+
+function add_threshold_table!(fig, row::Int, col::Int, title::AbstractString, stats_by_threshold)
+    headers = ["thr", "area", "E-in%", "Dice", "Jac", "Prec", "Rec", "F1"]
+    rows = threshold_table_rows(stats_by_threshold)
+    grid = GridLayout()
+    fig[row, col] = grid
+    Label(grid[1, 1:length(headers)], title; fontsize=18, halign=:left, tellwidth=false)
+    for (j, header) in pairs(headers)
+        Label(grid[2, j], header; fontsize=13, font=:bold, halign=:right, tellwidth=false)
+    end
+    for (i, row_values) in pairs(rows), (j, value) in pairs(row_values)
+        Label(grid[i + 2, j], value; fontsize=13, halign=:right, tellwidth=false)
+    end
+    colgap!(grid, 14)
+    rowgap!(grid, 4)
+    return grid
+end
+
+function add_threshold_boundary_panel!(
     fig,
     row::Int,
     label::AbstractString,
@@ -595,8 +676,11 @@ function add_pam_heatmap_panel!(
     kgrid,
     cfg,
     clusters,
-    global_ref::Real,
-    metrics,
+    global_ref::Real;
+    threshold_ratios,
+    colors,
+    truth_mask,
+    truth_centerlines=nothing,
 )
     depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
     lateral_mm = kgrid.y_vec .* 1e3
@@ -604,81 +688,120 @@ function add_pam_heatmap_panel!(
 
     ax = Axis(
         fig[row, 1];
-        title=pam_heatmap_title(label, metrics),
+        title=label,
         xlabel=row == 2 ? "Lateral distance [mm]" : "",
         ylabel="Axial distance [mm]",
         aspect=DataAspect(),
     )
     hm = heatmap!(ax, lateral_mm, depth_mm, norm_intensity'; colormap=:turbo, colorrange=(0, 1))
     overlay_medium_contour!(ax, c, lateral_mm, depth_mm, cfg)
-    scatter_cluster_points!(ax, clusters; color=(:white, 0.75), marker=:circle, markersize=3, strokewidth=0)
+    if !isnothing(truth_mask) && any(truth_mask) && any(.!truth_mask)
+        contour!(ax, lateral_mm, depth_mm, Float64.(truth_mask)'; levels=[0.5], color=(:white, 0.85), linewidth=2.3, linestyle=:dash)
+    end
+    lines_centerlines!(ax, truth_centerlines; color=(:white, 0.7), linewidth=1.3)
+    for (ratio, color) in zip(threshold_ratios, colors)
+        mask = threshold_pam_map(intensity, cfg; threshold_ratio=ratio)
+        any(mask) && any(.!mask) || continue
+        contour!(ax, lateral_mm, depth_mm, Float64.(mask)'; levels=[0.5], color=color, linewidth=2.0)
+    end
+    scatter_cluster_points!(ax, clusters; color=(:white, 0.55), marker=:circle, markersize=2.5, strokewidth=0)
     xlims!(ax, minimum(lateral_mm), maximum(lateral_mm))
     ylims!(ax, minimum(depth_mm), maximum(depth_mm))
     return hm
 end
 
-function save_pam_heatmap(path, c, pam_geo, pam_hasa, kgrid, cfg, clusters; threshold_ratio::Real=0.2)
+function save_threshold_boundary_detection(
+    path,
+    c,
+    pam_geo,
+    pam_hasa,
+    kgrid,
+    cfg,
+    clusters;
+    threshold_ratios,
+    truth_radius::Real,
+    truth_mask,
+    truth_centerlines=nothing,
+    frequencies,
+)
     global_ref = max(maximum(Float64.(pam_geo)), maximum(Float64.(pam_hasa)), eps(Float64))
-    geo_metrics = pam_intensity_metrics(
+    colors = [RGBf(0.05, 0.75, 1.0), RGBf(1.0, 0.85, 0.05), RGBf(1.0, 0.25, 0.05), RGBf(0.0, 0.9, 0.35), RGBf(0.9, 0.4, 1.0)]
+    while length(colors) < length(threshold_ratios)
+        push!(colors, RGBf(rand(), rand(), rand()))
+    end
+    colors = colors[1:length(threshold_ratios)]
+
+    geo_stats = threshold_boundary_metrics(
         pam_geo,
         kgrid,
-        cfg;
-        threshold_ratio=threshold_ratio,
-        reference_intensity=global_ref,
+        cfg,
+        clusters;
+        threshold_ratios=threshold_ratios,
+        truth_radius=truth_radius,
+        truth_mask=truth_mask,
+        frequencies=frequencies,
     )
-    hasa_metrics = pam_intensity_metrics(
+    hasa_stats = threshold_boundary_metrics(
         pam_hasa,
         kgrid,
-        cfg;
-        threshold_ratio=threshold_ratio,
-        reference_intensity=global_ref,
+        cfg,
+        clusters;
+        threshold_ratios=threshold_ratios,
+        truth_radius=truth_radius,
+        truth_mask=truth_mask,
+        frequencies=frequencies,
     )
 
-    fig = Figure(size=(900, 1100), fontsize=22)
-    hm = add_pam_heatmap_panel!(fig, 1, "Uncorrected", pam_geo, c, kgrid, cfg, clusters, global_ref, geo_metrics)
-    add_pam_heatmap_panel!(fig, 2, "Corrected", pam_hasa, c, kgrid, cfg, clusters, global_ref, hasa_metrics)
-    Colorbar(fig[1:2, 2], hm; label="Norm. PAM intensity (shared max)")
+    fig = Figure(size=(1250, 1350), fontsize=20)
+    hm = add_threshold_boundary_panel!(
+        fig,
+        1,
+        "Uncorrected activity regions",
+        pam_geo,
+        c,
+        kgrid,
+        cfg,
+        clusters,
+        global_ref;
+        threshold_ratios=threshold_ratios,
+        colors=colors,
+        truth_mask=truth_mask,
+        truth_centerlines=truth_centerlines,
+    )
+    add_threshold_boundary_panel!(
+        fig,
+        2,
+        "Corrected activity regions",
+        pam_hasa,
+        c,
+        kgrid,
+        cfg,
+        clusters,
+        global_ref;
+        threshold_ratios=threshold_ratios,
+        colors=colors,
+        truth_mask=truth_mask,
+        truth_centerlines=truth_centerlines,
+    )
+    Colorbar(fig[1:2, 2], hm; label="Norm. PAM intensity")
 
+    legend_elements = [LineElement(color=colors[i], linewidth=3) for i in eachindex(threshold_ratios)]
+    legend_labels = ["thr=$(round(r; digits=2))" for r in threshold_ratios]
+    if !isnothing(truth_mask) && any(truth_mask) && any(.!truth_mask)
+        push!(legend_elements, LineElement(color=(:white, 0.85), linewidth=3, linestyle=:dash))
+        push!(legend_labels, "truth mask")
+    end
+    Legend(fig[3, 1], legend_elements, legend_labels; orientation=:horizontal, tellheight=true, framevisible=false)
+
+    add_threshold_table!(fig, 4, 1, "Uncorrected quantitative region metrics", geo_stats)
+    add_threshold_table!(fig, 5, 1, "Corrected quantitative region metrics", hasa_stats)
+    rowgap!(fig.layout, 10)
     save(path, fig)
     return Dict(
-        "global_reference_intensity" => global_ref,
-        "geometric" => string_key_dict(geo_metrics),
-        "hasa" => string_key_dict(hasa_metrics),
+        "threshold_ratios" => threshold_ratios,
+        "geometric" => [string_key_dict(stats) for stats in geo_stats],
+        "hasa" => [string_key_dict(stats) for stats in hasa_stats],
     )
-end
-
-function cluster_points_mm(clusters)
-    return [cl.lateral * 1e3 for cl in clusters], [cl.depth * 1e3 for cl in clusters]
-end
-
-function mask_points_mm(mask::BitMatrix, kgrid, cfg; max_points::Int=2500)
-    idxs = findall(mask)
-    isempty(idxs) && return Float64[], Float64[]
-
-    stride = max(1, ceil(Int, length(idxs) / max_points))
-    sampled = idxs[1:stride:end]
-    depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
-    lateral_mm = kgrid.y_vec .* 1e3
-    return [lateral_mm[idx[2]] for idx in sampled], [depth_mm[idx[1]] for idx in sampled]
-end
-
-function medium_points_mm(c::AbstractMatrix{<:Real}, kgrid, cfg; tol::Real=5.0, max_points::Int=5000)
-    medium_mask = BitMatrix(abs.(Float64.(c) .- cfg.c0) .> Float64(tol))
-    medium_mask[1:receiver_row(cfg), :] .= false
-    return mask_points_mm(medium_mask, kgrid, cfg; max_points=max_points)
-end
-
-function centerline_points_mm(centerlines)
-    isnothing(centerlines) && return Float64[], Float64[]
-    lateral_mm = Float64[]
-    depth_mm = Float64[]
-    for line in centerlines
-        for (depth, lateral) in line
-            push!(lateral_mm, lateral * 1e3)
-            push!(depth_mm, depth * 1e3)
-        end
-    end
-    return lateral_mm, depth_mm
 end
 
 function lines_centerlines!(ax, centerlines; color=(:black, 0.45), linewidth=2)
@@ -694,165 +817,6 @@ function lines_centerlines!(ax, centerlines; color=(:black, 0.45), linewidth=2)
         )
     end
     return nothing
-end
-
-function nearest_detection_errors_mm(mask::BitMatrix, kgrid, cfg, clusters)
-    pred_lateral_mm, pred_depth_mm = mask_points_mm(mask, kgrid, cfg; max_points=typemax(Int))
-    isempty(pred_lateral_mm) && return Float64[], Float64[]
-
-    lateral_errors = Float64[]
-    depth_errors = Float64[]
-    for cl in clusters
-        truth_lateral = cl.lateral * 1e3
-        truth_depth = cl.depth * 1e3
-        best_idx = argmin((pred_lateral_mm .- truth_lateral) .^ 2 .+ (pred_depth_mm .- truth_depth) .^ 2)
-        push!(lateral_errors, pred_lateral_mm[best_idx] - truth_lateral)
-        push!(depth_errors, pred_depth_mm[best_idx] - truth_depth)
-    end
-    return lateral_errors, depth_errors
-end
-
-function pam_panel_limits(clusters, datasets...; min_depth_max_mm::Real=80.0)
-    truth_lat, truth_depth = cluster_points_mm(clusters)
-    all_lat = copy(truth_lat)
-    all_depth = copy(truth_depth)
-    for (lat, depth) in datasets
-        append!(all_lat, lat)
-        append!(all_depth, depth)
-    end
-
-    x_pad = max(2.0, 0.12 * max(maximum(all_lat) - minimum(all_lat), 1.0))
-    y_pad = max(2.0, 0.12 * max(maximum(all_depth) - minimum(all_depth), 1.0))
-    return (
-        floor(minimum(all_lat) - x_pad),
-        ceil(maximum(all_lat) + x_pad),
-        floor(minimum(all_depth) - y_pad),
-        max(Float64(min_depth_max_mm), ceil(maximum(all_depth) + y_pad)),
-    )
-end
-
-function paper_style_figure_size(limits; px_per_mm::Real=8.0)
-    x_range_mm = max(Float64(limits[2] - limits[1]), 1.0)
-    y_range_mm = max(Float64(limits[4] - limits[3]), 1.0)
-    axis_width_px = clamp(Float64(px_per_mm) * x_range_mm, 420.0, 620.0)
-    axis_height_px = axis_width_px * y_range_mm / x_range_mm
-    figure_width_px = round(Int, axis_width_px + 170.0)
-    figure_height_px = round(Int, 2.0 * axis_height_px + 210.0)
-    return (figure_width_px, figure_height_px)
-end
-
-function add_paper_style_panel!(
-    fig,
-    row::Int,
-    title::AbstractString,
-    intensity,
-    c,
-    kgrid,
-    cfg,
-    clusters;
-    color,
-    threshold_ratio::Real,
-    limits,
-    show_xlabel::Bool,
-    truth_centerlines=nothing,
-)
-    mask = threshold_pam_map(intensity, cfg; threshold_ratio=threshold_ratio)
-    pred_lat, pred_depth = mask_points_mm(mask, kgrid, cfg)
-    truth_lat, truth_depth = cluster_points_mm(clusters)
-    medium_lat, medium_depth = medium_points_mm(c, kgrid, cfg)
-
-    ax = Axis(
-        fig[row, 1];
-        xlabel=show_xlabel ? "Lateral Distance [mm]" : "",
-        ylabel=row == 1 ? "Axial Distance [mm]" : "",
-        yreversed=true,
-        xgridvisible=false,
-        ygridvisible=false,
-        xticks=WilkinsonTicks(3),
-        yticks=WilkinsonTicks(3),
-        aspect=DataAspect(),
-    )
-    hidespines!(ax, :t, :r)
-    xlims!(ax, limits[1], limits[2])
-    ylims!(ax, limits[3], limits[4])
-
-    scatter!(ax, medium_lat, medium_depth; color=(:gray70, 0.35), markersize=4, marker=:rect)
-    lines_centerlines!(ax, truth_centerlines; color=(:gray20, 0.55), linewidth=2)
-    scatter!(ax, truth_lat, truth_depth; color=(:gray45, 0.75), markersize=5, marker=:rect)
-    scatter!(ax, pred_lat, pred_depth; color=(color, 0.85), markersize=6, marker=:circle)
-    text!(ax, 0.92, 0.86; text=title, space=:relative, align=(:right, :center), color=color, fontsize=30)
-
-    lat_err, depth_err = nearest_detection_errors_mm(mask, kgrid, cfg, clusters)
-    inset = Axis(
-        fig[row, 1];
-        width=90,
-        height=115,
-        halign=:left,
-        valign=:top,
-        tellwidth=false,
-        tellheight=false,
-        yreversed=true,
-        title=row == 1 ? "Error" : "",
-        titlesize=20,
-        xgridvisible=false,
-        ygridvisible=false,
-        backgroundcolor=(:white, 0.9),
-    )
-    hidespines!(inset, :t, :r)
-    hidedecorations!(inset; grid=false)
-    xlims!(inset, -10, 10)
-    ylims!(inset, -10, 10)
-    vlines!(inset, [0.0]; color=:gray65, linewidth=1)
-    hlines!(inset, [0.0]; color=:gray65, linewidth=1)
-    scatter!(inset, lat_err, depth_err; color=(color, 0.85), markersize=3.5)
-    if row == 1
-        text!(ax, 0.23, 0.69; text="1 cm", space=:relative, align=(:left, :center), color=:black, fontsize=24)
-    end
-
-    return pred_lat, pred_depth
-end
-
-function save_paper_style_detection(path, c, pam_geo, pam_hasa, kgrid, cfg, clusters; threshold_ratio::Real, truth_centerlines=nothing)
-    geo_mask = threshold_pam_map(pam_geo, cfg; threshold_ratio=threshold_ratio)
-    hasa_mask = threshold_pam_map(pam_hasa, cfg; threshold_ratio=threshold_ratio)
-    geo_points = mask_points_mm(geo_mask, kgrid, cfg)
-    hasa_points = mask_points_mm(hasa_mask, kgrid, cfg)
-    centerline_points = centerline_points_mm(truth_centerlines)
-    limits = pam_panel_limits(clusters, geo_points, hasa_points, centerline_points; min_depth_max_mm=80.0)
-
-    fig = Figure(size=paper_style_figure_size(limits), fontsize=24)
-    add_paper_style_panel!(
-        fig,
-        1,
-        "Uncorrected",
-        pam_geo,
-        c,
-        kgrid,
-        cfg,
-        clusters;
-        color=RGBf(0.55, 0.0, 0.34),
-        threshold_ratio=threshold_ratio,
-        limits=limits,
-        show_xlabel=false,
-        truth_centerlines=truth_centerlines,
-    )
-    add_paper_style_panel!(
-        fig,
-        2,
-        "Corrected",
-        pam_hasa,
-        c,
-        kgrid,
-        cfg,
-        clusters;
-        color=RGBf(1.0, 0.28, 0.04),
-        threshold_ratio=threshold_ratio,
-        limits=limits,
-        show_xlabel=true,
-        truth_centerlines=truth_centerlines,
-    )
-    rowgap!(fig.layout, 8)
-    save(path, fig)
 end
 
 function compact_window_info(info)
@@ -879,6 +843,7 @@ peak_method = Symbol(lowercase(strip(opts["peak-method"])))
 peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
 detection_truth_radius_m = parse(Float64, opts["vascular-radius-mm"]) * 1e-3
 detection_threshold_ratio = parse(Float64, opts["detection-threshold-ratio"])
+boundary_threshold_ratios = parse_threshold_ratios(opts["boundary-threshold-ratios"])
 
 if isempty(from_run_dir)
     cfg_base = PAMConfig(
@@ -943,12 +908,7 @@ if isempty(from_run_dir)
     source_phase_mode = parse_source_phase_mode(opts["source-phase-mode"])
     n_realizations = parse(Int, opts["n-realizations"])
     rng_sim = Random.MersenneTwister(parse(Int, opts["random-seed"]) + 1)
-    source_variability = SourceVariabilityConfig(
-        amplitude_distribution=Symbol(lowercase(strip(opts["amplitude-distribution"]))),
-        amplitude_sigma=parse(Float64, opts["amplitude-sigma"]),
-        frequency_jitter_fraction=parse(Float64, opts["frequency-jitter-percent"]) / 100.0,
-        dropout_probability=parse(Float64, opts["dropout-probability"]),
-    )
+    source_variability = parse_source_variability(opts)
 
     results = run_pam_case(
         c,
@@ -997,6 +957,8 @@ else
             "activity-phase-jitter-rad", "activity-amplitude-jitter",
             "activity-active-probability",
             "source-phase-mode", "n-realizations",
+            "amplitude-distribution", "amplitude-sigma",
+            "frequency-jitter-percent", "dropout-probability",
         ),
     )
     cached_path = joinpath(from_run_dir, "result.jld2")
@@ -1012,6 +974,7 @@ else
     bottom_margin_m = nothing
     cached_summary_path = joinpath(from_run_dir, "summary.json")
     cached_summary = isfile(cached_summary_path) ? JSON3.read(read(cached_summary_path, String)) : nothing
+    source_variability = source_variability_from_summary(cached_summary)
     cluster_meta = if !isnothing(cached_summary) && hasproperty(cached_summary, :emission_meta)
         Dict{String, Any}(json3_to_any(cached_summary.emission_meta))
     else
@@ -1088,37 +1051,27 @@ save_overview(
     results[:kgrid], cfg, clusters, results[:stats_geo], results[:stats_hasa],
 )
 
-heatmap_path = joinpath(out_dir, "pam_heatmap.png")
-heatmap_metrics = save_pam_heatmap(
-    heatmap_path,
+activity_boundary_path = joinpath(out_dir, "activity_boundaries.png")
+activity_boundary_metrics = save_threshold_boundary_detection(
+    activity_boundary_path,
     c,
     results[:pam_geo],
     results[:pam_hasa],
     results[:kgrid],
     cfg,
     clusters;
-    threshold_ratio=detection_threshold_ratio,
-)
-
-paper_style_path = joinpath(out_dir, "paper_style.png")
-save_paper_style_detection(
-    paper_style_path,
-    c,
-    results[:pam_geo],
-    results[:pam_hasa],
-    results[:kgrid],
-    cfg,
-    clusters;
-    threshold_ratio=detection_threshold_ratio,
+    threshold_ratios=boundary_threshold_ratios,
+    truth_radius=detection_truth_radius_m,
+    truth_mask=detection_truth_mask,
     truth_centerlines=truth_centerlines,
+    frequencies=recon_frequencies,
 )
 
 summary = Dict(
     "out_dir" => out_dir,
     "reconstruction_source" => reconstruction_source,
-    "paper_style_figure" => paper_style_path,
-    "heatmap_figure" => heatmap_path,
-    "pam_heatmap_metrics" => heatmap_metrics,
+    "activity_boundary_figure" => activity_boundary_path,
+    "activity_boundary_metrics" => activity_boundary_metrics,
     "clusters" => [Dict(
         "depth_m" => cl.depth,
         "lateral_m" => cl.lateral,
@@ -1174,6 +1127,7 @@ summary = Dict(
     "detection_truth_radius_m" => detection_truth_radius_m,
     "detection_truth_mode" => isnothing(detection_truth_mask) ? "source_disks" : "centerline_tube",
     "detection_threshold_ratio" => detection_threshold_ratio,
+    "boundary_threshold_ratios" => boundary_threshold_ratios,
     "peak_method" => String(peak_method),
     "clean_loop_gain" => parse(Float64, opts["clean-loop-gain"]),
     "clean_max_iter" => parse(Int, opts["clean-max-iter"]),

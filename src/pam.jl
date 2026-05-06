@@ -755,7 +755,9 @@ function _sample_amplitude(
     dist::Symbol,
     sigma::Float64,
 )
-    sigma <= 0.0 || dist == :fixed && return base
+    if sigma <= 0.0 || dist == :fixed
+        return base
+    end
     if dist == :uniform
         return max(0.0, base * (1.0 + sigma * (2.0 * rand(rng) - 1.0)))
     elseif dist == :lognormal
@@ -1309,7 +1311,7 @@ function _expand_sources_per_window(
             push!(expanded, evt)
         end
     end
-    isempty(expanded) && error("_expand_sources_per_window: all emissions dropped — dropout_probability too high?")
+    isempty(expanded) && error("_expand_sources_per_window: all emissions dropped; dropout_probability too high?")
     return expanded, n_frames
 end
 
@@ -1801,6 +1803,131 @@ function pam_centerline_truth_mask(
     return mask
 end
 
+_source_activity_weight(src::PointSource2D) = abs(src.amplitude)
+_source_activity_weight(src::BubbleCluster2D) = abs(src.amplitude * src.n_bubbles)
+_source_activity_weight(src::GaussianPulseCluster2D) = abs(src.amplitude * src.n_bubbles)
+_source_activity_weight(src::StochasticSource2D) = abs(src.amplitude)
+
+"""
+    pam_source_map(sources, kgrid, cfg; weights=:amplitude)
+
+Rasterize source positions onto the PAM grid. Multiple sources in the same
+cell are accumulated. `weights=:amplitude` uses source activity amplitudes,
+while `weights=:uniform` assigns each source equal weight.
+"""
+function pam_source_map(
+    sources::AbstractVector{<:EmissionSource2D},
+    kgrid::KGrid2D,
+    cfg::PAMConfig;
+    weights::Symbol=:amplitude,
+)
+    weights in (:amplitude, :uniform) ||
+        error("Unknown source-map weights: $weights (expected :amplitude or :uniform).")
+    source_map = zeros(Float64, kgrid.Nx, kgrid.Ny)
+    for src in sources
+        row, col = source_grid_index(src, cfg, kgrid)
+        source_map[row, col] += weights == :uniform ? 1.0 : _source_activity_weight(src)
+    end
+    source_map[1:receiver_row(cfg), :] .= 0.0
+    return source_map
+end
+
+function _gaussian_kernel_cells(σ::Real)
+    sigma = Float64(σ)
+    sigma > 0 || return [1.0]
+    half_width = max(1, ceil(Int, 3 * sigma))
+    kernel = [exp(-0.5 * (offset / sigma)^2) for offset in -half_width:half_width]
+    kernel ./= sum(kernel)
+    return kernel
+end
+
+function _convolve_axis_zero(a::AbstractMatrix{<:Real}, kernel::AbstractVector{<:Real}, axis::Int)
+    axis in (1, 2) || error("axis must be 1 or 2.")
+    out = zeros(Float64, size(a))
+    rows, cols = size(a)
+    center = fld(length(kernel), 2) + 1
+    @inbounds if axis == 1
+        for row in 1:rows, col in 1:cols
+            acc = 0.0
+            for (kidx, kval) in pairs(kernel)
+                rr = row + kidx - center
+                1 <= rr <= rows || continue
+                acc += Float64(kval) * Float64(a[rr, col])
+            end
+            out[row, col] = acc
+        end
+    else
+        for row in 1:rows, col in 1:cols
+            acc = 0.0
+            for (kidx, kval) in pairs(kernel)
+                cc = col + kidx - center
+                1 <= cc <= cols || continue
+                acc += Float64(kval) * Float64(a[row, cc])
+            end
+            out[row, col] = acc
+        end
+    end
+    return out
+end
+
+"""
+    pam_psf_blur(map, kgrid, cfg; frequencies=nothing,
+                 psf_axial_fwhm=nothing, psf_lateral_fwhm=nothing)
+
+Blur a ground-truth activity map by a Gaussian approximation to the PAM point
+spread function. If PSF FWHM values are omitted, a diffraction/bandwidth-based
+default is estimated from the reconstruction frequencies.
+"""
+function pam_psf_blur(
+    truth_map::AbstractMatrix{<:Real},
+    kgrid::KGrid2D,
+    cfg::PAMConfig;
+    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    psf_axial_fwhm::Union{Nothing, Real}=nothing,
+    psf_lateral_fwhm::Union{Nothing, Real}=nothing,
+)
+    size(truth_map) == (kgrid.Nx, kgrid.Ny) ||
+        error("truth_map size $(size(truth_map)) does not match kgrid size ($(kgrid.Nx), $(kgrid.Ny)).")
+    ax_fwhm, lat_fwhm = if isnothing(psf_axial_fwhm) || isnothing(psf_lateral_fwhm)
+        _default_psf_widths(cfg, kgrid, frequencies)
+    else
+        Float64(psf_axial_fwhm), Float64(psf_lateral_fwhm)
+    end
+    ax_fwhm = Float64(something(psf_axial_fwhm, ax_fwhm))
+    lat_fwhm = Float64(something(psf_lateral_fwhm, lat_fwhm))
+    ax_fwhm >= 0 || error("psf_axial_fwhm must be non-negative.")
+    lat_fwhm >= 0 || error("psf_lateral_fwhm must be non-negative.")
+
+    work = max.(Float64.(truth_map), 0.0)
+    work[1:receiver_row(cfg), :] .= 0.0
+    σ_ax = ax_fwhm / (2.3548 * cfg.dx)
+    σ_lat = lat_fwhm / (2.3548 * cfg.dz)
+    blurred = _convolve_axis_zero(work, _gaussian_kernel_cells(σ_ax), 1)
+    blurred = _convolve_axis_zero(blurred, _gaussian_kernel_cells(σ_lat), 2)
+    blurred[1:receiver_row(cfg), :] .= 0.0
+    return blurred
+end
+
+function pam_psf_blurred_truth_map(
+    sources::AbstractVector{<:EmissionSource2D},
+    kgrid::KGrid2D,
+    cfg::PAMConfig;
+    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    psf_axial_fwhm::Union{Nothing, Real}=nothing,
+    psf_lateral_fwhm::Union{Nothing, Real}=nothing,
+    weights::Symbol=:amplitude,
+)
+    source_map = pam_source_map(sources, kgrid, cfg; weights=weights)
+    return pam_psf_blur(
+        source_map,
+        kgrid,
+        cfg;
+        frequencies=frequencies,
+        psf_axial_fwhm=psf_axial_fwhm,
+        psf_lateral_fwhm=psf_lateral_fwhm,
+    )
+end
+
 function threshold_pam_map(
     intensity::AbstractMatrix{<:Real},
     cfg::PAMConfig;
@@ -1906,6 +2033,117 @@ end
 
 _safe_fraction(num::Real, den::Real) = den > 0 ? Float64(num) / Float64(den) : 0.0
 
+function _valid_reconstruction_mask(kgrid::KGrid2D, cfg::PAMConfig)
+    valid = trues(kgrid.Nx, kgrid.Ny)
+    valid[1:receiver_row(cfg), :] .= false
+    return valid
+end
+
+function _weighted_centroid_spread_mm(
+    weights::AbstractMatrix{<:Real},
+    kgrid::KGrid2D,
+    cfg::PAMConfig;
+    valid_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
+)
+    size(weights) == (kgrid.Nx, kgrid.Ny) ||
+        error("weights size $(size(weights)) does not match kgrid size ($(kgrid.Nx), $(kgrid.Ny)).")
+    valid = isnothing(valid_mask) ? _valid_reconstruction_mask(kgrid, cfg) : BitMatrix(valid_mask)
+    size(valid) == (kgrid.Nx, kgrid.Ny) ||
+        error("valid_mask size $(size(valid)) does not match kgrid size ($(kgrid.Nx), $(kgrid.Ny)).")
+
+    work = max.(Float64.(weights), 0.0)
+    work[.!valid] .= 0.0
+    total = sum(work)
+    total > 0 || return NaN, NaN, NaN, NaN
+
+    depth = depth_coordinates(kgrid, cfg)
+    lateral = kgrid.y_vec
+    centroid_depth = 0.0
+    centroid_lateral = 0.0
+    @inbounds for row in 1:kgrid.Nx, col in 1:kgrid.Ny
+        w = work[row, col]
+        w > 0 || continue
+        centroid_depth += w * depth[row]
+        centroid_lateral += w * lateral[col]
+    end
+    centroid_depth /= total
+    centroid_lateral /= total
+
+    axial_var = 0.0
+    lateral_var = 0.0
+    @inbounds for row in 1:kgrid.Nx, col in 1:kgrid.Ny
+        w = work[row, col]
+        w > 0 || continue
+        axial_var += w * (depth[row] - centroid_depth)^2
+        lateral_var += w * (lateral[col] - centroid_lateral)^2
+    end
+    axial_spread_mm = sqrt(axial_var / total) * 1e3
+    lateral_spread_mm = sqrt(lateral_var / total) * 1e3
+    return centroid_depth * 1e3, centroid_lateral * 1e3, axial_spread_mm, lateral_spread_mm
+end
+
+function _unit_sum_map(a::AbstractMatrix{<:Real}, valid_mask::AbstractMatrix{Bool})
+    size(a) == size(valid_mask) || error("map and valid_mask must have the same size.")
+    out = max.(Float64.(a), 0.0)
+    out[.!valid_mask] .= 0.0
+    total = sum(out)
+    total > 0 && (out ./= total)
+    return out
+end
+
+function _pearson_correlation(a::AbstractVector{<:Real}, b::AbstractVector{<:Real})
+    length(a) == length(b) || error("correlation vectors must have the same length.")
+    isempty(a) && return NaN
+    ma = mean(a)
+    mb = mean(b)
+    da = Float64.(a) .- ma
+    db = Float64.(b) .- mb
+    den = sqrt(sum(abs2, da) * sum(abs2, db))
+    den > 0 || return NaN
+    return sum(da .* db) / den
+end
+
+function _global_ssim_like(a::AbstractVector{<:Real}, b::AbstractVector{<:Real})
+    length(a) == length(b) || error("SSIM vectors must have the same length.")
+    isempty(a) && return NaN
+    af = Float64.(a)
+    bf = Float64.(b)
+    μa = mean(af)
+    μb = mean(bf)
+    σa2 = mean((af .- μa) .^ 2)
+    σb2 = mean((bf .- μb) .^ 2)
+    σab = mean((af .- μa) .* (bf .- μb))
+    dynamic_range = max(maximum(af), maximum(bf)) - min(minimum(af), minimum(bf))
+    dynamic_range = max(dynamic_range, eps(Float64))
+    c1 = (0.01 * dynamic_range)^2
+    c2 = (0.03 * dynamic_range)^2
+    return ((2 * μa * μb + c1) * (2 * σab + c2)) /
+           ((μa^2 + μb^2 + c1) * (σa2 + σb2 + c2))
+end
+
+function _psf_target_similarity_metrics(
+    intensity::AbstractMatrix{<:Real},
+    target::AbstractMatrix{<:Real},
+    kgrid::KGrid2D,
+    cfg::PAMConfig,
+)
+    size(intensity) == size(target) == (kgrid.Nx, kgrid.Ny) ||
+        error("intensity, target, and kgrid sizes must agree.")
+    valid = _valid_reconstruction_mask(kgrid, cfg)
+    pred = _unit_sum_map(intensity, valid)
+    truth = _unit_sum_map(target, valid)
+    pred_vec = pred[valid]
+    truth_vec = truth[valid]
+    target_norm = sqrt(sum(abs2, truth_vec))
+    normalized_l2 = target_norm > 0 ? sqrt(sum(abs2, pred_vec .- truth_vec)) / target_norm : NaN
+    return Dict{Symbol, Any}(
+        :correlation => _pearson_correlation(pred_vec, truth_vec),
+        :ssim_like => _global_ssim_like(pred_vec, truth_vec),
+        :normalized_l2_error => normalized_l2,
+        :target_integral => sum(max.(Float64.(target), 0.0)),
+    )
+end
+
 function analyse_pam_detection_2d(
     intensity::AbstractMatrix{<:Real},
     kgrid::KGrid2D,
@@ -1914,6 +2152,9 @@ function analyse_pam_detection_2d(
     truth_radius::Real=cfg.success_tolerance,
     threshold_ratio::Real=0.2,
     truth_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
+    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    psf_axial_fwhm::Union{Nothing, Real}=nothing,
+    psf_lateral_fwhm::Union{Nothing, Real}=nothing,
 )
     isempty(sources) && error("At least one emission source is required for PAM detection analysis.")
     truth = if isnothing(truth_mask)
@@ -1924,6 +2165,7 @@ function analyse_pam_detection_2d(
         BitMatrix(truth_mask)
     end
     predicted = threshold_pam_map(intensity, cfg; threshold_ratio=threshold_ratio)
+    valid = _valid_reconstruction_mask(kgrid, cfg)
 
     tp = count(predicted .& truth)
     fp = count(predicted .& (.!truth))
@@ -1946,12 +2188,46 @@ function analyse_pam_detection_2d(
     depth = depth_coordinates(kgrid, cfg)
     lateral = kgrid.y_vec
     max_intensity = maximum(Float64.(intensity))
+    work = max.(Float64.(intensity), 0.0)
+    work[.!valid] .= 0.0
+    total_energy = sum(work)
+    energy_inside = sum(work[truth])
+    energy_outside = max(total_energy - energy_inside, 0.0)
+    energy_inside_predicted = sum(work[predicted])
+    energy_outside_predicted = max(total_energy - energy_inside_predicted, 0.0)
+    centroid_depth_mm, centroid_lateral_mm, axial_spread_mm, lateral_spread_mm =
+        _weighted_centroid_spread_mm(work, kgrid, cfg; valid_mask=valid)
+
+    target_base = if isnothing(truth_mask)
+        pam_source_map(sources, kgrid, cfg; weights=:amplitude)
+    else
+        Float64.(truth)
+    end
+    psf_target = pam_psf_blur(
+        target_base,
+        kgrid,
+        cfg;
+        frequencies=frequencies,
+        psf_axial_fwhm=psf_axial_fwhm,
+        psf_lateral_fwhm=psf_lateral_fwhm,
+    )
+    target_centroid_depth_mm, target_centroid_lateral_mm, target_axial_spread_mm, target_lateral_spread_mm =
+        _weighted_centroid_spread_mm(psf_target, kgrid, cfg; valid_mask=valid)
+    centroid_error_mm = if isfinite(centroid_depth_mm) && isfinite(target_centroid_depth_mm)
+        hypot(centroid_depth_mm - target_centroid_depth_mm, centroid_lateral_mm - target_centroid_lateral_mm)
+    else
+        NaN
+    end
+    psf_similarity = _psf_target_similarity_metrics(intensity, psf_target, kgrid, cfg)
 
     return Dict{Symbol, Any}(
         :truth_mm => [(src.depth * 1e3, src.lateral * 1e3) for src in sources],
         :num_truth_sources => length(sources),
         :truth_radius_mm => Float64(truth_radius) * 1e3,
         :truth_mask_mode => isnothing(truth_mask) ? :source_disks : :provided,
+        :psf_target_mode => isnothing(truth_mask) ? :source_map : :provided_mask,
+        :psf_axial_fwhm_mm => Float64(something(psf_axial_fwhm, _default_psf_widths(cfg, kgrid, frequencies)[1])) * 1e3,
+        :psf_lateral_fwhm_mm => Float64(something(psf_lateral_fwhm, _default_psf_widths(cfg, kgrid, frequencies)[2])) * 1e3,
         :threshold_ratio => Float64(threshold_ratio),
         :threshold_db => 10 * log10(Float64(threshold_ratio)),
         :true_positive_pixels => tp,
@@ -1974,6 +2250,28 @@ function analyse_pam_detection_2d(
         :truth_components => truth_components,
         :recovered_truth_components => recovered_truth_components,
         :missed_truth_components => missed_truth_components,
+        :energy_inside_mask => energy_inside,
+        :energy_outside_mask => energy_outside,
+        :energy_total => total_energy,
+        :energy_fraction_inside_mask => _safe_fraction(energy_inside, total_energy),
+        :energy_fraction_outside_mask => _safe_fraction(energy_outside, total_energy),
+        :energy_inside_predicted_mask => energy_inside_predicted,
+        :energy_outside_predicted_mask => energy_outside_predicted,
+        :energy_fraction_inside_predicted_mask => _safe_fraction(energy_inside_predicted, total_energy),
+        :energy_fraction_outside_predicted_mask => _safe_fraction(energy_outside_predicted, total_energy),
+        :centroid_depth_mm => centroid_depth_mm,
+        :centroid_lateral_mm => centroid_lateral_mm,
+        :target_centroid_depth_mm => target_centroid_depth_mm,
+        :target_centroid_lateral_mm => target_centroid_lateral_mm,
+        :centroid_error_mm => centroid_error_mm,
+        :axial_spread_mm => axial_spread_mm,
+        :lateral_spread_mm => lateral_spread_mm,
+        :target_axial_spread_mm => target_axial_spread_mm,
+        :target_lateral_spread_mm => target_lateral_spread_mm,
+        :psf_target_correlation => psf_similarity[:correlation],
+        :psf_target_ssim_like => psf_similarity[:ssim_like],
+        :psf_target_normalized_l2_error => psf_similarity[:normalized_l2_error],
+        :psf_target_integral => psf_similarity[:target_integral],
         :peak_mm => (depth[max_idx[1]] * 1e3, lateral[max_idx[2]] * 1e3),
         :peak_intensity => Float64(intensity[max_idx...]),
         :max_intensity => max_intensity,
@@ -2314,7 +2612,15 @@ function _run_pam_per_window(
     )
     eff_recon_kwargs = merge(recon_kwargs, (reconstruction_mode=:windowed, window_config=eff_window_config))
     rf, kgrid, sim_info = simulate_point_sources(c, rho, expanded, cfg; use_gpu=use_gpu)
-    results = reconstruct_pam_case(rf, c, expanded, cfg; simulation_info=sim_info, eff_recon_kwargs...)
+    results = reconstruct_pam_case(
+        rf,
+        c,
+        expanded,
+        cfg;
+        simulation_info=sim_info,
+        analysis_sources=sources,
+        eff_recon_kwargs...,
+    )
     results[:kgrid] = kgrid
     results[:source_phase_mode] = source_phase_mode
     results[:n_realizations] = 1
@@ -2461,6 +2767,7 @@ function reconstruct_pam_case(
     reconstruction_axial_step::Union{Nothing, Real}=50e-6,
     reconstruction_mode::Symbol=:full,
     window_config::PAMWindowConfig=PAMWindowConfig(),
+    analysis_sources::Union{Nothing, AbstractVector{<:EmissionSource2D}}=nothing,
 )
     size(c) == (pam_Nx(cfg), pam_Ny(cfg)) ||
         error("Sound-speed map size $(size(c)) does not match PAMConfig size ($(pam_Nx(cfg)), $(pam_Ny(cfg))).")
@@ -2509,6 +2816,9 @@ function reconstruct_pam_case(
         reconstruct_pam(rf, c, cfg; recon_kwargs..., corrected=true)
     end
 
+    truth_sources = isnothing(analysis_sources) ? sources : analysis_sources
+    isempty(truth_sources) && error("At least one analysis source is required.")
+
     stats_geo, stats_hasa = if analysis_mode == :localization
         analyse_kwargs = (
             peak_method=peak_method,
@@ -2520,18 +2830,21 @@ function reconstruct_pam_case(
             clean_psf_lateral_fwhm=clean_psf_lateral_fwhm,
         )
         (
-            analyse_pam_2d(pam_geo, kgrid, cfg, sources; analyse_kwargs...),
-            analyse_pam_2d(pam_hasa, kgrid, cfg, sources; analyse_kwargs...),
+            analyse_pam_2d(pam_geo, kgrid, cfg, truth_sources; analyse_kwargs...),
+            analyse_pam_2d(pam_hasa, kgrid, cfg, truth_sources; analyse_kwargs...),
         )
     elseif analysis_mode == :detection
         analyse_kwargs = (
             truth_radius=detection_truth_radius,
             threshold_ratio=detection_threshold_ratio,
             truth_mask=detection_truth_mask,
+            frequencies=recon_freqs,
+            psf_axial_fwhm=clean_psf_axial_fwhm,
+            psf_lateral_fwhm=clean_psf_lateral_fwhm,
         )
         (
-            analyse_pam_detection_2d(pam_geo, kgrid, cfg, sources; analyse_kwargs...),
-            analyse_pam_detection_2d(pam_hasa, kgrid, cfg, sources; analyse_kwargs...),
+            analyse_pam_detection_2d(pam_geo, kgrid, cfg, truth_sources; analyse_kwargs...),
+            analyse_pam_detection_2d(pam_hasa, kgrid, cfg, truth_sources; analyse_kwargs...),
         )
     else
         error("Unknown analysis_mode: $analysis_mode (expected :localization or :detection).")
@@ -2549,6 +2862,7 @@ function reconstruct_pam_case(
         :stats_hasa => stats_hasa,
         :reconstruction_frequencies => recon_freqs,
         :analysis_mode => analysis_mode,
+        :analysis_source_count => length(truth_sources),
         :reconstruction_mode => recon_mode,
         :window_config => _window_config_info(effective_window_config),
     )

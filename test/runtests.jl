@@ -273,6 +273,22 @@ end
     )
     @test windowed_results[:reconstruction_mode] == :windowed
     @test windowed_results[:geo_info][:used_window_count] == 1
+
+    duplicate_source_events = [source, PointSource2D(depth=source.depth, lateral=source.lateral, frequency=source.frequency)]
+    truth_mask = pam_truth_mask([source], kgrid, cfg; radius=cfg.success_tolerance)
+    event_results = reconstruct_pam_case(
+        rf,
+        c,
+        duplicate_source_events,
+        cfg;
+        simulation_info=Dict(:receiver_row => receiver_row(cfg), :receiver_cols => receiver_col_range(cfg)),
+        frequencies=[source.frequency],
+        analysis_mode=:detection,
+        detection_truth_mask=truth_mask,
+        analysis_sources=[source],
+    )
+    @test event_results[:analysis_source_count] == 1
+    @test event_results[:stats_geo][:num_truth_sources] == 1
 end
 
 @testset "PAM windowing helpers" begin
@@ -674,6 +690,9 @@ end
         sources;
         truth_radius=1.0e-3,
         threshold_ratio=0.5,
+        frequencies=[0.4e6],
+        psf_axial_fwhm=2.0e-3,
+        psf_lateral_fwhm=2.0e-3,
     )
 
     @test 0 < stats[:precision] < 1
@@ -681,6 +700,15 @@ end
     @test stats[:false_positive_pixels] > 0
     @test stats[:false_negative_pixels] > 0
     @test stats[:spurious_prediction_components] == 1
+    @test 0 < stats[:energy_fraction_inside_mask] < 1
+    @test stats[:energy_fraction_inside_mask] + stats[:energy_fraction_outside_mask] ≈ 1.0
+    @test stats[:energy_fraction_inside_predicted_mask] > stats[:energy_fraction_inside_mask]
+    @test stats[:energy_fraction_inside_predicted_mask] + stats[:energy_fraction_outside_predicted_mask] ≈ 1.0
+    @test isfinite(stats[:centroid_error_mm])
+    @test stats[:axial_spread_mm] > 0
+    @test stats[:lateral_spread_mm] > 0
+    @test haskey(stats, :psf_target_correlation)
+    @test isfinite(stats[:psf_target_normalized_l2_error])
 
     truth_override = falses(kgrid.Nx, kgrid.Ny)
     truth_override[row_false, col_false] = true
@@ -692,11 +720,27 @@ end
         truth_radius=1.0e-3,
         threshold_ratio=0.5,
         truth_mask=truth_override,
+        psf_axial_fwhm=2.0e-3,
+        psf_lateral_fwhm=2.0e-3,
     )
     @test override_stats[:truth_mask_mode] == :provided
+    @test override_stats[:psf_target_mode] == :provided_mask
     @test override_stats[:true_positive_pixels] == 1
     @test override_stats[:false_positive_pixels] == 1
     @test override_stats[:false_negative_pixels] == 0
+
+    source_map = pam_source_map(sources, kgrid, cfg; weights=:uniform)
+    @test sum(source_map) == length(sources)
+    blurred_truth = pam_psf_blurred_truth_map(
+        sources,
+        kgrid,
+        cfg;
+        psf_axial_fwhm=2.0e-3,
+        psf_lateral_fwhm=2.0e-3,
+        weights=:uniform,
+    )
+    @test size(blurred_truth) == size(intensity)
+    @test sum(blurred_truth) ≈ sum(source_map) atol=1e-8
 end
 
 @testset "CLEAN peak detection" begin
