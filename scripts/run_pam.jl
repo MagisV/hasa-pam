@@ -179,7 +179,7 @@ end
 
 function parse_aberrator(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
-    value in (:none, :lens, :skull) || error("Unknown aberrator: $s")
+    value in (:none, :water, :lens, :skull) || error("Unknown aberrator: $s")
     return value
 end
 
@@ -617,10 +617,15 @@ function run_pam_case_3d(
     show_progress::Bool=false,
     benchmark::Bool=false,
     window_batch::Int=1,
+    sim_mode::Symbol=:analytic,
 )
     use_gpu || error("3D PAM reconstruction currently requires --use-gpu=true.")
     recon_freqs = isnothing(frequencies) ? default_recon_frequencies(sources) : Float64.(frequencies)
-    rf, grid, sim_info = analytic_rf_for_point_sources_3d(cfg, sources)
+    rf, grid, sim_info = if sim_mode == :kwave
+        simulate_point_sources_3d(c, rho, sources, cfg; use_gpu=use_gpu)
+    else
+        analytic_rf_for_point_sources_3d(cfg, sources)
+    end
     recon_mode = TranscranialFUS._normalize_reconstruction_mode(reconstruction_mode)
     recon_kwargs = (
         frequencies=recon_freqs,
@@ -1325,7 +1330,7 @@ if dimension == 3
     parse_analysis_mode(opts["analysis-mode"], source_model) == :localization ||
         error("3D PAM CLI currently supports only localization analysis.")
     aberrator = parse_aberrator(opts["aberrator"])
-    aberrator == :none || error("3D PAM CLI currently supports only --aberrator=none; heterogeneous media come next.")
+    aberrator in (:none, :water) || error("3D PAM CLI currently supports only --aberrator=none or --aberrator=water.")
 
     dy_mm = isempty(strip(opts["dy-mm"])) ? parse(Float64, opts["dz-mm"]) : parse(Float64, opts["dy-mm"])
     transverse_y_mm = isempty(strip(opts["transverse-y-mm"])) ? parse(Float64, opts["transverse-mm"]) : parse(Float64, opts["transverse-y-mm"])
@@ -1371,6 +1376,7 @@ if dimension == 3
     recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
     window_config = make_window_config(opts, reconstruction_mode)
 
+    sim_mode = aberrator == :water ? :kwave : :analytic
     results = run_pam_case_3d(
         c,
         rho,
@@ -1385,6 +1391,7 @@ if dimension == 3
         show_progress=parse_bool(opts["recon-progress"]),
         benchmark=parse_bool(opts["benchmark"]),
         window_batch=parse(Int, opts["window-batch"]),
+        sim_mode=sim_mode,
     )
 
     medium_summary = Dict{String, Any}()

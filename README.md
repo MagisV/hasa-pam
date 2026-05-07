@@ -339,7 +339,8 @@ julia --project=. scripts/run_pam.jl `
   --source-model=point `
   --sources-mm=30:2:-1 `
   --aberrator=none `
-  --use-gpu=true
+  --use-gpu=true `
+  --sim-mode=kwave
 ```
 
 ```bash
