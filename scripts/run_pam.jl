@@ -735,8 +735,17 @@ function map_db(map::AbstractMatrix{<:Real}, ref::Real)
     return 10 .* log10.(max.(Float64.(map), eps(Float64)) ./ safe_ref)
 end
 
+function map_norm(map::AbstractMatrix{<:Real}, ref::Real)
+    safe_ref = max(Float64(ref), eps(Float64))
+    return Float64.(map) ./ safe_ref
+end
+
 function source_pairs_mm(sources)
     return [(src.depth * 1e3, src.lateral * 1e3) for src in sources]
+end
+
+function source_triples_mm(sources::AbstractVector{<:EmissionSource3D})
+    return [(src.depth * 1e3, src.lateral_y * 1e3, src.lateral_z * 1e3) for src in sources]
 end
 
 function scatter_sources!(ax, sources; color=:red, marker=nothing, markersize=nothing, strokewidth=2)
@@ -820,6 +829,49 @@ function threshold_detection_stats(intensity, kgrid, cfg, sources; threshold_rat
     ]
 end
 
+function threshold_detection_stats_3d(intensity, grid, cfg, sources; threshold_ratios, truth_radius, truth_mask)
+    truth = isnothing(truth_mask) ? pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius) : truth_mask
+    local_ref = max(maximum(Float64.(intensity)), eps(Float64))
+    return [
+        begin
+            pred = intensity .>= ratio * local_ref
+            tp = count(pred .& truth)
+            fp = count(pred .& .!truth)
+            fn = count(.!pred .& truth)
+            precision = tp + fp == 0 ? 0.0 : tp / (tp + fp)
+            recall = tp + fn == 0 ? 0.0 : tp / (tp + fn)
+            f1 = precision + recall == 0 ? 0.0 : 2 * precision * recall / (precision + recall)
+            jaccard = tp + fp + fn == 0 ? 0.0 : tp / (tp + fp + fn)
+            Dict(
+                :threshold_ratio => ratio,
+                :f1 => f1,
+                :precision => precision,
+                :recall => recall,
+                :jaccard => jaccard,
+                :true_positive_voxels => tp,
+                :false_positive_voxels => fp,
+                :false_negative_voxels => fn,
+                :predicted_voxels => count(pred),
+                :truth_voxels => count(truth),
+            )
+        end
+        for ratio in threshold_ratios
+    ]
+end
+
+function best_threshold_entry_3d(stats)
+    isempty(stats) && error("No 3D threshold stats available.")
+    best = first(stats)
+    for entry in stats[2:end]
+        score = (Float64(entry[:f1]), Float64(entry[:jaccard]), Float64(entry[:precision]), Float64(entry[:threshold_ratio]))
+        best_score = (Float64(best[:f1]), Float64(best[:jaccard]), Float64(best[:precision]), Float64(best[:threshold_ratio]))
+        if score > best_score
+            best = entry
+        end
+    end
+    return best
+end
+
 function lines_centerlines!(ax, centerlines; color=(:black, 0.45), linewidth=2)
     isnothing(centerlines) && return nothing
     for line in centerlines
@@ -868,6 +920,104 @@ function add_threshold_table!(fig, row, col, title, stats)
             Float64(entry[:precision]),
             Float64(entry[:recall]),
             Float64(entry[:jaccard]),
+        ))
+    end
+    Label(fig[row, col], title * "\n" * join(lines, "\n"); font="DejaVu Sans Mono", tellwidth=false, halign=:left)
+end
+
+function _project3d_values(intensity::AbstractArray{<:Real, 3}, projection::Symbol)
+    values = Float64.(intensity)
+    if projection == :depth_y
+        return dropdims(maximum(values; dims=3), dims=3)
+    elseif projection == :depth_z
+        return dropdims(maximum(values; dims=2), dims=2)
+    elseif projection == :y_z
+        return dropdims(maximum(values; dims=1), dims=1)
+    end
+    error("Unknown 3D projection: $projection")
+end
+
+function _project3d_mask(mask::AbstractArray{Bool, 3}, projection::Symbol)
+    if projection == :depth_y
+        return dropdims(any(mask; dims=3), dims=3)
+    elseif projection == :depth_z
+        return dropdims(any(mask; dims=2), dims=2)
+    elseif projection == :y_z
+        return dropdims(any(mask; dims=1), dims=1)
+    end
+    error("Unknown 3D projection: $projection")
+end
+
+function _projection_axes_3d(grid, cfg::PAMConfig3D, projection::Symbol)
+    depth_mm = depth_coordinates_3d(cfg) .* 1e3
+    y_mm = collect(grid.y) .* 1e3
+    z_mm = collect(grid.z) .* 1e3
+    if projection == :depth_y
+        return y_mm, depth_mm, "Y [mm]", "Depth [mm]"
+    elseif projection == :depth_z
+        return z_mm, depth_mm, "Z [mm]", "Depth [mm]"
+    elseif projection == :y_z
+        return y_mm, z_mm, "Y [mm]", "Z [mm]"
+    end
+    error("Unknown 3D projection: $projection")
+end
+
+function scatter_sources_3d_projection!(ax, sources, projection::Symbol; color=(:white, 0.75))
+    truth = source_triples_mm(sources)
+    if projection == :depth_y
+        scatter!(ax, [t[2] for t in truth], [t[1] for t in truth]; color=color, marker=:x, markersize=13, strokewidth=2)
+    elseif projection == :depth_z
+        scatter!(ax, [t[3] for t in truth], [t[1] for t in truth]; color=color, marker=:x, markersize=13, strokewidth=2)
+    elseif projection == :y_z
+        scatter!(ax, [t[2] for t in truth], [t[3] for t in truth]; color=color, marker=:x, markersize=13, strokewidth=2)
+    end
+    return nothing
+end
+
+function add_projection_panel_3d!(
+    fig,
+    row,
+    col,
+    title,
+    intensity,
+    truth_mask,
+    grid,
+    cfg,
+    sources;
+    projection::Symbol,
+    threshold_ratios,
+    colors,
+    global_ref,
+)
+    xvals, yvals, xlabel, ylabel = _projection_axes_3d(grid, cfg, projection)
+    proj = _project3d_values(intensity, projection)
+    truth_proj = _project3d_mask(truth_mask, projection)
+    ax = Axis(fig[row, col]; title=title, xlabel=xlabel, ylabel=ylabel, aspect=DataAspect())
+    hm = heatmap!(ax, xvals, yvals, map_norm(proj, global_ref)'; colormap=:viridis, colorrange=(0, 1))
+    if any(truth_proj) && any(.!truth_proj)
+        contour!(ax, xvals, yvals, Float64.(truth_proj)'; levels=[0.5], color=(:white, 0.85), linewidth=2.4, linestyle=:dash)
+    end
+    local_ref = max(maximum(Float64.(intensity)), eps(Float64))
+    for (idx, ratio) in pairs(threshold_ratios)
+        pred_proj = _project3d_mask(intensity .>= ratio * local_ref, projection)
+        if any(pred_proj) && any(.!pred_proj)
+            contour!(ax, xvals, yvals, Float64.(pred_proj)'; levels=[0.5], color=colors[idx], linewidth=2)
+        end
+    end
+    scatter_sources_3d_projection!(ax, sources, projection)
+    return hm
+end
+
+function add_threshold_table_3d!(fig, row, col, title, stats)
+    lines = ["thr    F1    Prec  Recall  Jacc   Vox"]
+    for entry in stats
+        push!(lines, @sprintf("%.2f  %.3f  %.3f  %.3f  %.3f  %d",
+            Float64(entry[:threshold_ratio]),
+            Float64(entry[:f1]),
+            Float64(entry[:precision]),
+            Float64(entry[:recall]),
+            Float64(entry[:jaccard]),
+            Int(entry[:predicted_voxels]),
         ))
     end
     Label(fig[row, col], title * "\n" * join(lines, "\n"); font="DejaVu Sans Mono", tellwidth=false, halign=:left)
@@ -922,6 +1072,149 @@ function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, 
         "threshold_ratios" => threshold_ratios,
         "geometric" => [string_key_dict(stats) for stats in geo_stats],
         "hasa" => [string_key_dict(stats) for stats in hasa_stats],
+    )
+end
+
+function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg, sources; threshold_ratios, truth_radius)
+    truth_mask = pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius)
+    geo_stats = threshold_detection_stats_3d(pam_geo, grid, cfg, sources; threshold_ratios=threshold_ratios, truth_radius=truth_radius, truth_mask=truth_mask)
+    hasa_stats = threshold_detection_stats_3d(pam_hasa, grid, cfg, sources; threshold_ratios=threshold_ratios, truth_radius=truth_radius, truth_mask=truth_mask)
+    global_ref = max(maximum(Float64.(pam_geo)), maximum(Float64.(pam_hasa)), eps(Float64))
+    colors = [:red, :orange, :cyan, :magenta, :lime]
+    while length(colors) < length(threshold_ratios)
+        append!(colors, colors)
+    end
+
+    fig = Figure(size=(1550, 1200))
+    projections = (:depth_y, :depth_z, :y_z)
+    titles = Dict(
+        :depth_y => "Depth-Y max projection",
+        :depth_z => "Depth-Z max projection",
+        :y_z => "Y-Z max projection",
+    )
+    hm = nothing
+    for (col, projection) in pairs(projections)
+        hm = add_projection_panel_3d!(
+            fig, 1, col, "Geometric: $(titles[projection])",
+            pam_geo, truth_mask, grid, cfg, sources;
+            projection=projection,
+            threshold_ratios=threshold_ratios,
+            colors=colors,
+            global_ref=global_ref,
+        )
+        add_projection_panel_3d!(
+            fig, 2, col, "HASA: $(titles[projection])",
+            pam_hasa, truth_mask, grid, cfg, sources;
+            projection=projection,
+            threshold_ratios=threshold_ratios,
+            colors=colors,
+            global_ref=global_ref,
+        )
+    end
+    Colorbar(fig[1:2, 4], hm; label="Norm. PAM intensity")
+    legend_elements = [LineElement(color=colors[i], linewidth=3) for i in eachindex(threshold_ratios)]
+    legend_labels = ["thr=$(round(r; digits=2))" for r in threshold_ratios]
+    Legend(fig[3, 1:2], legend_elements, legend_labels; orientation=:horizontal, tellheight=true, framevisible=false)
+    Label(fig[3, 3], "Truth mask shown as dashed white contours; sources are x markers."; tellwidth=false, halign=:left)
+    add_threshold_table_3d!(fig, 4, 1:2, "Geometric voxel metrics", geo_stats)
+    add_threshold_table_3d!(fig, 4, 3:4, "HASA voxel metrics", hasa_stats)
+    save(path, fig)
+    best_hasa = best_threshold_entry_3d(hasa_stats)
+    return Dict(
+        "threshold_ratios" => threshold_ratios,
+        "best_hasa_threshold" => best_hasa[:threshold_ratio],
+        "best_hasa_metric" => string_key_dict(best_hasa),
+        "geometric" => [string_key_dict(stats) for stats in geo_stats],
+        "hasa" => [string_key_dict(stats) for stats in hasa_stats],
+    )
+end
+
+function _voxel_points_3d(mask::AbstractArray{Bool, 3}, grid, cfg::PAMConfig3D)
+    depth_mm = depth_coordinates_3d(cfg) .* 1e3
+    y_mm = collect(grid.y) .* 1e3
+    z_mm = collect(grid.z) .* 1e3
+    idxs = Tuple.(findall(mask))
+    return (
+        depth = [depth_mm[idx[1]] for idx in idxs],
+        y = [y_mm[idx[2]] for idx in idxs],
+        z = [z_mm[idx[3]] for idx in idxs],
+        indices = idxs,
+    )
+end
+
+function save_best_threshold_volume_3d(path, intensity, grid, cfg, sources; threshold::Real, truth_radius::Real)
+    local_ref = max(maximum(Float64.(intensity)), eps(Float64))
+    pred_mask = intensity .>= Float64(threshold) * local_ref
+    truth_mask = pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius)
+    pred = _voxel_points_3d(pred_mask, grid, cfg)
+    truth = _voxel_points_3d(truth_mask, grid, cfg)
+
+    fig = Figure(size=(1100, 900))
+    ax = Axis3(
+        fig[1, 1];
+        title="HASA 3D reconstructed region at best threshold $(round(Float64(threshold); digits=3))",
+        xlabel="Y [mm]",
+        ylabel="Z [mm]",
+        zlabel="Depth [mm]",
+        aspect=:data,
+        azimuth=0.75pi,
+        elevation=0.22pi,
+    )
+
+    if !isempty(truth.indices)
+        scatter!(
+            ax,
+            truth.y,
+            truth.z,
+            truth.depth;
+            markersize=10,
+            color=(:white, 0.16),
+            strokecolor=(:black, 0.25),
+            strokewidth=0.4,
+        )
+    end
+
+    if !isempty(pred.indices)
+        pred_values = [Float64(intensity[idx...]) / local_ref for idx in pred.indices]
+        sc = scatter!(
+            ax,
+            pred.y,
+            pred.z,
+            pred.depth;
+            markersize=14,
+            color=pred_values,
+            colormap=:viridis,
+            colorrange=(Float64(threshold), 1.0),
+            strokewidth=0,
+        )
+        Colorbar(fig[1, 2], sc; label="Norm. HASA intensity")
+    else
+        Label(fig[1, 2], "No voxels at threshold."; tellheight=false)
+    end
+
+    truth_sources = source_triples_mm(sources)
+    scatter!(
+        ax,
+        [t[2] for t in truth_sources],
+        [t[3] for t in truth_sources],
+        [t[1] for t in truth_sources];
+        marker=:xcross,
+        markersize=24,
+        color=:red,
+        strokewidth=2,
+    )
+
+    Label(
+        fig[2, 1:2],
+        "Colored voxels are the thresholded HASA reconstruction; translucent white voxels are the truth mask; red x markers are source locations.";
+        tellwidth=false,
+        halign=:left,
+    )
+    save(path, fig)
+    return Dict(
+        "threshold_ratio" => Float64(threshold),
+        "predicted_voxels" => count(pred_mask),
+        "truth_voxels" => count(truth_mask),
     )
 end
 
@@ -1071,10 +1364,36 @@ if dimension == 3
         medium_summary[String(key)] = value
     end
 
+    activity_boundary_path = joinpath(out_dir, "activity_boundaries.png")
+    activity_boundary_metrics = save_threshold_boundary_detection_3d(
+        activity_boundary_path,
+        results[:pam_geo],
+        results[:pam_hasa],
+        results[:kgrid],
+        cfg,
+        sources;
+        threshold_ratios=boundary_threshold_ratios,
+        truth_radius=detection_truth_radius_m,
+    )
+    best_volume_path = joinpath(out_dir, "best_threshold_3d.png")
+    best_volume_metrics = save_best_threshold_volume_3d(
+        best_volume_path,
+        results[:pam_hasa],
+        results[:kgrid],
+        cfg,
+        sources;
+        threshold=activity_boundary_metrics["best_hasa_threshold"],
+        truth_radius=detection_truth_radius_m,
+    )
+
     summary = Dict(
         "out_dir" => out_dir,
         "dimension" => 3,
         "reconstruction_source" => Dict("mode" => "analytic_3d_water"),
+        "activity_boundary_figure" => activity_boundary_path,
+        "activity_boundary_metrics" => activity_boundary_metrics,
+        "best_threshold_3d_figure" => best_volume_path,
+        "best_threshold_3d_metrics" => best_volume_metrics,
         "sources" => [source_summary(src) for src in sources],
         "clusters" => [source_summary(src) for src in sources],
         "emission_meta" => emission_meta,
