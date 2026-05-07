@@ -186,10 +186,13 @@ function _reconstruct_pam_cuda(
     # Build per-frequency spectral arrays (CPU, centered order → ifftshift to FFT order)
     # into padded_ny × nfreq matrices, then upload once.
     k = _fft_wavenumbers(padded_ny, cfg.dz)
-    prop_cpu   = zeros(ComplexF64, padded_ny, nfreq)
-    corr_cpu   = zeros(ComplexF64, padded_ny, nfreq)
-    weight_cpu = zeros(Float64, padded_ny, nfreq)
-    k0_sq_cpu  = zeros(Float64, nfreq)
+    prop_cpu         = zeros(ComplexF64, padded_ny, nfreq)
+    corr_cpu         = zeros(ComplexF64, padded_ny, nfreq)
+    weight_cpu       = zeros(Float64, padded_ny, nfreq)
+    # n-step uncorrected propagator: prop^axial_substeps * weight, precomputed so
+    # the entire uncorrected substep loop collapses to a single in-place multiply.
+    prop_n_weight_cpu = zeros(ComplexF64, padded_ny, nfreq)
+    k0_sq_cpu        = zeros(Float64, nfreq)
 
     for (f, freq) in enumerate(selected_freqs)
         k0 = 2 * pi * Float64(freq) / c0
@@ -209,10 +212,11 @@ function _reconstruct_pam_cuda(
         end
 
         # Evanescent modes zeroed directly in prop/corr; no separate mask array needed.
-        prop_cpu[:, f]   .= _ifftshift(propagating .* propagator)
-        corr_cpu[:, f]   .= _ifftshift(propagating .* correction)
-        weight_cpu[:, f] .= _ifftshift(weighting)
-        k0_sq_cpu[f]      = k0^2
+        prop_cpu[:, f]          .= _ifftshift(propagating .* propagator)
+        corr_cpu[:, f]          .= _ifftshift(propagating .* correction)
+        weight_cpu[:, f]        .= _ifftshift(weighting)
+        prop_n_weight_cpu[:, f] .= _ifftshift(propagating .* propagator .^ axial_substeps .* weighting)
+        k0_sq_cpu[f]             = k0^2
     end
 
     # Upload batched spectral arrays: padded_ny × nfreq.
@@ -221,8 +225,11 @@ function _reconstruct_pam_cuda(
     weight_d       = CUDA.CuArray(T.(weight_cpu))
     # Weight-folded versions used in the last substep to fuse the window multiply
     # into the output write, eliminating a separate kernel launch + memory roundtrip.
-    prop_weight_d  = prop_d .* weight_d
-    corr_weight_d  = corr_d .* weight_d
+    prop_weight_d   = prop_d .* weight_d
+    corr_weight_d   = corr_d .* weight_d
+    # n-step propagator (all axial_substeps) with weight folded in: lets the entire
+    # uncorrected substep loop collapse to a single in-place multiply per row.
+    prop_n_weight_d = CUDA.CuArray(CT.(prop_n_weight_cpu))
     # k0_sq_d shaped 1 × nfreq so it broadcasts against padded_ny × nfreq arrays.
     k0_sq_d  = reshape(CUDA.CuArray(T.(k0_sq_cpu)), 1, nfreq)
 
@@ -262,26 +269,21 @@ function _reconstruct_pam_cuda(
 
     if benchmark
         for row in (rr + 1):row_stop
-            for _ in 1:(axial_substeps - 1)
-                if corrected
+            if corrected
+                for _ in 1:(axial_substeps - 1)
                     t_fft_s += CUDA.@elapsed (p_space_d .= current_d; plan_bwd * p_space_d)
                     t_ew_s  += CUDA.@elapsed (tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d)
                     t_fft_s += CUDA.@elapsed (plan_fwd * tmp_d)
                     t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d .+ corr_d .* tmp_d)
-                else
-                    t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d)
+                    current_d, next_d = next_d, current_d
                 end
-                current_d, next_d = next_d, current_d
-            end
-            # Last substep: weight folded into current_d update (in-place); p_row_d then
-            # copies the weighted spectral state before being overwritten by IFFT.
-            if corrected
                 t_fft_s += CUDA.@elapsed (p_space_d .= current_d; plan_bwd * p_space_d)
                 t_ew_s  += CUDA.@elapsed (tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d)
                 t_fft_s += CUDA.@elapsed (plan_fwd * tmp_d)
                 t_ew_s  += CUDA.@elapsed (current_d .= current_d .* prop_weight_d .+ corr_weight_d .* tmp_d)
             else
-                t_ew_s  += CUDA.@elapsed (current_d .*= prop_weight_d)
+                # All axial_substeps + weight collapsed into one in-place multiply.
+                t_ew_s  += CUDA.@elapsed (current_d .*= prop_n_weight_d)
             end
             t_ew_s  += CUDA.@elapsed (p_row_d .= current_d)
             t_fft_s += CUDA.@elapsed (plan_bwd * p_row_d)
@@ -292,28 +294,23 @@ function _reconstruct_pam_cuda(
         march_gpu_s = t_fft_s + t_ew_s
     else
         march_gpu_s = CUDA.@elapsed for row in (rr + 1):row_stop
-            for _ in 1:(axial_substeps - 1)
-                if corrected
+            if corrected
+                for _ in 1:(axial_substeps - 1)
                     p_space_d .= current_d
                     plan_bwd * p_space_d
                     tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d
                     plan_fwd * tmp_d
                     next_d .= current_d .* prop_d .+ corr_d .* tmp_d
-                else
-                    next_d .= current_d .* prop_d
+                    current_d, next_d = next_d, current_d
                 end
-                current_d, next_d = next_d, current_d
-            end
-            # Last substep: weight folded into current_d update (in-place); p_row_d then
-            # copies the weighted spectral state before being overwritten by IFFT.
-            if corrected
                 p_space_d .= current_d
                 plan_bwd * p_space_d
                 tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d
                 plan_fwd * tmp_d
                 current_d .= current_d .* prop_weight_d .+ corr_weight_d .* tmp_d
             else
-                current_d .*= prop_weight_d
+                # All axial_substeps + weight collapsed into one in-place multiply.
+                current_d .*= prop_n_weight_d
             end
             p_row_d .= current_d
             plan_bwd * p_row_d
@@ -325,16 +322,16 @@ function _reconstruct_pam_cuda(
     march_wall_s = time() - march_wall_start
 
     # Estimate memory bandwidth from counted DRAM read+write passes.
-    # intermediate substeps (axial_substeps-1):
-    #   corrected: ifft(2) + tmp_ew(4) + fft(2) + next_ew(5) = 13
-    #   uncorrected: next_ew(3)
-    # last substep + output (fused weight):
-    #   corrected: ifft(2) + tmp_ew(4) + fft(2) + out_ew(5) + ifft_row(2) + accum(2) = 17
-    #   uncorrected: out_ew(3) + ifft_row(2) + accum(2) = 7
-    passes_substep   = corrected ? 13 : 3
-    passes_last_row  = corrected ? 17 : 7
+    # corrected — intermediate substeps (axial_substeps-1):
+    #   ifft(2) + tmp_ew(4) + fft(2) + next_ew(5) = 13
+    # corrected — last substep + output:
+    #   ifft(2) + tmp_ew(4) + fft(2) + out_ew(5) + copy(2) + ifft_row(2) + accum(2) = 19
+    # uncorrected — all substeps collapsed to one multiply + output:
+    #   prop_n_weight(3) + copy(2) + ifft_row(2) + accum(2) = 9
+    passes_substep  = 13
+    passes_last_row = corrected ? 19 : 9
     bytes_march = Int64(row_stop - rr) * (
-        Int64(axial_substeps - 1) * passes_substep * padded_ny * nfreq * sizeof(CT) +
+        (corrected ? Int64(axial_substeps - 1) * passes_substep : 0) * padded_ny * nfreq * sizeof(CT) +
         passes_last_row * padded_ny * nfreq * sizeof(CT)
     )
     bandwidth_GBps = bytes_march / march_gpu_s / 1e9
