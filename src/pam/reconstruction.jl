@@ -130,6 +130,20 @@ function _assert_pam_cuda_available()
     )
 end
 
+# Each thread handles one lateral index; reduces abs2 over the freq dimension and
+# accumulates into dst. Reads src once, no temporaries.
+function _accum_abs2_sum!(dst, src)
+    i = CUDA.threadIdx().x + (CUDA.blockIdx().x - 1) * CUDA.blockDim().x
+    i > size(src, 1) && return
+    acc = zero(real(eltype(src)))
+    @inbounds for j in 1:size(src, 2)
+        v = src[i, j]
+        acc += real(v)^2 + imag(v)^2
+    end
+    @inbounds dst[i] += acc
+    return
+end
+
 function _reconstruct_pam_cuda(
     rf::AbstractMatrix{<:Real},
     c_padded::AbstractMatrix{<:Real},
@@ -202,9 +216,13 @@ function _reconstruct_pam_cuda(
     end
 
     # Upload batched spectral arrays: padded_ny × nfreq.
-    prop_d   = CUDA.CuArray(CT.(prop_cpu))
-    corr_d   = CUDA.CuArray(CT.(corr_cpu))
-    weight_d = CUDA.CuArray(T.(weight_cpu))
+    prop_d         = CUDA.CuArray(CT.(prop_cpu))
+    corr_d         = CUDA.CuArray(CT.(corr_cpu))
+    weight_d       = CUDA.CuArray(T.(weight_cpu))
+    # Weight-folded versions used in the last substep to fuse the window multiply
+    # into the output write, eliminating a separate kernel launch + memory roundtrip.
+    prop_weight_d  = prop_d .* weight_d
+    corr_weight_d  = corr_d .* weight_d
     # k0_sq_d shaped 1 × nfreq so it broadcasts against padded_ny × nfreq arrays.
     k0_sq_d  = reshape(CUDA.CuArray(T.(k0_sq_cpu)), 1, nfreq)
 
@@ -239,9 +257,12 @@ function _reconstruct_pam_cuda(
     t_ew_s  = 0.0
     march_wall_start = time()
 
+    nthreads = min(padded_ny, 512)
+    nblocks  = cld(padded_ny, nthreads)
+
     if benchmark
         for row in (rr + 1):row_stop
-            for _ in 1:axial_substeps
+            for _ in 1:(axial_substeps - 1)
                 if corrected
                     t_fft_s += CUDA.@elapsed (p_space_d .= current_d; plan_bwd * p_space_d)
                     t_ew_s  += CUDA.@elapsed (tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d)
@@ -252,14 +273,26 @@ function _reconstruct_pam_cuda(
                 end
                 current_d, next_d = next_d, current_d
             end
-            t_ew_s  += CUDA.@elapsed (current_d .*= weight_d)
-            t_fft_s += CUDA.@elapsed (p_row_d .= current_d; plan_bwd * p_row_d)
-            t_ew_s  += CUDA.@elapsed (intensity_yx_d[:, row] .+= dropdims(sum(abs2.(p_row_d); dims=2); dims=2))
+            # Last substep: weight folded into current_d update (in-place); p_row_d then
+            # copies the weighted spectral state before being overwritten by IFFT.
+            if corrected
+                t_fft_s += CUDA.@elapsed (p_space_d .= current_d; plan_bwd * p_space_d)
+                t_ew_s  += CUDA.@elapsed (tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d)
+                t_fft_s += CUDA.@elapsed (plan_fwd * tmp_d)
+                t_ew_s  += CUDA.@elapsed (current_d .= current_d .* prop_weight_d .+ corr_weight_d .* tmp_d)
+            else
+                t_ew_s  += CUDA.@elapsed (current_d .*= prop_weight_d)
+            end
+            t_ew_s  += CUDA.@elapsed (p_row_d .= current_d)
+            t_fft_s += CUDA.@elapsed (plan_bwd * p_row_d)
+            t_ew_s  += CUDA.@elapsed CUDA.@cuda threads=nthreads blocks=nblocks _accum_abs2_sum!(
+                view(intensity_yx_d, :, row), p_row_d,
+            )
         end
         march_gpu_s = t_fft_s + t_ew_s
     else
         march_gpu_s = CUDA.@elapsed for row in (rr + 1):row_stop
-            for _ in 1:axial_substeps
+            for _ in 1:(axial_substeps - 1)
                 if corrected
                     p_space_d .= current_d
                     plan_bwd * p_space_d
@@ -271,22 +304,38 @@ function _reconstruct_pam_cuda(
                 end
                 current_d, next_d = next_d, current_d
             end
-            current_d .*= weight_d
+            # Last substep: weight folded into current_d update (in-place); p_row_d then
+            # copies the weighted spectral state before being overwritten by IFFT.
+            if corrected
+                p_space_d .= current_d
+                plan_bwd * p_space_d
+                tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d
+                plan_fwd * tmp_d
+                current_d .= current_d .* prop_weight_d .+ corr_weight_d .* tmp_d
+            else
+                current_d .*= prop_weight_d
+            end
             p_row_d .= current_d
             plan_bwd * p_row_d
-            intensity_yx_d[:, row] .+= dropdims(sum(abs2.(p_row_d); dims=2); dims=2)
+            CUDA.@cuda threads=nthreads blocks=nblocks _accum_abs2_sum!(
+                view(intensity_yx_d, :, row), p_row_d,
+            )
         end
     end
     march_wall_s = time() - march_wall_start
 
     # Estimate memory bandwidth from counted DRAM read+write passes.
-    # corrected: ifft(2) + tmp_ew(4) + fft(2) + next_ew(5) = 13 per substep
-    # uncorrected: next_ew(3) per substep
-    # per row (after inner loop): weight(3) + ifft_row(2) + intensity_sum(2) = 7
-    passes_substep = corrected ? 13 : 3
+    # intermediate substeps (axial_substeps-1):
+    #   corrected: ifft(2) + tmp_ew(4) + fft(2) + next_ew(5) = 13
+    #   uncorrected: next_ew(3)
+    # last substep + output (fused weight):
+    #   corrected: ifft(2) + tmp_ew(4) + fft(2) + out_ew(5) + ifft_row(2) + accum(2) = 17
+    #   uncorrected: out_ew(3) + ifft_row(2) + accum(2) = 7
+    passes_substep   = corrected ? 13 : 3
+    passes_last_row  = corrected ? 17 : 7
     bytes_march = Int64(row_stop - rr) * (
-        Int64(axial_substeps) * passes_substep * padded_ny * nfreq * sizeof(CT) +
-        7 * padded_ny * nfreq * sizeof(CT)
+        Int64(axial_substeps - 1) * passes_substep * padded_ny * nfreq * sizeof(CT) +
+        passes_last_row * padded_ny * nfreq * sizeof(CT)
     )
     bandwidth_GBps = bytes_march / march_gpu_s / 1e9
 
