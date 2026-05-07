@@ -259,6 +259,17 @@ julia --project=. scripts/run_pam.jl \
   --aberrator=none
 ```
 
+Simple 3D homogeneous-water point-source run (requires a CUDA-capable GPU):
+
+```bash
+julia --project=. scripts/run_pam.jl \
+  --dimension=3 \
+  --source-model=point \
+  --sources-mm=30:2:-1 \
+  --aberrator=none \
+  --use-gpu=true
+```
+
 Multiple point emitters with explicit phase and delay control:
 
 ```bash

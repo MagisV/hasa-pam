@@ -6,6 +6,7 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using Dates
 using Printf
 using Random
+using Statistics
 using CairoMakie
 using JLD2
 using JSON3
@@ -13,6 +14,7 @@ using TranscranialFUS
 
 function parse_cli(args)
     opts = Dict{String, String}(
+        "dimension" => "2",
         "source-model" => "squiggle",
         "sources-mm" => "30:0",
         "anchors-mm" => "45:0",
@@ -33,7 +35,13 @@ function parse_cli(args)
         "transverse-mm" => "102.4",
         "dx-mm" => "0.2",
         "dz-mm" => "0.2",
+        "dy-mm" => "",
+        "transverse-y-mm" => "",
+        "transverse-z-mm" => "",
+        "axial-gain-power" => "1.5",
         "receiver-aperture-mm" => "full",
+        "receiver-aperture-y-mm" => "",
+        "receiver-aperture-z-mm" => "",
         "t-max-us" => "500",
         "dt-ns" => "20",
         "zero-pad-factor" => "4",
@@ -104,6 +112,13 @@ end
 slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
 parse_bool(s::AbstractString) = lowercase(strip(s)) in ("1", "true", "yes", "on")
 
+function parse_dimension(s::AbstractString)
+    value = strip(s)
+    value in ("2", "2d", "2D") && return 2
+    value in ("3", "3d", "3D") && return 3
+    error("--dimension must be 2 or 3, got: $s")
+end
+
 function parse_float_list(spec::AbstractString)
     isempty(strip(spec)) && return Float64[]
     return [parse(Float64, strip(item)) for item in split(spec, ",") if !isempty(strip(item))]
@@ -128,6 +143,26 @@ function parse_source_model(s::AbstractString)
 end
 
 function apply_model_defaults!(opts, provided_keys::Set{String})
+    dimension = parse_dimension(opts["dimension"])
+    if dimension == 3
+        !("source-model" in provided_keys) && (opts["source-model"] = "point")
+        !("sources-mm" in provided_keys) && (opts["sources-mm"] = "30:0:0")
+        !("frequency-mhz" in provided_keys) && (opts["frequency-mhz"] = "0.5")
+        !("recon-bandwidth-khz" in provided_keys) && (opts["recon-bandwidth-khz"] = "0")
+        !("receiver-aperture-mm" in provided_keys) && (opts["receiver-aperture-mm"] = "full")
+        !("dx-mm" in provided_keys) && (opts["dx-mm"] = "0.5")
+        !("dy-mm" in provided_keys) && (opts["dy-mm"] = "0.5")
+        !("dz-mm" in provided_keys) && (opts["dz-mm"] = "0.5")
+        !("axial-mm" in provided_keys) && (opts["axial-mm"] = "60")
+        !("transverse-mm" in provided_keys) && (opts["transverse-mm"] = "32")
+        !("dt-ns" in provided_keys) && (opts["dt-ns"] = "80")
+        !("t-max-us" in provided_keys) && (opts["t-max-us"] = "60")
+        !("zero-pad-factor" in provided_keys) && (opts["zero-pad-factor"] = "2")
+        !("num-cycles" in provided_keys) && (opts["num-cycles"] = "5")
+        !("phase-mode" in provided_keys) && (opts["phase-mode"] = "coherent")
+        !("recon-step-um" in provided_keys) && (opts["recon-step-um"] = string(parse(Float64, opts["dx-mm"]) * 1000))
+        !("use-gpu" in provided_keys) && (opts["use-gpu"] = "true")
+    end
     source_model = parse_source_model(opts["source-model"])
     if source_model == :point
         !("source-phase-mode" in provided_keys) && (opts["source-phase-mode"] = "coherent")
@@ -239,6 +274,22 @@ function parse_coordinate_pairs_mm(spec::AbstractString, option_name::AbstractSt
     return pairs
 end
 
+function parse_coordinate_triples_mm(spec::AbstractString, option_name::AbstractString)
+    coord_tokens = [strip(token) for token in split(spec, ",") if !isempty(strip(token))]
+    1 <= length(coord_tokens) <= 20 || error("Provide between 1 and 20 coordinates via --$option_name=depth:y:z,...")
+    triples = NTuple{3, Float64}[]
+    for token in coord_tokens
+        parts = split(token, ":"; limit=3)
+        length(parts) == 3 || error("3D coordinates must be depth:y:z in mm, got: $token")
+        push!(triples, (
+            parse(Float64, strip(parts[1])) * 1e-3,
+            parse(Float64, strip(parts[2])) * 1e-3,
+            parse(Float64, strip(parts[3])) * 1e-3,
+        ))
+    end
+    return triples
+end
+
 function parse_point_sources(opts)
     coordinates = parse_coordinate_pairs_mm(opts["sources-mm"], "sources-mm")
     n_sources = length(coordinates)
@@ -286,6 +337,64 @@ function parse_point_sources(opts)
         "physical_source_count" => length(sources),
         "emission_event_count" => length(sources),
         "activity_model" => Dict("activity_mode" => "point_tone_burst"),
+        "phase_mode" => phase_mode,
+        "frequencies_hz" => frequencies_mhz .* 1e6,
+        "amplitudes_pa" => amplitudes_pa,
+        "phases_rad" => phases_deg .* pi ./ 180,
+        "delays_s" => delays_us .* 1e-6,
+        "num_cycles" => num_cycles,
+        "random_seed" => parse(Int, opts["random-seed"]),
+    )
+end
+
+function parse_point_sources_3d(opts)
+    coordinates = parse_coordinate_triples_mm(opts["sources-mm"], "sources-mm")
+    n_sources = length(coordinates)
+    frequencies_mhz = expand_source_values(
+        parse_float_list(opts["source-frequencies-mhz"]),
+        n_sources,
+        parse(Float64, opts["frequency-mhz"]),
+    )
+    amplitudes_pa = expand_source_values(
+        parse_float_list(opts["source-amplitudes-pa"]),
+        n_sources,
+        parse(Float64, opts["amplitude-pa"]),
+    )
+    phases_deg = expand_source_values(parse_float_list(opts["phases-deg"]), n_sources, 0.0)
+    delays_us = expand_source_values(parse_float_list(opts["delays-us"]), n_sources, 0.0)
+    num_cycles = parse(Int, opts["num-cycles"])
+
+    phase_mode = lowercase(strip(opts["phase-mode"]))
+    phase_mode in ("coherent", "random", "jittered") ||
+        error("Point --phase-mode must be coherent, random, or jittered, got: $phase_mode")
+    rng = Random.MersenneTwister(parse(Int, opts["random-seed"]))
+    if phase_mode == "random"
+        phases_deg = rand(rng, n_sources) .* 360.0
+    elseif phase_mode == "jittered"
+        phases_deg = phases_deg .+ randn(rng, n_sources) .* (parse(Float64, opts["phase-jitter-rad"]) * 180 / pi)
+    end
+
+    sources = EmissionSource3D[]
+    for (idx, (depth_m, lateral_y_m, lateral_z_m)) in pairs(coordinates)
+        push!(sources, PointSource3D(
+            depth=depth_m,
+            lateral_y=lateral_y_m,
+            lateral_z=lateral_z_m,
+            frequency=frequencies_mhz[idx] * 1e6,
+            amplitude=amplitudes_pa[idx],
+            phase=phases_deg[idx] * pi / 180,
+            delay=delays_us[idx] * 1e-6,
+            num_cycles=num_cycles,
+        ))
+    end
+    return sources, Dict{String, Any}(
+        "source_model" => "point3d",
+        "coordinates_m" => [collect(coord) for coord in coordinates],
+        "n_coordinate_sources" => n_sources,
+        "n_emission_sources" => length(sources),
+        "physical_source_count" => length(sources),
+        "emission_event_count" => length(sources),
+        "activity_model" => Dict("activity_mode" => "point_tone_burst_3d"),
         "phase_mode" => phase_mode,
         "frequencies_hz" => frequencies_mhz .* 1e6,
         "amplitudes_pa" => amplitudes_pa,
@@ -399,14 +508,20 @@ end
 function default_output_dir(opts, sources, cfg, emission_meta)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     source_model = lowercase(String(emission_meta["source_model"]))
+    lateral_slug = if cfg isa PAMConfig3D
+        "laty$(slug_value(cfg.transverse_dim_y * 1e3; digits=0))mm_latz$(slug_value(cfg.transverse_dim_z * 1e3; digits=0))mm"
+    else
+        "lat$(slug_value(cfg.transverse_dim * 1e3; digits=0))mm"
+    end
     parts = String[
         timestamp,
         "run_pam",
+        cfg isa PAMConfig3D ? "3d" : "2d",
         lowercase(opts["aberrator"]),
         source_model,
         "$(length(sources))src",
         "ax$(slug_value(cfg.axial_dim * 1e3; digits=0))mm",
-        "lat$(slug_value(cfg.transverse_dim * 1e3; digits=0))mm",
+        lateral_slug,
     ]
     if source_model == "squiggle"
         insert!(parts, 5, "$(emission_meta["n_anchor_clusters"])anchors")
@@ -444,12 +559,130 @@ function default_simulation_info(cfg::PAMConfig)
     )
 end
 
+function default_simulation_info(cfg::PAMConfig3D)
+    return Dict{Symbol, Any}(
+        :receiver_row => receiver_row(cfg),
+        :receiver_cols_y => receiver_col_range_y(cfg),
+        :receiver_cols_z => receiver_col_range_z(cfg),
+        :source_indices => NTuple{3, Int}[],
+    )
+end
+
 function default_recon_frequencies(sources)
     freqs = Float64[]
     for src in sources
         append!(freqs, emission_frequencies(src))
     end
     return sort(unique(freqs))
+end
+
+function analytic_rf_for_point_sources_3d(cfg::PAMConfig3D, sources::AbstractVector{<:EmissionSource3D})
+    grid = pam_grid_3d(cfg)
+    ny, nz, nt = pam_Ny(cfg), pam_Nz(cfg), pam_Nt(cfg)
+    rf = zeros(Float32, ny, nz, nt)
+    for src in sources
+        duration = src.num_cycles / src.frequency
+        for iy in 1:ny, iz in 1:nz
+            dy_src = grid.y[iy] - src.lateral_y
+            dz_src = grid.z[iz] - src.lateral_z
+            r = sqrt(src.depth^2 + dy_src^2 + dz_src^2)
+            arrival = src.delay + r / cfg.c0
+            for it in 1:nt
+                te = (it - 1) * cfg.dt - arrival
+                if 0 <= te <= duration
+                    rf[iy, iz, it] += Float32(src.amplitude * sin(2pi * src.frequency * te + src.phase))
+                end
+            end
+        end
+    end
+    return rf, grid, Dict{Symbol, Any}(
+        :receiver_row => receiver_row(cfg),
+        :receiver_cols_y => receiver_col_range_y(cfg),
+        :receiver_cols_z => receiver_col_range_z(cfg),
+        :source_indices => [source_grid_index_3d(src, cfg) for src in sources],
+    )
+end
+
+function run_pam_case_3d(
+    c::AbstractArray{<:Real, 3},
+    rho::AbstractArray{<:Real, 3},
+    sources::AbstractVector{<:EmissionSource3D},
+    cfg::PAMConfig3D;
+    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
+    bandwidth::Real=0.0,
+    use_gpu::Bool=false,
+    reconstruction_axial_step::Union{Nothing, Real}=nothing,
+    reconstruction_mode::Symbol=:full,
+    window_config::PAMWindowConfig=PAMWindowConfig(),
+    show_progress::Bool=false,
+    benchmark::Bool=false,
+    window_batch::Int=1,
+)
+    use_gpu || error("3D PAM reconstruction currently requires --use-gpu=true.")
+    recon_freqs = isnothing(frequencies) ? default_recon_frequencies(sources) : Float64.(frequencies)
+    rf, grid, sim_info = analytic_rf_for_point_sources_3d(cfg, sources)
+    recon_mode = TranscranialFUS._normalize_reconstruction_mode(reconstruction_mode)
+    recon_kwargs = (
+        frequencies=recon_freqs,
+        bandwidth=bandwidth,
+        reference_sound_speed=mean(Float64.(c)),
+        axial_step=reconstruction_axial_step,
+        use_gpu=use_gpu,
+        show_progress=show_progress,
+        benchmark=benchmark,
+        window_batch=window_batch,
+    )
+    effective_window_config = PAMWindowConfig(;
+        enabled=recon_mode == :windowed,
+        window_duration=window_config.window_duration,
+        hop=window_config.hop,
+        taper=window_config.taper,
+        min_energy_ratio=window_config.min_energy_ratio,
+        accumulation=window_config.accumulation,
+    )
+    pam_geo, _, geo_info = if recon_mode == :windowed
+        reconstruct_pam_windowed_3d(
+            rf,
+            c,
+            cfg;
+            recon_kwargs...,
+            corrected=false,
+            window_config=effective_window_config,
+        )
+    else
+        reconstruct_pam_3d(rf, c, cfg; recon_kwargs..., corrected=false)
+    end
+    pam_hasa, _, hasa_info = if recon_mode == :windowed
+        reconstruct_pam_windowed_3d(
+            rf,
+            c,
+            cfg;
+            recon_kwargs...,
+            corrected=true,
+            window_config=effective_window_config,
+        )
+    else
+        reconstruct_pam_3d(rf, c, cfg; recon_kwargs..., corrected=true)
+    end
+
+    return Dict{Symbol, Any}(
+        :rf => Float64.(rf),
+        :kgrid => grid,
+        :simulation => sim_info,
+        :pam_geo => pam_geo,
+        :pam_hasa => pam_hasa,
+        :geo_info => geo_info,
+        :hasa_info => hasa_info,
+        :stats_geo => analyse_pam_3d(pam_geo, grid, cfg, sources),
+        :stats_hasa => analyse_pam_3d(pam_hasa, grid, cfg, sources),
+        :reconstruction_frequencies => recon_freqs,
+        :analysis_mode => :localization,
+        :analysis_source_count => length(sources),
+        :reconstruction_mode => recon_mode,
+        :window_config => TranscranialFUS._window_config_info(effective_window_config),
+        :use_gpu => use_gpu,
+        :show_progress => show_progress,
+    )
 end
 
 function json3_to_any(x)
@@ -740,7 +973,22 @@ function source_summary(src::Union{BubbleCluster2D, GaussianPulseCluster2D})
     )
 end
 
+function source_summary(src::PointSource3D)
+    return Dict(
+        "kind" => "point3d",
+        "depth_m" => src.depth,
+        "lateral_y_m" => src.lateral_y,
+        "lateral_z_m" => src.lateral_z,
+        "frequency_hz" => src.frequency,
+        "amplitude_pa" => src.amplitude,
+        "phase_rad" => src.phase,
+        "delay_s" => src.delay,
+        "num_cycles" => src.num_cycles,
+    )
+end
+
 opts, provided_keys = parse_cli(ARGS)
+dimension = parse_dimension(opts["dimension"])
 source_model = parse_source_model(opts["source-model"])
 from_run_dir = strip(opts["from-run-dir"])
 peak_method = Symbol(lowercase(strip(opts["peak-method"])))
@@ -748,6 +996,145 @@ peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean
 detection_truth_radius_m = parse(Float64, opts["vascular-radius-mm"]) * 1e-3
 detection_threshold_ratio = parse(Float64, opts["detection-threshold-ratio"])
 boundary_threshold_ratios = parse_threshold_ratios(opts["boundary-threshold-ratios"])
+
+if dimension == 3
+    isempty(from_run_dir) || error("--from-run-dir is not implemented for 3D PAM yet.")
+    source_model == :point || error("3D PAM CLI currently supports only --source-model=point.")
+    parse_analysis_mode(opts["analysis-mode"], source_model) == :localization ||
+        error("3D PAM CLI currently supports only localization analysis.")
+    aberrator = parse_aberrator(opts["aberrator"])
+    aberrator == :none || error("3D PAM CLI currently supports only --aberrator=none; heterogeneous media come next.")
+
+    dy_mm = isempty(strip(opts["dy-mm"])) ? parse(Float64, opts["dz-mm"]) : parse(Float64, opts["dy-mm"])
+    transverse_y_mm = isempty(strip(opts["transverse-y-mm"])) ? parse(Float64, opts["transverse-mm"]) : parse(Float64, opts["transverse-y-mm"])
+    transverse_z_mm = isempty(strip(opts["transverse-z-mm"])) ? parse(Float64, opts["transverse-mm"]) : parse(Float64, opts["transverse-z-mm"])
+    receiver_aperture_y_spec = isempty(strip(opts["receiver-aperture-y-mm"])) ? opts["receiver-aperture-mm"] : opts["receiver-aperture-y-mm"]
+    receiver_aperture_z_spec = isempty(strip(opts["receiver-aperture-z-mm"])) ? opts["receiver-aperture-mm"] : opts["receiver-aperture-z-mm"]
+
+    cfg_base = PAMConfig3D(
+        dx=parse(Float64, opts["dx-mm"]) * 1e-3,
+        dy=dy_mm * 1e-3,
+        dz=parse(Float64, opts["dz-mm"]) * 1e-3,
+        axial_dim=parse(Float64, opts["axial-mm"]) * 1e-3,
+        transverse_dim_y=transverse_y_mm * 1e-3,
+        transverse_dim_z=transverse_z_mm * 1e-3,
+        t_max=parse(Float64, opts["t-max-us"]) * 1e-6,
+        dt=parse(Float64, opts["dt-ns"]) * 1e-9,
+        zero_pad_factor=parse(Int, opts["zero-pad-factor"]),
+        receiver_aperture_y=parse_receiver_aperture_mm(receiver_aperture_y_spec),
+        receiver_aperture_z=parse_receiver_aperture_mm(receiver_aperture_z_spec),
+        peak_suppression_radius=parse(Float64, opts["peak-suppression-radius-mm"]) * 1e-3,
+        success_tolerance=parse(Float64, opts["success-tolerance-mm"]) * 1e-3,
+        axial_gain_power=parse(Float64, opts["axial-gain-power"]),
+    )
+
+    sources, emission_meta = parse_point_sources_3d(opts)
+    bottom_margin_m = parse(Float64, opts["bottom-margin-mm"]) * 1e-3
+    cfg = fit_pam_config_3d(cfg_base, sources; min_bottom_margin=bottom_margin_m)
+
+    out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
+        opts["out-dir"]
+    else
+        default_output_dir(opts, sources, cfg, emission_meta)
+    end
+    mkpath(out_dir)
+
+    c, rho, medium_info = make_pam_medium_3d(cfg; aberrator=aberrator)
+    recon_frequencies = if haskey(opts, "recon-frequencies-mhz") && !isempty(strip(opts["recon-frequencies-mhz"]))
+        parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
+    else
+        default_recon_frequencies(sources)
+    end
+    reconstruction_mode = resolve_reconstruction_mode(opts["recon-mode"], source_model)
+    recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
+    window_config = make_window_config(opts, reconstruction_mode)
+
+    results = run_pam_case_3d(
+        c,
+        rho,
+        sources,
+        cfg;
+        frequencies=recon_frequencies,
+        bandwidth=recon_bandwidth_hz,
+        use_gpu=parse_bool(opts["use-gpu"]),
+        reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
+        reconstruction_mode=reconstruction_mode,
+        window_config=window_config,
+        show_progress=parse_bool(opts["recon-progress"]),
+        benchmark=parse_bool(opts["benchmark"]),
+        window_batch=parse(Int, opts["window-batch"]),
+    )
+
+    medium_summary = Dict{String, Any}()
+    for (key, value) in medium_info
+        key == :mask && continue
+        medium_summary[String(key)] = value
+    end
+
+    summary = Dict(
+        "out_dir" => out_dir,
+        "dimension" => 3,
+        "reconstruction_source" => Dict("mode" => "analytic_3d_water"),
+        "sources" => [source_summary(src) for src in sources],
+        "clusters" => [source_summary(src) for src in sources],
+        "emission_meta" => emission_meta,
+        "config" => Dict(
+            "dx" => cfg.dx,
+            "dy" => cfg.dy,
+            "dz" => cfg.dz,
+            "axial_dim" => cfg.axial_dim,
+            "transverse_dim_y" => cfg.transverse_dim_y,
+            "transverse_dim_z" => cfg.transverse_dim_z,
+            "receiver_aperture_y" => cfg.receiver_aperture_y,
+            "receiver_aperture_z" => cfg.receiver_aperture_z,
+            "t_max" => cfg.t_max,
+            "dt" => cfg.dt,
+            "c0" => cfg.c0,
+            "rho0" => cfg.rho0,
+            "zero_pad_factor" => cfg.zero_pad_factor,
+            "peak_suppression_radius" => cfg.peak_suppression_radius,
+            "success_tolerance" => cfg.success_tolerance,
+            "axial_gain_power" => cfg.axial_gain_power,
+            "bottom_margin" => bottom_margin_m,
+        ),
+        "medium" => medium_summary,
+        "reconstruction_frequencies_hz" => recon_frequencies,
+        "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
+        "reconstruction_mode" => String(results[:reconstruction_mode]),
+        "reconstruction_progress" => parse_bool(opts["recon-progress"]),
+        "window_config" => string_key_dict(results[:window_config]),
+        "window_info" => Dict(
+            "geometric" => compact_window_info(results[:geo_info]),
+            "hasa" => compact_window_info(results[:hasa_info]),
+        ),
+        "benchmark" => parse_bool(opts["benchmark"]),
+        "gpu_timing" => Dict(
+            "geometric" => get(results[:geo_info], :gpu_timing, nothing),
+            "hasa" => get(results[:hasa_info], :gpu_timing, nothing),
+        ),
+        "reconstruction_axial_step_m" => results[:geo_info][:axial_step],
+        "reference_sound_speed_m_per_s" => results[:geo_info][:reference_sound_speed],
+        "analysis_mode" => "localization",
+        "simulation" => Dict(
+            "receiver_row" => results[:simulation][:receiver_row],
+            "receiver_cols_y" => [first(results[:simulation][:receiver_cols_y]), last(results[:simulation][:receiver_cols_y])],
+            "receiver_cols_z" => [first(results[:simulation][:receiver_cols_z]), last(results[:simulation][:receiver_cols_z])],
+            "source_indices" => [[row, col_y, col_z] for (row, col_y, col_z) in get(results[:simulation], :source_indices, NTuple{3, Int}[])],
+        ),
+        "geometric" => results[:stats_geo],
+        "hasa" => results[:stats_hasa],
+    )
+
+    open(joinpath(out_dir, "summary.json"), "w") do io
+        JSON3.pretty(io, summary)
+    end
+
+    clusters = sources
+    @save joinpath(out_dir, "result.jld2") c rho cfg clusters results medium_info
+
+    println("Saved 3D PAM outputs to $out_dir")
+    exit()
+end
 
 if isempty(from_run_dir)
     cfg_base = PAMConfig(

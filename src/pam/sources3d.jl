@@ -12,4 +12,5 @@ Base.@kwdef struct PointSource3D <: EmissionSource3D
 end
 
 _emission_frequencies(src::PointSource3D) = [src.frequency]
+emission_frequencies(src::EmissionSource3D) = _emission_frequencies(src)
 _source_duration(src::PointSource3D) = src.num_cycles / src.frequency
