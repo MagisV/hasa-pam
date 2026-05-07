@@ -962,6 +962,11 @@ function _projection_axes_3d(grid, cfg::PAMConfig3D, projection::Symbol)
     error("Unknown 3D projection: $projection")
 end
 
+function _projection_heatmap_matrix_3d(values::AbstractMatrix, projection::Symbol)
+    projection == :y_z && return values
+    return values'
+end
+
 function scatter_sources_3d_projection!(ax, sources, projection::Symbol; color=(:white, 0.75))
     truth = source_triples_mm(sources)
     if projection == :depth_y
@@ -993,15 +998,39 @@ function add_projection_panel_3d!(
     proj = _project3d_values(intensity, projection)
     truth_proj = _project3d_mask(truth_mask, projection)
     ax = Axis(fig[row, col]; title=title, xlabel=xlabel, ylabel=ylabel, aspect=DataAspect())
-    hm = heatmap!(ax, xvals, yvals, map_norm(proj, global_ref)'; colormap=:viridis, colorrange=(0, 1))
+    hm = heatmap!(
+        ax,
+        xvals,
+        yvals,
+        _projection_heatmap_matrix_3d(map_norm(proj, global_ref), projection);
+        colormap=:viridis,
+        colorrange=(0, 1),
+    )
     if any(truth_proj) && any(.!truth_proj)
-        contour!(ax, xvals, yvals, Float64.(truth_proj)'; levels=[0.5], color=(:white, 0.85), linewidth=2.4, linestyle=:dash)
+        contour!(
+            ax,
+            xvals,
+            yvals,
+            _projection_heatmap_matrix_3d(Float64.(truth_proj), projection);
+            levels=[0.5],
+            color=(:white, 0.85),
+            linewidth=2.4,
+            linestyle=:dash,
+        )
     end
     local_ref = max(maximum(Float64.(intensity)), eps(Float64))
     for (idx, ratio) in pairs(threshold_ratios)
         pred_proj = _project3d_mask(intensity .>= ratio * local_ref, projection)
         if any(pred_proj) && any(.!pred_proj)
-            contour!(ax, xvals, yvals, Float64.(pred_proj)'; levels=[0.5], color=colors[idx], linewidth=2)
+            contour!(
+                ax,
+                xvals,
+                yvals,
+                _projection_heatmap_matrix_3d(Float64.(pred_proj), projection);
+                levels=[0.5],
+                color=colors[idx],
+                linewidth=2,
+            )
         end
     end
     scatter_sources_3d_projection!(ax, sources, projection)
