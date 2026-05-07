@@ -61,6 +61,7 @@ function parse_cli(args)
         "recon-min-window-energy-ratio" => "0.001",
         "recon-progress" => "false",
         "benchmark" => "false",
+        "window-batch" => "1",
         "phase-mode" => "geometric",
         "phase-jitter-rad" => "0.2",
         "random-seed" => "42",
@@ -844,6 +845,7 @@ if isempty(from_run_dir)
         source_variability=source_variability,
         show_progress=parse_bool(opts["recon-progress"]),
         benchmark=parse_bool(opts["benchmark"]),
+        window_batch=parse(Int, opts["window-batch"]),
     )
     reconstruction_source = Dict("mode" => "simulation")
 else
@@ -932,6 +934,7 @@ else
         window_config=window_config,
         show_progress=parse_bool(opts["recon-progress"]),
         benchmark=parse_bool(opts["benchmark"]),
+        window_batch=parse(Int, opts["window-batch"]),
     )
     reconstruction_source = Dict(
         "mode" => "cached_rf",

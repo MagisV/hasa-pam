@@ -128,6 +128,7 @@ function run_pam_case(
     source_variability::SourceVariabilityConfig=SourceVariabilityConfig(),
     show_progress::Bool=false,
     benchmark::Bool=false,
+    window_batch::Int=1,
 )
     phase_mode = _normalize_source_phase_mode(source_phase_mode)
     effective_sources = sources
@@ -151,6 +152,7 @@ function run_pam_case(
         use_gpu=use_gpu,
         show_progress=show_progress,
         benchmark=benchmark,
+        window_batch=window_batch,
     )
     if phase_mode == :random_phase_per_realization
         n_realizations >= 1 || error("n_realizations must be >= 1.")
@@ -208,6 +210,7 @@ function reconstruct_pam_case(
     use_gpu::Bool=false,
     show_progress::Bool=false,
     benchmark::Bool=false,
+    window_batch::Int=1,
     analysis_sources::Union{Nothing, AbstractVector{<:EmissionSource2D}}=nothing,
 )
     size(c) == (pam_Nx(cfg), pam_Ny(cfg)) ||
@@ -225,6 +228,7 @@ function reconstruct_pam_case(
         use_gpu=use_gpu,
         show_progress=show_progress,
         benchmark=benchmark,
+        window_batch=window_batch,
     )
     recon_mode = _normalize_reconstruction_mode(reconstruction_mode)
     effective_window_config = PAMWindowConfig(;

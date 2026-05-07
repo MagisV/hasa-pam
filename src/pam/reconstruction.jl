@@ -144,8 +144,30 @@ function _accum_abs2_sum!(dst, src)
     return
 end
 
+# Batched variant: src is (padded_ny, nfreq*W); dst is (padded_ny, W).
+# Each thread handles one lateral index and accumulates into all W windows in one pass.
+function _accum_abs2_sum_batched!(dst, src, nfreq_per_w)
+    i = CUDA.threadIdx().x + (CUDA.blockIdx().x - 1) * CUDA.blockDim().x
+    i > size(src, 1) && return
+    W = size(dst, 2)
+    @inbounds for w in 1:W
+        acc = zero(real(eltype(src)))
+        base = (w - 1) * nfreq_per_w
+        for j in 1:nfreq_per_w
+            v = src[i, base + j]
+            acc += real(v)^2 + imag(v)^2
+        end
+        dst[i, w] += acc
+    end
+    return
+end
+
+# Accepts W windows simultaneously; spectral operators are tiled W times along the
+# frequency dimension so all W marches share a single set of kernel launches.
+# Returns a length-W vector of intensity matrices and one timing dict for the batch.
 function _reconstruct_pam_cuda(
-    rf::AbstractMatrix{<:Real},
+    rf_windows::AbstractVector{<:AbstractMatrix{<:Real}},
+    t0_windows::AbstractVector{<:Real},
     c_padded::AbstractMatrix{<:Real},
     cfg::PAMConfig,
     selected_freqs::AbstractVector{<:Real},
@@ -158,7 +180,6 @@ function _reconstruct_pam_cuda(
     c0::Float64,
     effective_axial_step::Float64,
     axial_substeps::Int,
-    t0::Float64,
     corrected::Bool,
     recon_label::AbstractString,
     show_progress::Bool,
@@ -166,33 +187,32 @@ function _reconstruct_pam_cuda(
 )
     _assert_pam_cuda_available()
     fn_start = time()
+    W     = length(rf_windows)
     nfreq = length(selected_freqs)
+    nfreq_W = nfreq * W
     let dev = CUDA.device()
         println(
             "[ PAM ] $recon_label: GPU $(CUDA.name(dev)) (device $(CUDA.deviceid(dev))), " *
-            "$(_PAM_CUDA_PRECISION) arithmetic, $nfreq freq bins batched",
+            "$(_PAM_CUDA_PRECISION) arithmetic, $nfreq freq bins × $W windows batched",
         )
         flush(stdout)
     end
 
     T = _PAM_CUDA_PRECISION
     CT = _PAM_CUDA_COMPLEX
-    rf_d = CUDA.CuArray(T.(rf))
-    rf_fft_d = fft(rf_d, 2)
     # Speed-contrast field transposed to padded_ny × nx for contiguous column access.
     eta_yx_d = CUDA.CuArray(T.(permutedims(1 .- (c0 ./ c_padded) .^ 2)))
-    intensity_yx_d = CUDA.zeros(T, padded_ny, nx)
+    # Intensity accumulator: (padded_ny, W, nx) — view(:, :, row) is a contiguous
+    # (padded_ny × W) slice, required by _accum_abs2_sum_batched!.
+    intensity_yWx_d = CUDA.zeros(T, padded_ny, W, nx)
 
-    # Build per-frequency spectral arrays (CPU, centered order → ifftshift to FFT order)
-    # into padded_ny × nfreq matrices, then upload once.
+    # Build per-frequency spectral arrays on CPU, then tile W times and upload once.
     k = _fft_wavenumbers(padded_ny, cfg.dz)
-    prop_cpu         = zeros(ComplexF64, padded_ny, nfreq)
-    corr_cpu         = zeros(ComplexF64, padded_ny, nfreq)
-    weight_cpu       = zeros(Float64, padded_ny, nfreq)
-    # n-step uncorrected propagator: prop^axial_substeps * weight, precomputed so
-    # the entire uncorrected substep loop collapses to a single in-place multiply.
+    prop_cpu          = zeros(ComplexF64, padded_ny, nfreq)
+    corr_cpu          = zeros(ComplexF64, padded_ny, nfreq)
+    weight_cpu        = zeros(Float64,    padded_ny, nfreq)
     prop_n_weight_cpu = zeros(ComplexF64, padded_ny, nfreq)
-    k0_sq_cpu        = zeros(Float64, nfreq)
+    k0_sq_cpu         = zeros(Float64, nfreq)
 
     for (f, freq) in enumerate(selected_freqs)
         k0 = 2 * pi * Float64(freq) / c0
@@ -211,7 +231,6 @@ function _reconstruct_pam_cuda(
             correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
         end
 
-        # Evanescent modes zeroed directly in prop/corr; no separate mask array needed.
         prop_cpu[:, f]          .= _ifftshift(propagating .* propagator)
         corr_cpu[:, f]          .= _ifftshift(propagating .* correction)
         weight_cpu[:, f]        .= _ifftshift(weighting)
@@ -219,47 +238,39 @@ function _reconstruct_pam_cuda(
         k0_sq_cpu[f]             = k0^2
     end
 
-    # Upload batched spectral arrays: padded_ny × nfreq.
-    prop_d         = CUDA.CuArray(CT.(prop_cpu))
-    corr_d         = CUDA.CuArray(CT.(corr_cpu))
-    weight_d       = CUDA.CuArray(T.(weight_cpu))
-    # Weight-folded versions used in the last substep to fuse the window multiply
-    # into the output write, eliminating a separate kernel launch + memory roundtrip.
+    # Tile W times: every window shares the same spectral operators.
+    prop_d          = CUDA.CuArray(CT.(repeat(prop_cpu,          1, W)))
+    corr_d          = CUDA.CuArray(CT.(repeat(corr_cpu,          1, W)))
+    weight_d        = CUDA.CuArray(T.(repeat(weight_cpu,         1, W)))
     prop_weight_d   = prop_d .* weight_d
     corr_weight_d   = corr_d .* weight_d
-    # n-step propagator (all axial_substeps) with weight folded in: lets the entire
-    # uncorrected substep loop collapse to a single in-place multiply per row.
-    prop_n_weight_d = CUDA.CuArray(CT.(prop_n_weight_cpu))
-    # k0_sq_d shaped 1 × nfreq so it broadcasts against padded_ny × nfreq arrays.
-    k0_sq_d  = reshape(CUDA.CuArray(T.(k0_sq_cpu)), 1, nfreq)
+    prop_n_weight_d = CUDA.CuArray(CT.(repeat(prop_n_weight_cpu, 1, W)))
+    k0_sq_d         = reshape(CUDA.CuArray(T.(repeat(k0_sq_cpu, W))), 1, nfreq_W)
 
-    # Build batched initial conditions: padded_ny × nfreq.
-    p0_d = CUDA.zeros(CT, padded_ny, nfreq)
-    for (f, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
-        phase = CT(cis(-T(2 * pi) * T(freq) * T(t0)))
-        p0_d[crop_range, f] .= rf_fft_d[:, bin] .* phase
+    # Build batched initial conditions: (padded_ny, nfreq*W).
+    # Window w occupies columns [(w-1)*nfreq+1 : w*nfreq].
+    p0_d = CUDA.zeros(CT, padded_ny, nfreq_W)
+    for (w, (rf_w, t0_w)) in enumerate(zip(rf_windows, t0_windows))
+        rf_fft_w = fft(CUDA.CuArray(T.(rf_w)), 2)
+        col_offset = (w - 1) * nfreq
+        for (f, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
+            phase = CT(cis(-T(2 * pi) * T(freq) * T(t0_w)))
+            p0_d[crop_range, col_offset + f] .= rf_fft_w[:, bin] .* phase
+        end
     end
 
-    # Pre-compute cuFFT plans once; reuse at every step to eliminate per-call
-    # plan creation and intermediate array allocation in the hot loop.
-    # plan_fft! uses A only to infer shape/type; it does not execute the transform.
     plan_fwd = plan_fft!(p0_d, 1)
     plan_bwd = plan_ifft!(similar(p0_d), 1)
-    # Apply initial forward FFT in-place; p0_d is reused as current_d.
     plan_fwd * p0_d
     current_d = p0_d
     current_d .*= weight_d
     next_d    = similar(current_d)
     tmp_d     = similar(current_d)
-    p_space_d = similar(current_d)  # workspace: IFFT of current_d each substep
-    p_row_d   = similar(current_d)  # workspace: IFFT of current_d per output row
+    p_space_d = similar(current_d)
+    p_row_d   = similar(current_d)
 
     t_setup = time() - fn_start
 
-    # March: two paths share identical GPU logic; the benchmark path inserts CUDA
-    # event pairs around each section type to split FFT vs elementwise time.
-    # The non-benchmark path wraps the whole loop in a single CUDA.@elapsed so
-    # there is zero per-iteration overhead on the hot path.
     t_fft_s = 0.0
     t_ew_s  = 0.0
     march_wall_start = time()
@@ -282,13 +293,12 @@ function _reconstruct_pam_cuda(
                 t_fft_s += CUDA.@elapsed (plan_fwd * tmp_d)
                 t_ew_s  += CUDA.@elapsed (current_d .= current_d .* prop_weight_d .+ corr_weight_d .* tmp_d)
             else
-                # All axial_substeps + weight collapsed into one in-place multiply.
                 t_ew_s  += CUDA.@elapsed (current_d .*= prop_n_weight_d)
             end
             t_ew_s  += CUDA.@elapsed (p_row_d .= current_d)
             t_fft_s += CUDA.@elapsed (plan_bwd * p_row_d)
-            t_ew_s  += CUDA.@elapsed CUDA.@cuda threads=nthreads blocks=nblocks _accum_abs2_sum!(
-                view(intensity_yx_d, :, row), p_row_d,
+            t_ew_s  += CUDA.@elapsed CUDA.@cuda threads=nthreads blocks=nblocks _accum_abs2_sum_batched!(
+                view(intensity_yWx_d, :, :, row), p_row_d, nfreq,
             )
         end
         march_gpu_s = t_fft_s + t_ew_s
@@ -309,38 +319,36 @@ function _reconstruct_pam_cuda(
                 plan_fwd * tmp_d
                 current_d .= current_d .* prop_weight_d .+ corr_weight_d .* tmp_d
             else
-                # All axial_substeps + weight collapsed into one in-place multiply.
                 current_d .*= prop_n_weight_d
             end
             p_row_d .= current_d
             plan_bwd * p_row_d
-            CUDA.@cuda threads=nthreads blocks=nblocks _accum_abs2_sum!(
-                view(intensity_yx_d, :, row), p_row_d,
+            CUDA.@cuda threads=nthreads blocks=nblocks _accum_abs2_sum_batched!(
+                view(intensity_yWx_d, :, :, row), p_row_d, nfreq,
             )
         end
     end
     march_wall_s = time() - march_wall_start
 
-    # Estimate memory bandwidth from counted DRAM read+write passes.
-    # corrected — intermediate substeps (axial_substeps-1):
-    #   ifft(2) + tmp_ew(4) + fft(2) + next_ew(5) = 13
-    # corrected — last substep + output:
-    #   ifft(2) + tmp_ew(4) + fft(2) + out_ew(5) + copy(2) + ifft_row(2) + accum(2) = 19
-    # uncorrected — all substeps collapsed to one multiply + output:
-    #   prop_n_weight(3) + copy(2) + ifft_row(2) + accum(2) = 9
+    # Bandwidth estimate: same pass counts as before, but the working-set width
+    # is now nfreq*W columns, so BW scales proportionally.
     passes_substep  = 13
     passes_last_row = corrected ? 19 : 9
     bytes_march = Int64(row_stop - rr) * (
-        (corrected ? Int64(axial_substeps - 1) * passes_substep : 0) * padded_ny * nfreq * sizeof(CT) +
-        passes_last_row * padded_ny * nfreq * sizeof(CT)
+        (corrected ? Int64(axial_substeps - 1) * passes_substep : 0) * padded_ny * nfreq_W * sizeof(CT) +
+        passes_last_row * padded_ny * nfreq_W * sizeof(CT)
     )
     bandwidth_GBps = bytes_march / march_gpu_s / 1e9
 
-    t_download = @elapsed result = Float64.(permutedims(Array(intensity_yx_d)))
+    t_download = @elapsed begin
+        # permutedims (1,2,3)→(1,3,2): (padded_ny,W,nx) → (padded_ny,nx,W)
+        raw_all = permutedims(Array(intensity_yWx_d), (1, 3, 2))
+    end
+    raws = [Float64.(permutedims(raw_all[:, :, w])) for w in 1:W]
 
     _pam_progress(
         show_progress,
-        "PAM $recon_label $nfreq freq batch: march $(round(march_gpu_s * 1e3; digits=1)) ms GPU / " *
+        "PAM $recon_label $nfreq freq × $W win batch: march $(round(march_gpu_s * 1e3; digits=1)) ms GPU / " *
         "$(round(march_wall_s * 1e3; digits=1)) ms wall, " *
         "BW ~$(round(bandwidth_GBps; digits=0)) GB/s" *
         (benchmark ? ", FFT $(round(100 * t_fft_s / march_gpu_s; digits=1))% / EW $(round(100 * t_ew_s / march_gpu_s; digits=1))%" : ""),
@@ -356,11 +364,12 @@ function _reconstruct_pam_cuda(
         :elementwise_s   => benchmark ? t_ew_s  : nothing,
         :nrows           => row_stop - rr,
         :nfreq           => nfreq,
+        :nwindows        => W,
         :padded_ny       => padded_ny,
         :axial_substeps  => axial_substeps,
         :bytes_march_est => bytes_march,
     )
-    return result, timing
+    return raws, timing
 end
 
 function reconstruct_pam(
@@ -376,6 +385,7 @@ function reconstruct_pam(
     use_gpu::Bool=false,
     show_progress::Bool=false,
     benchmark::Bool=false,
+    window_batch::Int=1,
 )
     total_start = time()
     nx, ny = size(c)
@@ -408,8 +418,9 @@ function reconstruct_pam(
 
     gpu_timing = nothing
     intensity_padded = if use_gpu
-        raw, timing = _reconstruct_pam_cuda(
-            rf,
+        raws, timing = _reconstruct_pam_cuda(
+            [rf],
+            [t0],
             c_padded,
             cfg,
             selected_freqs,
@@ -422,14 +433,13 @@ function reconstruct_pam(
             c0,
             effective_axial_step,
             axial_substeps,
-            t0,
             corrected,
             recon_label,
             show_progress,
             benchmark,
         )
         gpu_timing = timing
-        raw
+        raws[1]
     else
         rf_fft = fft(Float64.(rf), 2)
         out = zeros(Float64, nx, padded_ny)
@@ -540,6 +550,7 @@ function reconstruct_pam_windowed(
     use_gpu::Bool=false,
     show_progress::Bool=false,
     benchmark::Bool=false,
+    window_batch::Int=1,
 )
     total_start = time()
     nx, ny = size(c)
@@ -570,45 +581,129 @@ function reconstruct_pam_windowed(
     used_energy = Float64[]
     skipped_energy = Float64[]
 
-    for (window_idx, (range, energy)) in enumerate(zip(ranges, energies))
-        if energy < threshold || energy <= 0
-            push!(skipped_ranges, range)
-            push!(skipped_energy, Float64(energy))
-            _pam_progress(
-                show_progress,
-                "PAM $recon_label window $window_idx/$(length(ranges)) skipped, " *
-                "samples=$(first(range)):$(last(range)), energy=$energy",
-            )
-            continue
+    if use_gpu && window_batch > 1
+        # Compute shared setup once; all windows share the same medium, cfg, and frequencies.
+        # Bin indices depend on the FFT length (window_samples), not the full RF length.
+        ref_win_rf = zeros(Float64, ny, window_samples)
+        sel_freqs, sel_bins = _select_frequency_bins(ref_win_rf, cfg.dt, frequencies; bandwidth=bandwidth)
+        b_padded_ny = cfg.zero_pad_factor > 1 ? cfg.zero_pad_factor * ny : ny
+        b_extra = b_padded_ny - ny
+        b_left  = fld(b_extra, 2)
+        b_crop  = (b_left + 1):(b_left + ny)
+        b_c_padded, _ = _edge_pad_lateral(c, b_padded_ny)
+        b_c0 = isnothing(reference_sound_speed) ? mean(b_c_padded) : Float64(reference_sound_speed)
+        b_target_step = isnothing(axial_step) ? cfg.dx : Float64(axial_step)
+        b_substeps    = _pam_axial_substeps(cfg.dx, b_target_step)
+        b_eff_step    = cfg.dx / b_substeps
+        b_rr          = receiver_row(cfg)
+
+        # Partition windows into qualifying (batched) and skipped.
+        qual_ranges  = UnitRange{Int}[]
+        qual_energies = Float64[]
+        for (range, energy) in zip(ranges, energies)
+            if energy < threshold || energy <= 0
+                push!(skipped_ranges, range)
+                push!(skipped_energy, Float64(energy))
+            else
+                push!(qual_ranges, range)
+                push!(qual_energies, Float64(energy))
+            end
         end
 
-        window_start = time()
-        taper = _pam_temporal_taper(length(range), config.taper)
-        rf_window = Float64.(@view rf[:, range]) .* reshape(taper, 1, :)
-        window_intensity, _, window_info = reconstruct_pam(
-            rf_window,
-            c,
-            cfg;
-            frequencies=frequencies,
-            bandwidth=bandwidth,
-            corrected=corrected,
-            reference_sound_speed=reference_sound_speed,
-            axial_step=axial_step,
-            time_origin=(first(range) - 1) * cfg.dt,
-            use_gpu=use_gpu,
-            show_progress=false,
-            benchmark=benchmark,
-        )
-        intensity .+= window_intensity
-        push!(used_ranges, range)
-        push!(used_energy, Float64(energy))
-        push!(window_infos, window_info)
-        _pam_progress(
-            show_progress,
-            "PAM $recon_label window $window_idx/$(length(ranges)), " *
-            "$(length(window_info[:frequency_bins])) bins, samples=$(first(range)):$(last(range)), " *
-            "elapsed $(_format_elapsed(time() - window_start))",
-        )
+        n_qual = length(qual_ranges)
+        batch_idx = 0
+        wi = 1
+        while wi <= n_qual
+            batch_end = min(wi + window_batch - 1, n_qual)
+            W_actual  = batch_end - wi + 1
+            batch_idx += 1
+
+            b_ranges   = qual_ranges[wi:batch_end]
+            b_energies = qual_energies[wi:batch_end]
+            b_t0s      = [Float64((first(r) - 1) * cfg.dt) for r in b_ranges]
+            b_rf_wins  = [
+                Float64.(@view rf[:, r]) .* reshape(_pam_temporal_taper(length(r), config.taper), 1, :)
+                for r in b_ranges
+            ]
+
+            batch_start_t = time()
+            b_raws, b_timing = _reconstruct_pam_cuda(
+                b_rf_wins, b_t0s, b_c_padded, cfg,
+                sel_freqs, sel_bins, b_crop,
+                nx, b_padded_ny, b_rr, nx,
+                b_c0, b_eff_step, b_substeps,
+                corrected, recon_label, show_progress, benchmark,
+            )
+
+            for (raw_w, rng, en) in zip(b_raws, b_ranges, b_energies)
+                intensity .+= raw_w[:, b_crop]
+                push!(used_ranges, rng)
+                push!(used_energy, en)
+            end
+
+            batch_info = Dict{Symbol, Any}(
+                :frequencies    => sel_freqs,
+                :frequency_bins => sel_bins,
+                :bandwidth      => Float64(bandwidth),
+                :corrected      => corrected,
+                :receiver_row   => b_rr,
+                :axial_step     => b_eff_step,
+                :backend        => :cuda,
+                :gpu_precision  => _PAM_CUDA_PRECISION,
+                :use_gpu        => true,
+                :gpu_timing     => b_timing,
+            )
+            push!(window_infos, batch_info)
+
+            _pam_progress(
+                show_progress,
+                "PAM $recon_label batch $batch_idx ($W_actual windows), " *
+                "samples=$(first(b_ranges[1])):$(last(b_ranges[end])), " *
+                "elapsed $(_format_elapsed(time() - batch_start_t))",
+            )
+            wi = batch_end + 1
+        end
+    else
+        for (window_idx, (range, energy)) in enumerate(zip(ranges, energies))
+            if energy < threshold || energy <= 0
+                push!(skipped_ranges, range)
+                push!(skipped_energy, Float64(energy))
+                _pam_progress(
+                    show_progress,
+                    "PAM $recon_label window $window_idx/$(length(ranges)) skipped, " *
+                    "samples=$(first(range)):$(last(range)), energy=$energy",
+                )
+                continue
+            end
+
+            window_start = time()
+            taper = _pam_temporal_taper(length(range), config.taper)
+            rf_window = Float64.(@view rf[:, range]) .* reshape(taper, 1, :)
+            window_intensity, _, window_info = reconstruct_pam(
+                rf_window,
+                c,
+                cfg;
+                frequencies=frequencies,
+                bandwidth=bandwidth,
+                corrected=corrected,
+                reference_sound_speed=reference_sound_speed,
+                axial_step=axial_step,
+                time_origin=(first(range) - 1) * cfg.dt,
+                use_gpu=use_gpu,
+                show_progress=false,
+                benchmark=benchmark,
+            )
+            intensity .+= window_intensity
+            push!(used_ranges, range)
+            push!(used_energy, Float64(energy))
+            push!(window_infos, window_info)
+            _pam_progress(
+                show_progress,
+                "PAM $recon_label window $window_idx/$(length(ranges)), " *
+                "$(length(window_info[:frequency_bins])) bins, samples=$(first(range)):$(last(range)), " *
+                "elapsed $(_format_elapsed(time() - window_start))",
+            )
+        end
     end
 
     used_count = length(used_ranges)
