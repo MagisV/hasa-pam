@@ -1458,8 +1458,11 @@ viewer.add_image(data[\"sound_speed\"], name=\"Sound speed [m/s]\", scale=scale,
 viewer.add_image(data[\"density\"],     name=\"Density [kg/m3]\",   scale=scale, colormap=\"gray\",    opacity=0.35, visible=False)
 viewer.add_image(data[\"truth_mask\"],  name=\"Truth mask\",        scale=scale, colormap=\"green\",   opacity=0.25)
 
-pts = np.stack([data[\"src_depth_mm\"], data[\"src_y_mm\"], data[\"src_z_mm\"]], axis=1)
-viewer.add_points(pts, name=\"Sources\", size=1.5, face_color=\"red\", symbol=\"cross\")
+depth_idx = np.interp(data[\"src_depth_mm\"], data[\"depth_mm\"], np.arange(len(data[\"depth_mm\"])))
+y_idx     = np.interp(data[\"src_y_mm\"],     data[\"y_mm\"],     np.arange(len(data[\"y_mm\"])))
+z_idx     = np.interp(data[\"src_z_mm\"],     data[\"z_mm\"],     np.arange(len(data[\"z_mm\"])))
+pts = np.stack([depth_idx, y_idx, z_idx], axis=1)
+viewer.add_points(pts, name=\"Sources\", size=1.5, face_color=\"red\", symbol=\"cross\", scale=scale)
 
 napari.run()
 """
