@@ -338,7 +338,7 @@ julia --project=. scripts/run_pam.jl `
   --dimension=3 `
   --source-model=point `
   --sources-mm=30:2:-1 `
-  --aberrator=none `
+  --aberrator=water `
   --use-gpu=true `
   --sim-mode=kwave
 ```
@@ -350,7 +350,7 @@ julia --project=. scripts/run_pam.jl `
   --sources-mm=30:2:-1 `
   --frequency-mhz=0.5 `
   --num-cycles=5 `
-  --aberrator=none `
+  --aberrator=water `
   --axial-mm=60 `
   --transverse-mm=32 `
   --t-max-us=60 `

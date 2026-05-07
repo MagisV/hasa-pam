@@ -48,6 +48,7 @@ function parse_cli(args)
         "peak-suppression-radius-mm" => "8.0",
         "success-tolerance-mm" => "1.5",
         "aberrator" => "none",
+        "sim-mode" => "auto",
         "ct-path" => DEFAULT_CT_PATH,
         "slice-index" => "250",
         "skull-transducer-distance-mm" => "30",
@@ -180,6 +181,13 @@ end
 function parse_aberrator(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
     value in (:none, :water, :lens, :skull) || error("Unknown aberrator: $s")
+    return value
+end
+
+function parse_sim_mode(s::AbstractString, aberrator::Symbol)
+    value = Symbol(lowercase(strip(s)))
+    value in (:auto, :analytic, :kwave) || error("Unknown --sim-mode: $s (must be auto, analytic, or kwave)")
+    value == :auto && return aberrator in (:skull, :water) ? :kwave : :analytic
     return value
 end
 
@@ -1330,7 +1338,7 @@ if dimension == 3
     parse_analysis_mode(opts["analysis-mode"], source_model) == :localization ||
         error("3D PAM CLI currently supports only localization analysis.")
     aberrator = parse_aberrator(opts["aberrator"])
-    aberrator in (:none, :water) || error("3D PAM CLI currently supports only --aberrator=none or --aberrator=water.")
+    aberrator in (:none, :skull) || error("3D PAM CLI currently supports only --aberrator=none or --aberrator=skull.")
 
     dy_mm = isempty(strip(opts["dy-mm"])) ? parse(Float64, opts["dz-mm"]) : parse(Float64, opts["dy-mm"])
     transverse_y_mm = isempty(strip(opts["transverse-y-mm"])) ? parse(Float64, opts["transverse-mm"]) : parse(Float64, opts["transverse-y-mm"])
@@ -1376,7 +1384,8 @@ if dimension == 3
     recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
     window_config = make_window_config(opts, reconstruction_mode)
 
-    sim_mode = aberrator == :water ? :kwave : :analytic
+    sim_mode = parse_sim_mode(opts["sim-mode"], aberrator)
+    sim_mode == :analytic && aberrator == :skull && error("--sim-mode=analytic is not compatible with --aberrator=skull; use --sim-mode=kwave.")
     results = run_pam_case_3d(
         c,
         rho,
