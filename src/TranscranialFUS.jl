@@ -36,7 +36,6 @@ export make_pam_medium_3d
 export PAMCUDASetup3D, reconstruct_pam_3d, reconstruct_pam_windowed_3d
 export find_pam_peaks_3d, pam_truth_mask_3d, analyse_pam_3d
 
-include("common.jl")
 include("focus.jl")
 include("pam.jl")
 

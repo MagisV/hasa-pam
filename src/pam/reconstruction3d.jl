@@ -1,3 +1,17 @@
+function _pam_reference_sound_speed(
+    c::AbstractArray{<:Real, 3},
+    cfg::PAMConfig3D,
+    sources::AbstractVector{<:EmissionSource3D};
+    margin::Real=10e-3,
+)
+    isempty(sources) && return mean(Float64.(c))
+    row_start = clamp(receiver_row(cfg), 1, size(c, 1))
+    deepest_source_depth = maximum(src.depth for src in sources)
+    row_stop = row_start + ceil(Int, (deepest_source_depth + Float64(margin)) / cfg.dx)
+    row_stop = clamp(row_stop, row_start, size(c, 1))
+    return mean(Float64.(view(c, row_start:row_stop, :, :)))
+end
+
 function _zero_pad_receiver_rf_3d(rf::AbstractArray{<:Real, 3}, target_ny::Int, target_nz::Int)
     ny, nz, nt = size(rf)
     target_ny >= ny || error("target_ny must be >= current Ny.")

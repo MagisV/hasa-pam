@@ -349,7 +349,7 @@ julia --project=. scripts/run_pam.jl `
   --sources-mm=30:2:-1 `
   --frequency-mhz=0.5 `
   --num-cycles=5 `
-  --aberrator=water `
+  --aberrator=none `
   --axial-mm=60 `
   --transverse-mm=32 `
   --t-max-us=60 `
@@ -365,7 +365,7 @@ julia --project=. scripts/run_pam.jl `
 julia --project=. scripts/run_pam.jl `
   --dimension=3 `
   --source-model=squiggle `
-  --anchors-mm=45:0:0 `
+  --anchors-mm=55:0:0 `
   --vascular-length-mm=12 `
   --vascular-squiggle-amplitude-mm=1.5 `
   --vascular-squiggle-amplitude-x-mm=1.0 `
@@ -373,11 +373,44 @@ julia --project=. scripts/run_pam.jl `
   --harmonics=2,3,4 `
   --harmonic-amplitudes=1.0,0.6,0.3 `
   --aberrator=none `
-  --axial-mm=60 `
+  --axial-mm=80 `
   --transverse-mm=64 `
   --t-max-us=250 `
   --sim-mode=kwave `
   --use-gpu=true `
+  --recon-progress=true
+```
+
+3D squiggle vascular source with CT skull:
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=squiggle `
+  --anchors-mm=55:0:0 `
+  --vascular-length-mm=12 `
+  --vascular-squiggle-amplitude-mm=0.3 `
+  --vascular-squiggle-amplitude-x-mm=0.2 `
+  --vascular-squiggle-wavelength-mm=8 `
+  --squiggle-phase-x-deg=90 `
+  --harmonics=2,3,4 `
+  --harmonic-amplitudes=1.0,0.6,0.3 `
+  --aberrator=skull `
+  --skull-transducer-distance-mm=30 `
+  --slice-index=250 `
+  --axial-mm=80 `
+  --transverse-mm=128 `
+  --t-max-us=250 `
+  --frequency-mhz=0.5 `
+  --receiver-aperture-mm=full `
+  --source-phase-mode=random_phase_per_window `
+  --recon-window-us=20 `
+  --recon-hop-us=10 `
+  --recon-bandwidth-khz=500 `
+  --boundary-threshold-ratios=0.6,0.65,0.7 `
+  --sim-mode=kwave `
+  --use-gpu=true `
+  --window-batch=4 `
   --recon-progress=true
 ```
 

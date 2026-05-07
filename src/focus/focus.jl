@@ -1,3 +1,9 @@
+Base.@kwdef struct AnimationSettings
+    num_cycles::Int = 1
+    Nt::Int = 200
+    run_kwave::Bool = true
+end
+
 mutable struct KGrid2D
     Nx::Int
     Ny::Int
@@ -148,12 +154,6 @@ Base.@kwdef struct SweepSettings
     exclude_skull::Bool = true
     mask_outside::Bool = true
     record::Symbol = :p_rms
-end
-
-Base.@kwdef struct AnimationSettings
-    num_cycles::Int = 1
-    Nt::Int = 200
-    run_kwave::Bool = true
 end
 
 omega(cfg::SimulationConfig) = 2π * cfg.fc

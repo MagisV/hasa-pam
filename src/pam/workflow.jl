@@ -20,6 +20,7 @@ function _pam_reference_sound_speed(
     return mean(Float64.(view(c, row_start:row_stop, :)))
 end
 
+
 function _run_pam_per_window(
     c::AbstractMatrix{<:Real},
     rho::AbstractMatrix{<:Real},

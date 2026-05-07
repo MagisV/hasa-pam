@@ -746,7 +746,7 @@ function run_pam_case_3d(
     recon_kwargs = (
         frequencies=recon_freqs,
         bandwidth=bandwidth,
-        reference_sound_speed=mean(Float64.(c)),
+        reference_sound_speed=TranscranialFUS._pam_reference_sound_speed(c, cfg, sources),
         axial_step=reconstruction_axial_step,
         use_gpu=use_gpu,
         show_progress=show_progress,
@@ -1608,7 +1608,13 @@ if dimension == 3
     end
     mkpath(out_dir)
 
-    c, rho, medium_info = make_pam_medium_3d(cfg; aberrator=aberrator)
+    c, rho, medium_info = make_pam_medium_3d(cfg;
+        aberrator             = aberrator,
+        ct_path               = opts["ct-path"],
+        slice_index_z         = parse(Int, opts["slice-index"]),
+        skull_to_transducer   = parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
+        hu_bone_thr           = parse(Int, opts["hu-bone-thr"]),
+    )
     recon_frequencies = if haskey(opts, "recon-frequencies-mhz") && !isempty(strip(opts["recon-frequencies-mhz"]))
         parse_float_list(opts["recon-frequencies-mhz"]) .* 1e6
     else
@@ -1669,7 +1675,7 @@ if dimension == 3
     summary = Dict(
         "out_dir" => out_dir,
         "dimension" => 3,
-        "reconstruction_source" => Dict("mode" => "analytic_3d_water"),
+        "reconstruction_source" => Dict("mode" => aberrator == :none ? "analytic_3d_water" : "heterogeneous_3d"),
         "activity_boundary_figure" => activity_boundary_path,
         "activity_boundary_metrics" => activity_boundary_metrics,
         "best_threshold_3d_figure" => best_volume_path,
