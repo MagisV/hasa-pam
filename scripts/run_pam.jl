@@ -1407,7 +1407,7 @@ function save_best_threshold_volume_3d(path, intensity, grid, cfg, sources; thre
 end
 
 function save_napari_npz_3d(out_dir, pam_geo, pam_hasa, c, rho, grid, cfg, sources; truth_radius)
-    np = PythonCall.pyimport("numpy")
+    np = TranscranialFUS.PythonCall.pyimport("numpy")
 
     depth_mm = Float32.(depth_coordinates_3d(cfg) .* 1e3)
     y_mm     = Float32.(collect(grid.y) .* 1e3)
