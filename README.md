@@ -305,6 +305,20 @@ julia --project=. scripts/run_pam.jl `
   --benchmark=true
 ```
 
+Running reconstruction only with previous k-wave simulation as data:
+```
+julia --project=. scripts/run_pam.jl `
+  --from-run-dir=outputs/20260507_102449_run_pam_skull_squiggle_1anchors_21src_ax80p0mm_lat102p0mm_f0p5mhz_h234_slice250_st30p0mm_randomphaseperwindow `
+  --boundary-threshold-ratios=0.6,0.65,0.7 `
+  --recon-bandwidth-khz=500 `
+  --recon-hop-us=10 `
+  --recon-min-window-energy-ratio=0.001 `
+  --recon-window-us=20 `
+  --recon-progress=true `
+  --use-gpu=true `
+  --benchmark=true
+```
+
 The PAM run scripts write:
 
 - `overview.png`

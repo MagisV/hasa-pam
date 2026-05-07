@@ -174,7 +174,6 @@ function _reconstruct_pam_cuda(
     k = _fft_wavenumbers(padded_ny, cfg.dz)
     prop_cpu   = zeros(ComplexF64, padded_ny, nfreq)
     corr_cpu   = zeros(ComplexF64, padded_ny, nfreq)
-    mask_cpu   = zeros(Float64, padded_ny, nfreq)
     weight_cpu = zeros(Float64, padded_ny, nfreq)
     k0_sq_cpu  = zeros(Float64, nfreq)
 
@@ -195,9 +194,9 @@ function _reconstruct_pam_cuda(
             correction[idx] = propagator[idx] * effective_axial_step / (2im * kz[idx])
         end
 
-        prop_cpu[:, f]   .= _ifftshift(propagator)
-        corr_cpu[:, f]   .= _ifftshift(correction)
-        mask_cpu[:, f]   .= _ifftshift(propagating)
+        # Evanescent modes zeroed directly in prop/corr; no separate mask array needed.
+        prop_cpu[:, f]   .= _ifftshift(propagating .* propagator)
+        corr_cpu[:, f]   .= _ifftshift(propagating .* correction)
         weight_cpu[:, f] .= _ifftshift(weighting)
         k0_sq_cpu[f]      = k0^2
     end
@@ -205,7 +204,6 @@ function _reconstruct_pam_cuda(
     # Upload batched spectral arrays: padded_ny × nfreq.
     prop_d   = CUDA.CuArray(CT.(prop_cpu))
     corr_d   = CUDA.CuArray(CT.(corr_cpu))
-    mask_d   = CUDA.CuArray(T.(mask_cpu))
     weight_d = CUDA.CuArray(T.(weight_cpu))
     # k0_sq_d shaped 1 × nfreq so it broadcasts against padded_ny × nfreq arrays.
     k0_sq_d  = reshape(CUDA.CuArray(T.(k0_sq_cpu)), 1, nfreq)
@@ -252,7 +250,6 @@ function _reconstruct_pam_cuda(
                 else
                     t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d)
                 end
-                t_ew_s += CUDA.@elapsed (next_d .*= mask_d)
                 current_d, next_d = next_d, current_d
             end
             t_ew_s  += CUDA.@elapsed (current_d .*= weight_d)
@@ -272,7 +269,6 @@ function _reconstruct_pam_cuda(
                 else
                     next_d .= current_d .* prop_d
                 end
-                next_d .*= mask_d
                 current_d, next_d = next_d, current_d
             end
             current_d .*= weight_d
@@ -284,10 +280,10 @@ function _reconstruct_pam_cuda(
     march_wall_s = time() - march_wall_start
 
     # Estimate memory bandwidth from counted DRAM read+write passes.
-    # corrected: ifft(2) + tmp_ew(4) + fft(2) + next_ew(5) + mask(3) = 16 per substep
-    # uncorrected: next_ew(3) + mask(3) = 6 per substep
+    # corrected: ifft(2) + tmp_ew(4) + fft(2) + next_ew(5) = 13 per substep
+    # uncorrected: next_ew(3) per substep
     # per row (after inner loop): weight(3) + ifft_row(2) + intensity_sum(2) = 7
-    passes_substep = corrected ? 16 : 6
+    passes_substep = corrected ? 13 : 3
     bytes_march = Int64(row_stop - rr) * (
         Int64(axial_substeps) * passes_substep * padded_ny * nfreq * sizeof(CT) +
         7 * padded_ny * nfreq * sizeof(CT)
