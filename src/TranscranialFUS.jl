@@ -30,6 +30,11 @@ export EmissionSource2D, PointSource2D, BubbleCluster2D, GaussianPulseCluster2D,
 export emission_frequencies, cavitation_model
 export make_squiggle_bubble_sources, make_pam_medium, source_grid_index, simulate_point_sources, reconstruct_pam, reconstruct_pam_windowed, find_pam_peaks, find_pam_peaks_clean
 export pam_truth_mask, pam_centerline_truth_mask, pam_source_map, pam_psf_blur, pam_psf_blurred_truth_map, threshold_pam_map, pam_intensity_metrics, analyse_pam_2d, analyse_pam_detection_2d, reconstruct_pam_case, run_pam_case, run_pam_sweep
+export EmissionSource3D, PointSource3D
+export PAMConfig3D, pam_Nz, pam_grid_3d, receiver_col_range_y, receiver_col_range_z, depth_coordinates_3d, fit_pam_config_3d, source_grid_index_3d
+export make_pam_medium_3d
+export PAMCUDASetup3D, reconstruct_pam_3d, reconstruct_pam_windowed_3d
+export find_pam_peaks_3d, pam_truth_mask_3d, analyse_pam_3d
 
 include("ct.jl")
 include("focus.jl")
