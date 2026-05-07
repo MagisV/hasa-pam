@@ -217,11 +217,19 @@ function _reconstruct_pam_cuda(
         p0_d[crop_range, f] .= rf_fft_d[:, bin] .* phase
     end
 
-    # Batched 1D FFTs along dim 1 (each column is one frequency's lateral spectrum).
-    current_d = fft(p0_d, 1)    # padded_ny × nfreq
+    # Pre-compute cuFFT plans once; reuse at every step to eliminate per-call
+    # plan creation and intermediate array allocation in the hot loop.
+    # plan_fft! uses A only to infer shape/type; it does not execute the transform.
+    plan_fwd = plan_fft!(p0_d, 1)
+    plan_bwd = plan_ifft!(similar(p0_d), 1)
+    # Apply initial forward FFT in-place; p0_d is reused as current_d.
+    plan_fwd * p0_d
+    current_d = p0_d
     current_d .*= weight_d
-    next_d = similar(current_d)
-    tmp_d  = similar(current_d)
+    next_d    = similar(current_d)
+    tmp_d     = similar(current_d)
+    p_space_d = similar(current_d)  # workspace: IFFT of current_d each substep
+    p_row_d   = similar(current_d)  # workspace: IFFT of current_d per output row
 
     t_setup = time() - fn_start
 
@@ -237,10 +245,10 @@ function _reconstruct_pam_cuda(
         for row in (rr + 1):row_stop
             for _ in 1:axial_substeps
                 if corrected
-                    t_fft_s += CUDA.@elapsed p_space_d = ifft(current_d, 1)
+                    t_fft_s += CUDA.@elapsed (p_space_d .= current_d; plan_bwd * p_space_d)
                     t_ew_s  += CUDA.@elapsed (tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d)
-                    t_fft_s += CUDA.@elapsed conv_d = fft(tmp_d, 1)
-                    t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d .+ corr_d .* conv_d)
+                    t_fft_s += CUDA.@elapsed (plan_fwd * tmp_d)
+                    t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d .+ corr_d .* tmp_d)
                 else
                     t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d)
                 end
@@ -248,7 +256,7 @@ function _reconstruct_pam_cuda(
                 current_d, next_d = next_d, current_d
             end
             t_ew_s  += CUDA.@elapsed (current_d .*= weight_d)
-            t_fft_s += CUDA.@elapsed p_row_d = ifft(current_d, 1)
+            t_fft_s += CUDA.@elapsed (p_row_d .= current_d; plan_bwd * p_row_d)
             t_ew_s  += CUDA.@elapsed (intensity_yx_d[:, row] .+= dropdims(sum(abs2.(p_row_d); dims=2); dims=2))
         end
         march_gpu_s = t_fft_s + t_ew_s
@@ -256,10 +264,11 @@ function _reconstruct_pam_cuda(
         march_gpu_s = CUDA.@elapsed for row in (rr + 1):row_stop
             for _ in 1:axial_substeps
                 if corrected
-                    p_space_d = ifft(current_d, 1)
+                    p_space_d .= current_d
+                    plan_bwd * p_space_d
                     tmp_d .= k0_sq_d .* eta_yx_d[:, row:row] .* p_space_d
-                    conv_d = fft(tmp_d, 1)
-                    next_d .= current_d .* prop_d .+ corr_d .* conv_d
+                    plan_fwd * tmp_d
+                    next_d .= current_d .* prop_d .+ corr_d .* tmp_d
                 else
                     next_d .= current_d .* prop_d
                 end
@@ -267,7 +276,8 @@ function _reconstruct_pam_cuda(
                 current_d, next_d = next_d, current_d
             end
             current_d .*= weight_d
-            p_row_d = ifft(current_d, 1)
+            p_row_d .= current_d
+            plan_bwd * p_row_d
             intensity_yx_d[:, row] .+= dropdims(sum(abs2.(p_row_d); dims=2); dims=2)
         end
     end
@@ -564,6 +574,32 @@ function reconstruct_pam_windowed(
         intensity ./= used_count
     end
     first_info = isempty(window_infos) ? Dict{Symbol, Any}() : first(window_infos)
+
+    # Aggregate gpu_timing across all used windows.
+    agg_gpu_timing = let timings = filter(!isnothing, [get(wi, :gpu_timing, nothing) for wi in window_infos])
+        if isempty(timings)
+            nothing
+        else
+            sum_bytes = sum(t[:bytes_march_est] for t in timings)
+            sum_march = sum(t[:march_gpu_s] for t in timings)
+            Dict{Symbol, Any}(
+                :setup_s         => sum(t[:setup_s]       for t in timings),
+                :march_gpu_s     => sum_march,
+                :march_wall_s    => sum(t[:march_wall_s]   for t in timings),
+                :download_s      => sum(t[:download_s]     for t in timings),
+                :bandwidth_GBps  => sum_march > 0 ? sum_bytes / sum_march / 1e9 : 0.0,
+                :fft_s           => all(!isnothing(t[:fft_s]) for t in timings) ? sum(t[:fft_s] for t in timings) : nothing,
+                :elementwise_s   => all(!isnothing(t[:elementwise_s]) for t in timings) ? sum(t[:elementwise_s] for t in timings) : nothing,
+                :nrows           => sum(t[:nrows]          for t in timings),
+                :nfreq           => first(timings)[:nfreq],
+                :padded_ny       => first(timings)[:padded_ny],
+                :axial_substeps  => first(timings)[:axial_substeps],
+                :bytes_march_est => sum_bytes,
+                :window_count    => length(timings),
+            )
+        end
+    end
+
     info = Dict{Symbol, Any}(
         :frequencies => get(first_info, :frequencies, Float64[]),
         :frequency_bins => get(first_info, :frequency_bins, Int[]),
@@ -592,6 +628,7 @@ function reconstruct_pam_windowed(
         :skipped_window_ranges => skipped_ranges,
         :window_infos => window_infos,
         :accumulation => :intensity,
+        :gpu_timing => agg_gpu_timing,
     )
     _pam_progress(
         show_progress,
