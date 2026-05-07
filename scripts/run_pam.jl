@@ -794,10 +794,10 @@ function run_pam_case_3d(
         :pam_hasa => pam_hasa,
         :geo_info => geo_info,
         :hasa_info => hasa_info,
-        :stats_geo => analyse_pam_3d(pam_geo, grid, cfg, sources),
-        :stats_hasa => analyse_pam_3d(pam_hasa, grid, cfg, sources),
+        :stats_geo => any(s -> s isa BubbleCluster3D, sources) ? Dict{Symbol,Any}() : analyse_pam_3d(pam_geo, grid, cfg, sources),
+        :stats_hasa => any(s -> s isa BubbleCluster3D, sources) ? Dict{Symbol,Any}() : analyse_pam_3d(pam_hasa, grid, cfg, sources),
         :reconstruction_frequencies => recon_freqs,
-        :analysis_mode => :localization,
+        :analysis_mode => any(s -> s isa BubbleCluster3D, sources) ? :detection : :localization,
         :analysis_source_count => length(sources),
         :reconstruction_mode => recon_mode,
         :window_config => TranscranialFUS._window_config_info(effective_window_config),
@@ -1468,6 +1468,23 @@ function source_summary(src::PointSource3D)
     )
 end
 
+function source_summary(src::BubbleCluster3D)
+    return Dict(
+        "kind" => "bubble3d",
+        "depth_m" => src.depth,
+        "lateral_y_m" => src.lateral_y,
+        "lateral_z_m" => src.lateral_z,
+        "fundamental_hz" => src.fundamental,
+        "amplitude_pa" => src.amplitude,
+        "n_bubbles" => src.n_bubbles,
+        "harmonics" => src.harmonics,
+        "harmonic_amplitudes" => src.harmonic_amplitudes,
+        "harmonic_phases_rad" => src.harmonic_phases,
+        "gate_duration_s" => src.gate_duration,
+        "delay_s" => src.delay,
+    )
+end
+
 opts, provided_keys = parse_cli(ARGS)
 dimension = parse_dimension(opts["dimension"])
 source_model = parse_source_model(opts["source-model"])
@@ -1482,8 +1499,6 @@ if dimension == 3
     isempty(from_run_dir) || error("--from-run-dir is not implemented for 3D PAM yet.")
     source_model in (:point, :squiggle) ||
         error("3D PAM CLI supports --source-model=point or --source-model=squiggle.")
-    parse_analysis_mode(opts["analysis-mode"], source_model) == :localization ||
-        error("3D PAM CLI currently supports only localization analysis.")
     aberrator = parse_aberrator(opts["aberrator"])
     aberrator in (:none, :skull) || error("3D PAM CLI currently supports only --aberrator=none or --aberrator=skull.")
 
@@ -1630,7 +1645,7 @@ if dimension == 3
         ),
         "reconstruction_axial_step_m" => results[:geo_info][:axial_step],
         "reference_sound_speed_m_per_s" => results[:geo_info][:reference_sound_speed],
-        "analysis_mode" => "localization",
+        "analysis_mode" => String(results[:analysis_mode]),
         "simulation" => Dict(
             "receiver_row" => results[:simulation][:receiver_row],
             "receiver_cols_y" => [first(results[:simulation][:receiver_cols_y]), last(results[:simulation][:receiver_cols_y])],

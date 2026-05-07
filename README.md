@@ -359,6 +359,28 @@ julia --project=. scripts/run_pam.jl `
 
 ```
 
+3D squiggle vascular source (homogeneous water):
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=squiggle `
+  --anchors-mm=45:0:0 `
+  --vascular-length-mm=12 `
+  --vascular-squiggle-amplitude-mm=1.5 `
+  --vascular-squiggle-amplitude-x-mm=1.0 `
+  --squiggle-phase-x-deg=90 `
+  --harmonics=2,3,4 `
+  --harmonic-amplitudes=1.0,0.6,0.3 `
+  --aberrator=none `
+  --axial-mm=60 `
+  --transverse-mm=64 `
+  --t-max-us=250 `
+  --sim-mode=kwave `
+  --use-gpu=true `
+  --recon-progress=true
+```
+
 3D heterogeneous skull medium (CT-backed):
 
 ```bash
