@@ -184,10 +184,10 @@ function parse_aberrator(s::AbstractString)
     return value
 end
 
-function parse_sim_mode(s::AbstractString, aberrator::Symbol)
+function parse_sim_mode(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
     value in (:auto, :analytic, :kwave) || error("Unknown --sim-mode: $s (must be auto, analytic, or kwave)")
-    value == :auto && return aberrator in (:skull, :water) ? :kwave : :analytic
+    value == :auto && return :kwave
     return value
 end
 
@@ -1384,7 +1384,7 @@ if dimension == 3
     recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
     window_config = make_window_config(opts, reconstruction_mode)
 
-    sim_mode = parse_sim_mode(opts["sim-mode"], aberrator)
+    sim_mode = parse_sim_mode(opts["sim-mode"])
     sim_mode == :analytic && aberrator == :skull && error("--sim-mode=analytic is not compatible with --aberrator=skull; use --sim-mode=kwave.")
     results = run_pam_case_3d(
         c,
