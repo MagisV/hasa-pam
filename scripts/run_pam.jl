@@ -1406,6 +1406,71 @@ function save_best_threshold_volume_3d(path, intensity, grid, cfg, sources; thre
     )
 end
 
+function save_napari_npz_3d(out_dir, pam_geo, pam_hasa, c, rho, grid, cfg, sources; truth_radius)
+    np = PythonCall.pyimport("numpy")
+
+    depth_mm = Float32.(depth_coordinates_3d(cfg) .* 1e3)
+    y_mm     = Float32.(collect(grid.y) .* 1e3)
+    z_mm     = Float32.(collect(grid.z) .* 1e3)
+
+    ref = max(maximum(Float64.(pam_hasa)), eps(Float64))
+    hasa_norm  = Float32.(Float64.(pam_hasa) ./ ref)
+    geo_norm   = Float32.(Float64.(pam_geo)  ./ ref)
+    c_vol      = Float32.(c)
+    rho_vol    = Float32.(rho)
+    truth_mask = Float32.(pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius))
+
+    triples = source_triples_mm(sources)
+    src_depth = Float32[t[1] for t in triples]
+    src_y     = Float32[t[2] for t in triples]
+    src_z     = Float32[t[3] for t in triples]
+
+    # voxel spacing in mm for napari scale parameter: (depth, y, z)
+    scale = [Float64(cfg.dx * 1e3), Float64(cfg.dy * 1e3), Float64(cfg.dz * 1e3)]
+
+    npz_path = joinpath(out_dir, "napari_data.npz")
+    np.savez(
+        npz_path,
+        hasa        = hasa_norm,
+        geometric   = geo_norm,
+        sound_speed = c_vol,
+        density     = rho_vol,
+        truth_mask  = truth_mask,
+        depth_mm    = depth_mm,
+        y_mm        = y_mm,
+        z_mm        = z_mm,
+        src_depth_mm = src_depth,
+        src_y_mm     = src_y,
+        src_z_mm     = src_z,
+        scale        = Float64.(scale),
+    )
+
+    py_script = """
+import numpy as np, napari, sys
+
+data = np.load(r\"$(replace(npz_path, "\\" => "\\\\"))\")
+scale = tuple(data[\"scale\"])   # (depth_mm, y_mm, z_mm)
+
+viewer = napari.Viewer(title=\"PAM 3D: $(basename(out_dir))\")
+viewer.add_image(data[\"hasa\"],        name=\"HASA (norm)\",       scale=scale, colormap=\"inferno\",  opacity=0.9)
+viewer.add_image(data[\"geometric\"],   name=\"Geometric (norm)\",  scale=scale, colormap=\"viridis\", opacity=0.5, visible=False)
+viewer.add_image(data[\"sound_speed\"], name=\"Sound speed [m/s]\", scale=scale, colormap=\"gray\",    opacity=0.35, visible=False)
+viewer.add_image(data[\"density\"],     name=\"Density [kg/m3]\",   scale=scale, colormap=\"gray\",    opacity=0.35, visible=False)
+viewer.add_image(data[\"truth_mask\"],  name=\"Truth mask\",        scale=scale, colormap=\"green\",   opacity=0.25)
+
+pts = np.stack([data[\"src_depth_mm\"], data[\"src_y_mm\"], data[\"src_z_mm\"]], axis=1)
+viewer.add_points(pts, name=\"Sources\", size=1.5, face_color=\"red\", symbol=\"cross\")
+
+napari.run()
+"""
+    open(joinpath(out_dir, "view_pam.py"), "w") do io
+        write(io, py_script)
+    end
+
+    println("Saved napari data → $npz_path")
+    println("  Open with:  python $(joinpath(out_dir, "view_pam.py"))")
+end
+
 function compact_window_info(info)
     haskey(info, :used_window_count) || return nothing
     range_pairs(ranges) = [[first(range), last(range)] for range in ranges]
@@ -1415,12 +1480,12 @@ function compact_window_info(info)
         "skipped_window_count" => info[:skipped_window_count],
         "window_samples" => info[:window_samples],
         "hop_samples" => info[:hop_samples],
-        "effective_window_duration_s" => info[:effective_window_duration_s],
-        "effective_hop_s" => info[:effective_hop_s],
+        "effective_window_duration_s" => get(info, :effective_window_duration_s, nothing),
+        "effective_hop_s" => get(info, :effective_hop_s, nothing),
         "energy_threshold" => info[:energy_threshold],
         "used_window_ranges" => range_pairs(info[:used_window_ranges]),
         "skipped_window_ranges" => range_pairs(info[:skipped_window_ranges]),
-        "accumulation" => String(info[:accumulation]),
+        "accumulation" => haskey(info, :accumulation) ? String(info[:accumulation]) : nothing,
     )
 end
 
@@ -1662,6 +1727,17 @@ if dimension == 3
 
     clusters = sources
     @save joinpath(out_dir, "result.jld2") c rho cfg clusters results medium_info
+
+    save_napari_npz_3d(
+        out_dir,
+        results[:pam_geo],
+        results[:pam_hasa],
+        c, rho,
+        results[:kgrid],
+        cfg,
+        sources;
+        truth_radius=detection_truth_radius_m,
+    )
 
     println("Saved 3D PAM outputs to $out_dir")
     exit()

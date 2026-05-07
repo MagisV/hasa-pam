@@ -1,6 +1,6 @@
 name = "TranscranialFUS"
 uuid = "a2de8f33-df8e-4198-bbcc-8a183cd2f9f0"
-authors = ["OpenAI Codex"]
+authors = ["Valentin Magis, Codex, Claude"]
 version = "0.1.0"
 
 [deps]
