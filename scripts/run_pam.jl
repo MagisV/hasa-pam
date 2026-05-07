@@ -81,8 +81,10 @@ function parse_cli(args)
         "delays-us" => "0",
         "vascular-length-mm" => "12",
         "vascular-squiggle-amplitude-mm" => "1.5",
+        "vascular-squiggle-amplitude-x-mm" => "1.0",
         "vascular-squiggle-wavelength-mm" => "8",
         "vascular-squiggle-slope" => "0.0",
+        "squiggle-phase-x-deg" => "90",
         "vascular-source-spacing-mm" => "0.8",
         "vascular-position-jitter-mm" => "0.15",
         "vascular-min-separation-mm" => "0.3",
@@ -148,6 +150,9 @@ function apply_model_defaults!(opts, provided_keys::Set{String})
     if dimension == 3
         !("source-model" in provided_keys) && (opts["source-model"] = "point")
         !("sources-mm" in provided_keys) && (opts["sources-mm"] = "30:0:0")
+        !("anchors-mm" in provided_keys) && (opts["anchors-mm"] = "45:0:0")
+        !("vascular-squiggle-amplitude-x-mm" in provided_keys) && (opts["vascular-squiggle-amplitude-x-mm"] = "1.0")
+        !("squiggle-phase-x-deg" in provided_keys) && (opts["squiggle-phase-x-deg"] = "90")
         !("frequency-mhz" in provided_keys) && (opts["frequency-mhz"] = "0.5")
         !("recon-bandwidth-khz" in provided_keys) && (opts["recon-bandwidth-khz"] = "0")
         !("receiver-aperture-mm" in provided_keys) && (opts["receiver-aperture-mm"] = "full")
@@ -410,6 +415,109 @@ function parse_point_sources_3d(opts)
         "delays_s" => delays_us .* 1e-6,
         "num_cycles" => num_cycles,
         "random_seed" => parse(Int, opts["random-seed"]),
+    )
+end
+
+centerlines_m_3d(centerlines) = [[[p[1], p[2], p[3]] for p in line] for line in centerlines]
+
+function parse_squiggle_sources_3d(opts, cfg::PAMConfig3D)
+    anchors = parse_coordinate_triples_mm(opts["anchors-mm"], "anchors-mm")
+    f0 = parse(Float64, opts["fundamental-mhz"]) * 1e6
+    harmonics = parse_int_list(opts["harmonics"])
+    isempty(harmonics) && error("--harmonics must be a non-empty integer list.")
+    harmonic_amplitudes = parse_float_list(opts["harmonic-amplitudes"])
+    length(harmonic_amplitudes) == length(harmonics) ||
+        error("--harmonic-amplitudes must have the same length as --harmonics ($(length(harmonics))).")
+
+    n_anchors = length(anchors)
+    n_bubbles_per = expand_source_values(parse_float_list(opts["n-bubbles"]), n_anchors, 10.0)
+    delays_us = expand_source_values(parse_float_list(opts["delays-us"]), n_anchors, 0.0)
+    max_sources_raw = parse(Int, opts["vascular-max-sources-per-anchor"])
+    max_sources = max_sources_raw <= 0 ? nothing : max_sources_raw
+    phase_mode = Symbol(replace(lowercase(strip(opts["phase-mode"])), "-" => "_"))
+
+    sources = EmissionSource3D[]
+    all_centerlines_m = Any[]
+    anchors_meta = Dict{String, Any}[]
+    rng = Random.MersenneTwister(parse(Int, opts["random-seed"]))
+    half_y = cfg.transverse_dim_y / 2
+    half_z = cfg.transverse_dim_z / 2
+
+    for (idx, anchor) in pairs(anchors)
+        anchor_sources, anchor_meta = make_squiggle_bubble_sources_3d(
+            [anchor];
+            root_length = parse(Float64, opts["vascular-length-mm"]) * 1e-3,
+            squiggle_amplitude_y = parse(Float64, opts["vascular-squiggle-amplitude-mm"]) * 1e-3,
+            squiggle_amplitude_x = parse(Float64, opts["vascular-squiggle-amplitude-x-mm"]) * 1e-3,
+            squiggle_wavelength = parse(Float64, opts["vascular-squiggle-wavelength-mm"]) * 1e-3,
+            squiggle_phase_x = parse(Float64, opts["squiggle-phase-x-deg"]) * pi / 180,
+            squiggle_slope_x = parse(Float64, opts["vascular-squiggle-slope"]),
+            squiggle_slope_y = 0.0,
+            source_spacing = parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
+            position_jitter = parse(Float64, opts["vascular-position-jitter-mm"]) * 1e-3,
+            min_separation = parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
+            max_sources_per_anchor = max_sources,
+            depth_bounds = (0.0, Inf),
+            lateral_y_bounds = (-half_y, half_y),
+            lateral_z_bounds = (-half_z, half_z),
+            fundamental = f0,
+            amplitude = parse(Float64, opts["amplitude-pa"]),
+            n_bubbles = n_bubbles_per[idx],
+            harmonics = harmonics,
+            harmonic_amplitudes = harmonic_amplitudes,
+            gate_duration = parse(Float64, opts["gate-us"]) * 1e-6,
+            taper_ratio = parse(Float64, opts["taper-ratio"]),
+            delay = delays_us[idx] * 1e-6,
+            phase_mode = phase_mode,
+            phase_jitter = parse(Float64, opts["phase-jitter-rad"]),
+            transducer_depth = -parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
+            transducer_y = 0.0,
+            transducer_z = 0.0,
+            c0 = cfg.c0,
+            rng = rng,
+        )
+        append!(sources, anchor_sources)
+        anchor_cls = centerlines_m_3d(anchor_meta[:centerlines])
+        append!(all_centerlines_m, anchor_cls)
+        push!(anchors_meta, Dict(
+            "anchor_m" => collect(anchor),
+            "source_count" => length(anchor_sources),
+            "centerlines_m" => anchor_cls,
+        ))
+    end
+
+    return sources, Dict{String, Any}(
+        "source_model" => "squiggle3d",
+        "anchor_clusters_m" => [collect(anchor) for anchor in anchors],
+        "n_anchor_clusters" => length(anchors),
+        "n_emission_sources" => length(sources),
+        "physical_source_count" => length(sources),
+        "emission_event_count" => length(sources),
+        "activity_model" => Dict("activity_mode" => "random_phase_per_window"),
+        "phase_mode" => String(phase_mode),
+        "fundamental_hz" => f0,
+        "harmonics" => harmonics,
+        "harmonic_amplitudes" => harmonic_amplitudes,
+        "gate_duration_s" => parse(Float64, opts["gate-us"]) * 1e-6,
+        "phase_jitter_rad" => parse(Float64, opts["phase-jitter-rad"]),
+        "random_seed" => parse(Int, opts["random-seed"]),
+        "n_bubbles_per_cluster" => n_bubbles_per,
+        "delays_s" => delays_us .* 1e-6,
+        "squiggle" => Dict(
+            "length_m" => parse(Float64, opts["vascular-length-mm"]) * 1e-3,
+            "squiggle_amplitude_y_m" => parse(Float64, opts["vascular-squiggle-amplitude-mm"]) * 1e-3,
+            "squiggle_amplitude_x_m" => parse(Float64, opts["vascular-squiggle-amplitude-x-mm"]) * 1e-3,
+            "squiggle_wavelength_m" => parse(Float64, opts["vascular-squiggle-wavelength-mm"]) * 1e-3,
+            "squiggle_phase_x_deg" => parse(Float64, opts["squiggle-phase-x-deg"]),
+            "squiggle_slope" => parse(Float64, opts["vascular-squiggle-slope"]),
+            "source_spacing_m" => parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
+            "position_jitter_m" => parse(Float64, opts["vascular-position-jitter-mm"]) * 1e-3,
+            "min_separation_m" => parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
+            "max_sources_per_anchor" => max_sources_raw,
+            "truth_radius_m" => parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
+            "centerlines_m" => all_centerlines_m,
+            "anchors" => anchors_meta,
+        ),
     )
 end
 
@@ -1372,7 +1480,8 @@ boundary_threshold_ratios = parse_threshold_ratios(opts["boundary-threshold-rati
 
 if dimension == 3
     isempty(from_run_dir) || error("--from-run-dir is not implemented for 3D PAM yet.")
-    source_model == :point || error("3D PAM CLI currently supports only --source-model=point.")
+    source_model in (:point, :squiggle) ||
+        error("3D PAM CLI supports --source-model=point or --source-model=squiggle.")
     parse_analysis_mode(opts["analysis-mode"], source_model) == :localization ||
         error("3D PAM CLI currently supports only localization analysis.")
     aberrator = parse_aberrator(opts["aberrator"])
@@ -1401,7 +1510,11 @@ if dimension == 3
         axial_gain_power=parse(Float64, opts["axial-gain-power"]),
     )
 
-    sources, emission_meta = parse_point_sources_3d(opts)
+    sources, emission_meta = if source_model == :point
+        parse_point_sources_3d(opts)
+    else
+        parse_squiggle_sources_3d(opts, cfg_base)
+    end
     bottom_margin_m = parse(Float64, opts["bottom-margin-mm"]) * 1e-3
     cfg = fit_pam_config_3d(cfg_base, sources; min_bottom_margin=bottom_margin_m)
 
@@ -1652,7 +1765,8 @@ else
             "lens-depth-mm", "lens-lateral-mm", "lens-axial-radius-mm", "lens-lateral-radius-mm",
             "aberrator-c", "aberrator-rho", "phase-mode", "phase-jitter-rad", "random-seed",
             "transducer-mm", "delays-us", "vascular-length-mm", "vascular-squiggle-amplitude-mm",
-            "vascular-squiggle-wavelength-mm", "vascular-squiggle-slope",
+            "vascular-squiggle-amplitude-x-mm", "vascular-squiggle-wavelength-mm",
+            "vascular-squiggle-slope", "squiggle-phase-x-deg",
             "vascular-source-spacing-mm", "vascular-position-jitter-mm",
             "vascular-min-separation-mm", "vascular-max-sources-per-anchor",
             "source-phase-mode", "n-realizations", "frequency-jitter-percent",
