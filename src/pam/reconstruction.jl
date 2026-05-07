@@ -162,12 +162,28 @@ function _accum_abs2_sum_batched!(dst, src, nfreq_per_w)
     return
 end
 
-# Accepts W windows simultaneously; spectral operators are tiled W times along the
-# frequency dimension so all W marches share a single set of kernel launches.
-# Returns a length-W vector of intensity matrices and one timing dict for the batch.
-function _reconstruct_pam_cuda(
-    rf_windows::AbstractVector{<:AbstractMatrix{<:Real}},
-    t0_windows::AbstractVector{<:Real},
+# Precomputed GPU arrays shared across all window batches of a single reconstruction.
+# Built once by _pam_cuda_setup; passed into every _reconstruct_pam_cuda call.
+struct PAMCUDASetup
+    eta_yx_d          # (padded_ny, nx) Float32 — speed-contrast field
+    prop_d1           # (padded_ny, nfreq) ComplexF32 — propagator, un-tiled
+    corr_d1           # (padded_ny, nfreq) ComplexF32 — correction term, un-tiled
+    weight_d1         # (padded_ny, nfreq) Float32    — Tukey taper, un-tiled
+    prop_n_weight_d1  # (padded_ny, nfreq) ComplexF32 — prop^n*weight, un-tiled
+    k0_sq_d1          # (1, nfreq) Float32            — k0² per frequency
+    selected_freqs::Vector{Float64}
+    selected_bins::Vector{Int}
+    crop_range::UnitRange{Int}
+    nfreq::Int
+    padded_ny::Int
+    nx::Int
+    rr::Int
+    row_stop::Int
+    axial_substeps::Int
+    setup_s::Float64
+end
+
+function _pam_cuda_setup(
     c_padded::AbstractMatrix{<:Real},
     cfg::PAMConfig,
     selected_freqs::AbstractVector{<:Real},
@@ -180,33 +196,15 @@ function _reconstruct_pam_cuda(
     c0::Float64,
     effective_axial_step::Float64,
     axial_substeps::Int,
-    corrected::Bool,
-    recon_label::AbstractString,
-    show_progress::Bool,
-    benchmark::Bool,
 )
     _assert_pam_cuda_available()
-    fn_start = time()
-    W     = length(rf_windows)
-    nfreq = length(selected_freqs)
-    nfreq_W = nfreq * W
-    let dev = CUDA.device()
-        println(
-            "[ PAM ] $recon_label: GPU $(CUDA.name(dev)) (device $(CUDA.deviceid(dev))), " *
-            "$(_PAM_CUDA_PRECISION) arithmetic, $nfreq freq bins × $W windows batched",
-        )
-        flush(stdout)
-    end
-
-    T = _PAM_CUDA_PRECISION
+    t0 = time()
+    T  = _PAM_CUDA_PRECISION
     CT = _PAM_CUDA_COMPLEX
-    # Speed-contrast field transposed to padded_ny × nx for contiguous column access.
-    eta_yx_d = CUDA.CuArray(T.(permutedims(1 .- (c0 ./ c_padded) .^ 2)))
-    # Intensity accumulator: (padded_ny, W, nx) — view(:, :, row) is a contiguous
-    # (padded_ny × W) slice, required by _accum_abs2_sum_batched!.
-    intensity_yWx_d = CUDA.zeros(T, padded_ny, W, nx)
+    nfreq = length(selected_freqs)
 
-    # Build per-frequency spectral arrays on CPU, then tile W times and upload once.
+    eta_yx_d = CUDA.CuArray(T.(permutedims(1 .- (c0 ./ c_padded) .^ 2)))
+
     k = _fft_wavenumbers(padded_ny, cfg.dz)
     prop_cpu          = zeros(ComplexF64, padded_ny, nfreq)
     corr_cpu          = zeros(ComplexF64, padded_ny, nfreq)
@@ -238,22 +236,71 @@ function _reconstruct_pam_cuda(
         k0_sq_cpu[f]             = k0^2
     end
 
-    # Tile W times: every window shares the same spectral operators.
-    prop_d          = CUDA.CuArray(CT.(repeat(prop_cpu,          1, W)))
-    corr_d          = CUDA.CuArray(CT.(repeat(corr_cpu,          1, W)))
-    weight_d        = CUDA.CuArray(T.(repeat(weight_cpu,         1, W)))
+    prop_d1          = CUDA.CuArray(CT.(prop_cpu))
+    corr_d1          = CUDA.CuArray(CT.(corr_cpu))
+    weight_d1        = CUDA.CuArray(T.(weight_cpu))
+    prop_n_weight_d1 = CUDA.CuArray(CT.(prop_n_weight_cpu))
+    k0_sq_d1         = reshape(CUDA.CuArray(T.(k0_sq_cpu)), 1, nfreq)
+
+    return PAMCUDASetup(
+        eta_yx_d, prop_d1, corr_d1, weight_d1, prop_n_weight_d1, k0_sq_d1,
+        Vector{Float64}(selected_freqs), Vector{Int}(selected_bins),
+        crop_range, nfreq, padded_ny, nx, rr, row_stop, axial_substeps,
+        time() - t0,
+    )
+end
+
+# Runs one batch of W windows using a pre-built PAMCUDASetup.
+# Returns a length-W vector of intensity matrices and one timing dict.
+function _reconstruct_pam_cuda(
+    setup::PAMCUDASetup,
+    rf_windows::AbstractVector{<:AbstractMatrix{<:Real}},
+    t0_windows::AbstractVector{<:Real},
+    corrected::Bool,
+    recon_label::AbstractString,
+    show_progress::Bool,
+    benchmark::Bool,
+)
+    fn_start = time()
+    W       = length(rf_windows)
+    nfreq   = setup.nfreq
+    nfreq_W = nfreq * W
+    padded_ny     = setup.padded_ny
+    nx            = setup.nx
+    rr            = setup.rr
+    row_stop      = setup.row_stop
+    axial_substeps = setup.axial_substeps
+    crop_range    = setup.crop_range
+
+    T  = _PAM_CUDA_PRECISION
+    CT = _PAM_CUDA_COMPLEX
+
+    let dev = CUDA.device()
+        println(
+            "[ PAM ] $recon_label: GPU $(CUDA.name(dev)) (device $(CUDA.deviceid(dev))), " *
+            "$(_PAM_CUDA_PRECISION) arithmetic, $nfreq freq bins × $W windows batched",
+        )
+        flush(stdout)
+    end
+
+    # Tile the un-tiled base operators W times along the frequency dimension.
+    prop_d          = repeat(setup.prop_d1,          1, W)
+    corr_d          = repeat(setup.corr_d1,          1, W)
+    weight_d        = repeat(setup.weight_d1,        1, W)
     prop_weight_d   = prop_d .* weight_d
     corr_weight_d   = corr_d .* weight_d
-    prop_n_weight_d = CUDA.CuArray(CT.(repeat(prop_n_weight_cpu, 1, W)))
-    k0_sq_d         = reshape(CUDA.CuArray(T.(repeat(k0_sq_cpu, W))), 1, nfreq_W)
+    prop_n_weight_d = repeat(setup.prop_n_weight_d1, 1, W)
+    k0_sq_d         = reshape(repeat(setup.k0_sq_d1, 1, W), 1, nfreq_W)
+
+    # Intensity accumulator: (padded_ny, W, nx) — view(:, :, row) is contiguous.
+    intensity_yWx_d = CUDA.zeros(T, padded_ny, W, nx)
 
     # Build batched initial conditions: (padded_ny, nfreq*W).
-    # Window w occupies columns [(w-1)*nfreq+1 : w*nfreq].
     p0_d = CUDA.zeros(CT, padded_ny, nfreq_W)
     for (w, (rf_w, t0_w)) in enumerate(zip(rf_windows, t0_windows))
-        rf_fft_w = fft(CUDA.CuArray(T.(rf_w)), 2)
+        rf_fft_w   = fft(CUDA.CuArray(T.(rf_w)), 2)
         col_offset = (w - 1) * nfreq
-        for (f, (freq, bin)) in enumerate(zip(selected_freqs, selected_bins))
+        for (f, (freq, bin)) in enumerate(zip(setup.selected_freqs, setup.selected_bins))
             phase = CT(cis(-T(2 * pi) * T(freq) * T(t0_w)))
             p0_d[crop_range, col_offset + f] .= rf_fft_w[:, bin] .* phase
         end
@@ -269,14 +316,15 @@ function _reconstruct_pam_cuda(
     p_space_d = similar(current_d)
     p_row_d   = similar(current_d)
 
-    t_setup = time() - fn_start
-
+    t_batch_setup = time() - fn_start
     t_fft_s = 0.0
     t_ew_s  = 0.0
     march_wall_start = time()
 
     nthreads = min(padded_ny, 512)
     nblocks  = cld(padded_ny, nthreads)
+
+    eta_yx_d = setup.eta_yx_d
 
     if benchmark
         for row in (rr + 1):row_stop
@@ -330,8 +378,6 @@ function _reconstruct_pam_cuda(
     end
     march_wall_s = time() - march_wall_start
 
-    # Bandwidth estimate: same pass counts as before, but the working-set width
-    # is now nfreq*W columns, so BW scales proportionally.
     passes_substep  = 13
     passes_last_row = corrected ? 19 : 9
     bytes_march = Int64(row_stop - rr) * (
@@ -341,8 +387,7 @@ function _reconstruct_pam_cuda(
     bandwidth_GBps = bytes_march / march_gpu_s / 1e9
 
     t_download = @elapsed begin
-        # permutedims (1,2,3)→(1,3,2): (padded_ny,W,nx) → (padded_ny,nx,W)
-        raw_all = permutedims(Array(intensity_yWx_d), (1, 3, 2))
+        raw_all = permutedims(Array(intensity_yWx_d), (1, 3, 2))  # (padded_ny,W,nx)→(padded_ny,nx,W)
     end
     raws = [Float64.(permutedims(raw_all[:, :, w])) for w in 1:W]
 
@@ -355,7 +400,7 @@ function _reconstruct_pam_cuda(
     )
 
     timing = Dict{Symbol, Any}(
-        :setup_s         => t_setup,
+        :setup_s         => setup.setup_s + t_batch_setup,
         :march_gpu_s     => march_gpu_s,
         :march_wall_s    => march_wall_s,
         :download_s      => t_download,
@@ -418,25 +463,13 @@ function reconstruct_pam(
 
     gpu_timing = nothing
     intensity_padded = if use_gpu
+        setup = _pam_cuda_setup(
+            c_padded, cfg, selected_freqs, selected_bins,
+            crop_range, nx, padded_ny, rr, row_stop,
+            c0, effective_axial_step, axial_substeps,
+        )
         raws, timing = _reconstruct_pam_cuda(
-            [rf],
-            [t0],
-            c_padded,
-            cfg,
-            selected_freqs,
-            selected_bins,
-            crop_range,
-            nx,
-            padded_ny,
-            rr,
-            row_stop,
-            c0,
-            effective_axial_step,
-            axial_substeps,
-            corrected,
-            recon_label,
-            show_progress,
-            benchmark,
+            setup, [rf], [t0], corrected, recon_label, show_progress, benchmark,
         )
         gpu_timing = timing
         raws[1]
@@ -582,7 +615,6 @@ function reconstruct_pam_windowed(
     skipped_energy = Float64[]
 
     if use_gpu && window_batch > 1
-        # Compute shared setup once; all windows share the same medium, cfg, and frequencies.
         # Bin indices depend on the FFT length (window_samples), not the full RF length.
         ref_win_rf = zeros(Float64, ny, window_samples)
         sel_freqs, sel_bins = _select_frequency_bins(ref_win_rf, cfg.dt, frequencies; bandwidth=bandwidth)
@@ -596,6 +628,13 @@ function reconstruct_pam_windowed(
         b_substeps    = _pam_axial_substeps(cfg.dx, b_target_step)
         b_eff_step    = cfg.dx / b_substeps
         b_rr          = receiver_row(cfg)
+
+        # Build GPU setup once — eta_yx_d + spectral operators shared across all batches.
+        gpu_setup = _pam_cuda_setup(
+            b_c_padded, cfg, sel_freqs, sel_bins,
+            b_crop, nx, b_padded_ny, b_rr, nx,
+            b_c0, b_eff_step, b_substeps,
+        )
 
         # Partition windows into qualifying (batched) and skipped.
         qual_ranges  = UnitRange{Int}[]
@@ -628,11 +667,7 @@ function reconstruct_pam_windowed(
 
             batch_start_t = time()
             b_raws, b_timing = _reconstruct_pam_cuda(
-                b_rf_wins, b_t0s, b_c_padded, cfg,
-                sel_freqs, sel_bins, b_crop,
-                nx, b_padded_ny, b_rr, nx,
-                b_c0, b_eff_step, b_substeps,
-                corrected, recon_label, show_progress, benchmark,
+                gpu_setup, b_rf_wins, b_t0s, corrected, recon_label, show_progress, benchmark,
             )
 
             for (raw_w, rng, en) in zip(b_raws, b_ranges, b_energies)

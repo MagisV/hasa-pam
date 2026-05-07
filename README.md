@@ -316,8 +316,8 @@ julia --project=. scripts/run_pam.jl `
   --recon-window-us=20 `
   --recon-progress=true `
   --use-gpu=true `
-  --window-batch=4 `
-  --benchmark=true
+  --window-batch=8 `
+  --benchmark=false
 ```
 
 The PAM run scripts write:
