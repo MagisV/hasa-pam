@@ -338,9 +338,8 @@ julia --project=. scripts/run_pam.jl `
   --dimension=3 `
   --source-model=point `
   --sources-mm=30:2:-1 `
-  --aberrator=water `
+  --aberrator=none `
   --use-gpu=true `
-  --sim-mode=kwave
 ```
 
 ```bash
@@ -358,6 +357,26 @@ julia --project=. scripts/run_pam.jl `
   --use-gpu=true `
   --recon-progress=true
 
+```
+
+3D heterogeneous skull medium (CT-backed):
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=point `
+  --sources-mm=50:2:-1 `
+  --frequency-mhz=0.5 `
+  --num-cycles=5 `
+  --aberrator=skull `
+  --slice-index=250 `
+  --skull-transducer-distance-mm=30 `
+  --axial-mm=80 `
+  --transverse-mm=64 `
+  --t-max-us=80 `
+  --receiver-aperture-mm=full `
+  --use-gpu=true `
+  --recon-progress=true
 ```
 
 The PAM run scripts write:

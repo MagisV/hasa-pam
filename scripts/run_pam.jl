@@ -796,11 +796,13 @@ function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, sources, stat
 
     ax_geo = Axis(fig[2, 1]; title="Geometric ASA PAM", xlabel="Lateral position [mm]", ylabel="Depth below receiver [mm]", aspect=DataAspect())
     hm_geo = heatmap!(ax_geo, lateral_mm, depth_mm, map_db(pam_geo, map_ref)'; colormap=:viridis, colorrange=(-30, 0))
+    overlay_skull_2d!(ax_geo, c, lateral_mm, depth_mm)
     scatter_sources!(ax_geo, sources)
     Colorbar(fig[2, 2], hm_geo; label="dB")
 
     ax_hasa = Axis(fig[2, 3]; title="Corrected HASA PAM", xlabel="Lateral position [mm]", ylabel="Depth below receiver [mm]", aspect=DataAspect())
     hm_hasa = heatmap!(ax_hasa, lateral_mm, depth_mm, map_db(pam_hasa, map_ref)'; colormap=:viridis, colorrange=(-30, 0))
+    overlay_skull_2d!(ax_hasa, c, lateral_mm, depth_mm)
     scatter_sources!(ax_hasa, sources)
     Colorbar(fig[2, 4], hm_hasa; label="dB")
 
@@ -885,6 +887,34 @@ function best_threshold_entry_3d(stats)
     return best
 end
 
+function overlay_skull_2d!(ax, c, xvals, yvals; transpose_matrix=true)
+    skull_mask = skull_mask_from_c_columnwise(c; mask_outside=false)
+    any(skull_mask) || return nothing
+    c_max = Float64(maximum(c[skull_mask]))
+    overlay = fill(NaN, size(c))
+    overlay[skull_mask] .= Float64.(c[skull_mask]) ./ c_max
+    mat = transpose_matrix ? overlay' : overlay
+    heatmap!(ax, xvals, yvals, mat; colormap=:grays, alpha=0.35, colorrange=(0, 1), nan_color=CairoMakie.RGBAf(0, 0, 0, 0))
+    return nothing
+end
+
+function _c_slice_for_projection(c::AbstractArray{<:Real, 3}, projection::Symbol)
+    if projection == :depth_y
+        return dropdims(maximum(c; dims=3), dims=3)
+    elseif projection == :depth_z
+        return dropdims(maximum(c; dims=2), dims=2)
+    else  # :y_z
+        return dropdims(maximum(c; dims=1), dims=1)
+    end
+end
+
+function overlay_skull_3d_projection!(ax, c::AbstractArray{<:Real, 3}, xvals, yvals, projection::Symbol)
+    c2d = _c_slice_for_projection(c, projection)
+    # :y_z projection is not transposed (matches _projection_heatmap_matrix_3d convention)
+    overlay_skull_2d!(ax, c2d, xvals, yvals; transpose_matrix=(projection != :y_z))
+    return nothing
+end
+
 function lines_centerlines!(ax, centerlines; color=(:black, 0.45), linewidth=2)
     isnothing(centerlines) && return nothing
     for line in centerlines
@@ -907,11 +937,13 @@ function add_threshold_panel!(
     global_ref,
     truth_mask,
     truth_centerlines,
+    c=nothing,
 )
     depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
     lateral_mm = kgrid.y_vec .* 1e3
     ax = Axis(fig[row, 1]; title=title, xlabel="Lateral [mm]", ylabel="Depth [mm]", aspect=DataAspect())
     hm = heatmap!(ax, lateral_mm, depth_mm, Float64.(intensity ./ global_ref)'; colormap=:viridis, colorrange=(0, 1))
+    !isnothing(c) && overlay_skull_2d!(ax, c, lateral_mm, depth_mm)
     if !isnothing(truth_mask) && any(truth_mask) && any(.!truth_mask)
         contour!(ax, lateral_mm, depth_mm, Float64.(truth_mask)'; levels=[0.5], color=(:white, 0.85), linewidth=2.3, linestyle=:dash)
     end
@@ -1006,6 +1038,7 @@ function add_projection_panel_3d!(
     threshold_ratios,
     colors,
     global_ref,
+    c=nothing,
 )
     xvals, yvals, xlabel, ylabel = _projection_axes_3d(grid, cfg, projection)
     proj = _project3d_values(intensity, projection)
@@ -1019,6 +1052,7 @@ function add_projection_panel_3d!(
         colormap=:viridis,
         colorrange=(0, 1),
     )
+    !isnothing(c) && overlay_skull_3d_projection!(ax, c, xvals, yvals, projection)
     if any(truth_proj) && any(.!truth_proj)
         contour!(
             ax,
@@ -1065,7 +1099,7 @@ function add_threshold_table_3d!(fig, row, col, title, stats)
     Label(fig[row, col], title * "\n" * join(lines, "\n"); font="DejaVu Sans Mono", tellwidth=false, halign=:left)
 end
 
-function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, sources; threshold_ratios, truth_radius, truth_mask, truth_centerlines, frequencies)
+function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, sources; threshold_ratios, truth_radius, truth_mask, truth_centerlines, frequencies, c=nothing)
     global_ref = max(maximum(Float64.(pam_geo)), maximum(Float64.(pam_hasa)), eps(Float64))
     colors = [:red, :orange, :cyan, :magenta, :lime]
     while length(colors) < length(threshold_ratios)
@@ -1088,6 +1122,7 @@ function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, 
         global_ref=global_ref,
         truth_mask=truth_mask,
         truth_centerlines=truth_centerlines,
+        c=c,
     )
     add_threshold_panel!(
         fig,
@@ -1102,6 +1137,7 @@ function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, 
         global_ref=global_ref,
         truth_mask=truth_mask,
         truth_centerlines=truth_centerlines,
+        c=c,
     )
     Colorbar(fig[1:2, 2], hm; label="Norm. PAM intensity")
     legend_elements = [LineElement(color=colors[i], linewidth=3) for i in eachindex(threshold_ratios)]
@@ -1117,7 +1153,7 @@ function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, 
     )
 end
 
-function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg, sources; threshold_ratios, truth_radius)
+function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg, sources; threshold_ratios, truth_radius, c=nothing)
     truth_mask = pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius)
     geo_stats = threshold_detection_stats_3d(pam_geo, grid, cfg, sources; threshold_ratios=threshold_ratios, truth_radius=truth_radius, truth_mask=truth_mask)
     hasa_stats = threshold_detection_stats_3d(pam_hasa, grid, cfg, sources; threshold_ratios=threshold_ratios, truth_radius=truth_radius, truth_mask=truth_mask)
@@ -1143,6 +1179,7 @@ function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg
             threshold_ratios=threshold_ratios,
             colors=colors,
             global_ref=global_ref,
+            c=c,
         )
         add_projection_panel_3d!(
             fig, 2, col, "HASA: $(titles[projection])",
@@ -1151,6 +1188,7 @@ function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg
             threshold_ratios=threshold_ratios,
             colors=colors,
             global_ref=global_ref,
+            c=c,
         )
     end
     Colorbar(fig[1:2, 4], hm; label="Norm. PAM intensity")
@@ -1419,6 +1457,7 @@ if dimension == 3
         sources;
         threshold_ratios=boundary_threshold_ratios,
         truth_radius=detection_truth_radius_m,
+        c=c,
     )
     best_volume_path = joinpath(out_dir, "best_threshold_3d.png")
     best_volume_metrics = save_best_threshold_volume_3d(
@@ -1719,6 +1758,7 @@ activity_boundary_metrics = save_threshold_boundary_detection(
     truth_mask=detection_truth_mask,
     truth_centerlines=truth_centerlines,
     frequencies=recon_frequencies,
+    c=c,
 )
 
 summary = Dict(
