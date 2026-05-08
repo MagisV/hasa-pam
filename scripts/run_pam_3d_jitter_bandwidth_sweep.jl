@@ -77,6 +77,9 @@ function jitter_bandwidth_jobs(opts)
         ("fjitter05_bw40",   Dict("recon-bandwidth-khz" => "40",  "frequency-jitter-percent" => "0.5"), "0.5% frequency jitter with 40 kHz bands (under-matched)."),
         ("fjitter15_bw40",   Dict("recon-bandwidth-khz" => "40",  "frequency-jitter-percent" => "1.5"), "1.5% frequency jitter with 40 kHz bands (over-matched)."),
         ("fjitter1_bw20",    Dict("recon-bandwidth-khz" => "20",  "frequency-jitter-percent" => "1"),   "1% frequency jitter with 20 kHz bands."),
+        ("fjitter1_bw40_hop40", Dict("recon-bandwidth-khz" => "40", "frequency-jitter-percent" => "1", "recon-hop-us" => "40"), "1% jitter, 40 kHz, hop=40us (no overlap)."),
+        ("fjitter1_bw40_hop10", Dict("recon-bandwidth-khz" => "40", "frequency-jitter-percent" => "1", "recon-hop-us" => "10"), "1% jitter, 40 kHz, hop=10us (2x overlap)."),
+        ("fjitter1_bw40_hop5",  Dict("recon-bandwidth-khz" => "40", "frequency-jitter-percent" => "1", "recon-hop-us" => "5"),  "1% jitter, 40 kHz, hop=5us (4x overlap)."),
     ]
     return [sim_job(id, merge_args(base, args); note=note) for (id, args, note) in specs]
 end
