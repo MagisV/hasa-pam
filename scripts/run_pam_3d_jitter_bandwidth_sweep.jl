@@ -61,9 +61,22 @@ end
 function jitter_bandwidth_jobs(opts)
     base = jitter_bandwidth_base_args(opts)
     specs = [
-        ("fjitter10_bw80", Dict("recon-bandwidth-khz" => "80"), "10% frequency jitter with very tight harmonic search bands."),
-        ("fjitter10_bw200", Dict("recon-bandwidth-khz" => "200"), "10% frequency jitter with moderate harmonic search bands."),
-        ("fjitter10_bw400", Dict("recon-bandwidth-khz" => "400"), "10% frequency jitter with broad harmonic search bands."),
+        ("fjitter10_bw80",   Dict("recon-bandwidth-khz" => "80",  "frequency-jitter-percent" => "10"), "10% frequency jitter with very tight harmonic search bands."),
+        ("fjitter75_bw150",  Dict("recon-bandwidth-khz" => "150", "frequency-jitter-percent" => "7.5"), "7.5% frequency jitter with 150 kHz harmonic search bands."),
+        ("fjitter9_bw180",   Dict("recon-bandwidth-khz" => "180", "frequency-jitter-percent" => "9"),   "9% frequency jitter with 180 kHz harmonic search bands."),
+        ("fjitter10_bw200",  Dict("recon-bandwidth-khz" => "200", "frequency-jitter-percent" => "10"),  "10% frequency jitter with moderate harmonic search bands."),
+        ("fjitter11_bw220",  Dict("recon-bandwidth-khz" => "220", "frequency-jitter-percent" => "11"),  "11% frequency jitter with 220 kHz harmonic search bands."),
+        ("fjitter10_bw400",  Dict("recon-bandwidth-khz" => "400", "frequency-jitter-percent" => "10"),  "10% frequency jitter with broad harmonic search bands."),
+        ("fjitter4_bw80",    Dict("recon-bandwidth-khz" => "80",  "frequency-jitter-percent" => "4"),   "4% frequency jitter with 80 kHz bands (formula-matched)."),
+        ("fjitter20_bw80",   Dict("recon-bandwidth-khz" => "80",  "frequency-jitter-percent" => "20"),  "20% frequency jitter with tight 80 kHz bands (under-matched)."),
+        ("fjitter30_bw80",   Dict("recon-bandwidth-khz" => "80",  "frequency-jitter-percent" => "30"),  "30% frequency jitter with tight 80 kHz bands (heavily under-matched)."),
+        ("fjitter4_bw80",    Dict("recon-bandwidth-khz" => "80",  "frequency-jitter-percent" => "4"),   "4% frequency jitter with 80 kHz bands (formula-matched, clean timing run)."),
+        ("fjitter2_bw60",    Dict("recon-bandwidth-khz" => "60",  "frequency-jitter-percent" => "2"),   "2% frequency jitter with 60 kHz bands (under-matched, tight regime)."),
+        ("fjitter1_bw40",    Dict("recon-bandwidth-khz" => "40",  "frequency-jitter-percent" => "1"),   "1% frequency jitter with 40 kHz bands (tight regime)."),
+        ("fjitter05_bw20",   Dict("recon-bandwidth-khz" => "20",  "frequency-jitter-percent" => "0.5"), "0.5% frequency jitter with 20 kHz bands (very tight regime)."),
+        ("fjitter05_bw40",   Dict("recon-bandwidth-khz" => "40",  "frequency-jitter-percent" => "0.5"), "0.5% frequency jitter with 40 kHz bands (under-matched)."),
+        ("fjitter15_bw40",   Dict("recon-bandwidth-khz" => "40",  "frequency-jitter-percent" => "1.5"), "1.5% frequency jitter with 40 kHz bands (over-matched)."),
+        ("fjitter1_bw20",    Dict("recon-bandwidth-khz" => "20",  "frequency-jitter-percent" => "1"),   "1% frequency jitter with 20 kHz bands."),
     ]
     return [sim_job(id, merge_args(base, args); note=note) for (id, args, note) in specs]
 end
@@ -75,7 +88,7 @@ function jitter_bandwidth_main()
     max_seconds = parse(Float64, opts["max-hours"]) * 3600
     timeout_seconds = parse(Float64, opts["per-run-timeout-min"]) * 60
     out_root = isempty(strip(opts["output-root"])) ?
-        joinpath(PROJECT_ROOT, "outputs", "$(timestamp())_pam_3d_jitter10_bandwidth_sweep") :
+        joinpath(PROJECT_ROOT, "outputs", "$(timestamp())_pam_3d_jitter_bandwidth_sweep") :
         abspath(opts["output-root"])
     mkpath(out_root)
 
