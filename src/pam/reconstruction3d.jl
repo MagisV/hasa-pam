@@ -400,6 +400,8 @@ function _reconstruct_pam_cuda_3d(
 
     timing = Dict{Symbol, Any}(
         :setup_s         => setup.setup_s + t_batch_setup,
+        :operator_setup_s => setup.setup_s,
+        :batch_setup_s   => t_batch_setup,
         :march_gpu_s     => march_gpu_s,
         :march_wall_s    => march_wall_s,
         :download_s      => t_download,
@@ -668,16 +670,27 @@ function reconstruct_pam_windowed_3d(
         else
             sum_bytes = sum(t[:bytes_march_est] for t in timings)
             sum_march = sum(t[:march_gpu_s] for t in timings)
+            operator_setup_s = get(first(timings), :operator_setup_s, 0.0)
+            batch_setup_s = if all(haskey(t, :batch_setup_s) for t in timings)
+                sum(t[:batch_setup_s] for t in timings)
+            else
+                sum(t[:setup_s] for t in timings)
+            end
             Dict{Symbol, Any}(
-                :setup_s         => sum(t[:setup_s]      for t in timings),
+                :setup_s         => operator_setup_s + batch_setup_s,
+                :operator_setup_s => operator_setup_s,
+                :batch_setup_s   => batch_setup_s,
                 :march_gpu_s     => sum_march,
                 :march_wall_s    => sum(t[:march_wall_s]  for t in timings),
                 :download_s      => sum(t[:download_s]    for t in timings),
                 :bandwidth_GBps  => sum_march > 0 ? sum_bytes / sum_march / 1e9 : 0.0,
+                :fft_s           => all(!isnothing(t[:fft_s]) for t in timings) ? sum(t[:fft_s] for t in timings) : nothing,
+                :elementwise_s   => all(!isnothing(t[:elementwise_s]) for t in timings) ? sum(t[:elementwise_s] for t in timings) : nothing,
                 :nrows           => sum(t[:nrows]         for t in timings),
                 :nfreq           => first(timings)[:nfreq],
                 :padded_ny       => first(timings)[:padded_ny],
                 :padded_nz       => first(timings)[:padded_nz],
+                :axial_substeps  => first(timings)[:axial_substeps],
                 :bytes_march_est => sum_bytes,
                 :window_count    => length(timings),
             )
