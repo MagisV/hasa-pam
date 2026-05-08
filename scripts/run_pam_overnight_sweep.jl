@@ -19,6 +19,10 @@ function parse_cli(args)
         "slice-index" => "250",
         "skull-transducer-distance-mm" => "30",
         "boundary-threshold-ratios" => "0.6,0.65,0.7",
+        "auto-threshold-search" => "true",
+        "auto-threshold-min" => "0.10",
+        "auto-threshold-max" => "0.95",
+        "auto-threshold-step" => "0.01",
         "use-gpu" => "false",
         "dry-run" => "false",
         "force" => "false",
@@ -67,6 +71,10 @@ function common_sim_args(opts; seed=opts["random-seed"])
         "random-seed" => seed,
         "use-gpu" => opts["use-gpu"],
         "boundary-threshold-ratios" => opts["boundary-threshold-ratios"],
+        "auto-threshold-search" => opts["auto-threshold-search"],
+        "auto-threshold-min" => opts["auto-threshold-min"],
+        "auto-threshold-max" => opts["auto-threshold-max"],
+        "auto-threshold-step" => opts["auto-threshold-step"],
         "recon-min-window-energy-ratio" => "0.001",
     )
 end
@@ -95,6 +103,10 @@ function cached_reconstruction_jobs(opts)
     base = Dict(
         "from-run-dir" => from_run_dir,
         "boundary-threshold-ratios" => opts["boundary-threshold-ratios"],
+        "auto-threshold-search" => opts["auto-threshold-search"],
+        "auto-threshold-min" => opts["auto-threshold-min"],
+        "auto-threshold-max" => opts["auto-threshold-max"],
+        "auto-threshold-step" => opts["auto-threshold-step"],
     )
     specs = [
         ("cached_w20_bw300_step50", Dict("recon-window-us" => "20", "recon-hop-us" => "10", "recon-bandwidth-khz" => "300", "recon-step-um" => "50")),

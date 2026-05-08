@@ -93,6 +93,10 @@ function parse_cli(args)
         "analysis-mode" => "auto",
         "detection-threshold-ratio" => "0.2",
         "boundary-threshold-ratios" => "0.5,0.55,0.6,0.65,0.7,0.75",
+        "auto-threshold-search" => "true",
+        "auto-threshold-min" => "0.10",
+        "auto-threshold-max" => "0.95",
+        "auto-threshold-step" => "0.01",
         "peak-method" => "argmax",
         "clean-loop-gain" => "0.1",
         "clean-max-iter" => "500",
@@ -136,6 +140,21 @@ function parse_threshold_ratios(spec::AbstractString)
     ratios = parse_float_list(spec)
     isempty(ratios) && error("At least one threshold ratio is required.")
     all(r -> r > 0, ratios) || error("Threshold ratios must be positive.")
+    return sort(unique(ratios))
+end
+
+function parse_threshold_search_ratios(opts)
+    min_ratio = parse(Float64, opts["auto-threshold-min"])
+    max_ratio = parse(Float64, opts["auto-threshold-max"])
+    step = parse(Float64, opts["auto-threshold-step"])
+    min_ratio > 0 || error("--auto-threshold-min must be positive.")
+    max_ratio >= min_ratio || error("--auto-threshold-max must be >= --auto-threshold-min.")
+    step > 0 || error("--auto-threshold-step must be positive.")
+    n = floor(Int, (max_ratio - min_ratio) / step + 1e-9)
+    ratios = [round(min_ratio + i * step; digits=6) for i in 0:n]
+    if isempty(ratios) || ratios[end] < max_ratio - 1e-9
+        push!(ratios, round(max_ratio; digits=6))
+    end
     return sort(unique(ratios))
 end
 
@@ -1088,6 +1107,45 @@ function best_threshold_entry_3d(stats)
     return best
 end
 
+_metric_value(entry, key::Symbol, fallback::Symbol=key) = Float64(get(entry, key, entry[fallback]))
+
+function _threshold_tradeoff_entry_3d(stats, best, target::Symbol)
+    best_f1 = _metric_value(best, :source_f1, :f1)
+    best_value = _metric_value(best, target, target == :source_recall ? :recall : target)
+    metric_key = target == :source_recall ? :source_recall : :precision
+    fallback_key = target == :source_recall ? :recall : :precision
+    candidates = [entry for entry in stats if _metric_value(entry, metric_key, fallback_key) > best_value + 1e-9]
+    for floor_fraction in (0.95, 0.90, 0.0)
+        viable = [entry for entry in candidates if _metric_value(entry, :source_f1, :f1) >= floor_fraction * best_f1]
+        isempty(viable) && continue
+        if target == :source_recall
+            return maximum(viable; by=entry -> (
+                _metric_value(entry, :source_recall, :recall),
+                _metric_value(entry, :source_f1, :f1),
+                _metric_value(entry, :precision),
+            ))
+        else
+            return maximum(viable; by=entry -> (
+                _metric_value(entry, :precision),
+                _metric_value(entry, :source_f1, :f1),
+                _metric_value(entry, :source_recall, :recall),
+            ))
+        end
+    end
+    return best
+end
+
+function threshold_outline_entries_3d(stats)
+    best = best_threshold_entry_3d(stats)
+    recall = _threshold_tradeoff_entry_3d(stats, best, :source_recall)
+    precision = _threshold_tradeoff_entry_3d(stats, best, :precision)
+    return [
+        (kind=:best_f1, label="best F1", color=:cyan, entry=best),
+        (kind=:more_recall, label="more recall", color=:lime, entry=recall),
+        (kind=:more_precision, label="more precision", color=:magenta, entry=precision),
+    ]
+end
+
 function overlay_skull_2d!(ax, c, xvals, yvals; transpose_matrix=true)
     skull_mask = skull_mask_from_c_columnwise(c; mask_outside=false)
     any(skull_mask) || return nothing
@@ -1235,8 +1293,7 @@ function add_projection_panel_3d!(
     cfg,
     sources;
     projection::Symbol,
-    threshold_ratios,
-    colors,
+    outline_entries,
     global_ref,
     c=nothing,
 )
@@ -1266,7 +1323,8 @@ function add_projection_panel_3d!(
         )
     end
     local_ref = max(maximum(Float64.(intensity)), eps(Float64))
-    for (idx, ratio) in pairs(threshold_ratios)
+    for outline in outline_entries
+        ratio = Float64(outline.entry[:threshold_ratio])
         pred_proj = _project3d_mask(intensity .>= ratio * local_ref, projection)
         if any(pred_proj) && any(.!pred_proj)
             contour!(
@@ -1275,7 +1333,7 @@ function add_projection_panel_3d!(
                 yvals,
                 _projection_heatmap_matrix_3d(Float64.(pred_proj), projection);
                 levels=[0.5],
-                color=colors[idx],
+                color=outline.color,
                 linewidth=2,
             )
         end
@@ -1284,10 +1342,15 @@ function add_projection_panel_3d!(
     return hm
 end
 
-function add_threshold_table_3d!(fig, row, col, title, stats)
+function add_threshold_table_3d!(fig, row, col, title, stats; outline_entries=nothing)
     lines = ["thr    SrcF1 Prec  SrcRc  VoxF1  Vox"]
-    for entry in stats
-        push!(lines, @sprintf("%.2f  %.3f  %.3f  %.3f  %.3f  %d",
+    rows = isnothing(outline_entries) ? [(label="", entry=entry) for entry in stats] :
+        [(label=outline.label, entry=outline.entry) for outline in outline_entries]
+    for row_entry in rows
+        entry = row_entry.entry
+        prefix = isempty(row_entry.label) ? "" : row_entry.label * " "
+        push!(lines, @sprintf("%s%.2f  %.3f  %.3f  %.3f  %.3f  %d",
+            prefix,
             Float64(entry[:threshold_ratio]),
             Float64(get(entry, :source_f1, entry[:f1])),
             Float64(entry[:precision]),
@@ -1297,6 +1360,24 @@ function add_threshold_table_3d!(fig, row, col, title, stats)
         ))
     end
     Label(fig[row, col], title * "\n" * join(lines, "\n"); font="DejaVu Sans Mono", tellwidth=false, halign=:left)
+end
+
+function add_threshold_curve_panel_3d!(fig, row, col, title, stats; outline_entries)
+    thresholds = [Float64(entry[:threshold_ratio]) for entry in stats]
+    f1 = [Float64(get(entry, :source_f1, entry[:f1])) for entry in stats]
+    precision = [Float64(entry[:precision]) for entry in stats]
+    recall = [Float64(get(entry, :source_recall, entry[:recall])) for entry in stats]
+    ax = Axis(fig[row, col]; title=title, xlabel="Threshold / max intensity", ylabel="Score")
+    lines!(ax, thresholds, f1; color=:cyan, linewidth=2.5, label="source F1")
+    lines!(ax, thresholds, precision; color=:magenta, linewidth=2.0, label="precision")
+    lines!(ax, thresholds, recall; color=:lime, linewidth=2.0, label="source recall")
+    for outline in outline_entries
+        threshold = Float64(outline.entry[:threshold_ratio])
+        lines!(ax, [threshold, threshold], [0.0, 1.0]; color=(outline.color, 0.45), linewidth=1.5, linestyle=:dash)
+    end
+    ylims!(ax, 0, 1)
+    axislegend(ax; position=:rb, framevisible=false)
+    return nothing
 end
 
 function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, sources; threshold_ratios, truth_radius, truth_mask, truth_centerlines, frequencies, c=nothing)
@@ -1358,12 +1439,12 @@ function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg
     geo_stats = threshold_detection_stats_3d(pam_geo, grid, cfg, sources; threshold_ratios=threshold_ratios, truth_radius=truth_radius, truth_mask=truth_mask)
     hasa_stats = threshold_detection_stats_3d(pam_hasa, grid, cfg, sources; threshold_ratios=threshold_ratios, truth_radius=truth_radius, truth_mask=truth_mask)
     global_ref = max(maximum(Float64.(pam_geo)), maximum(Float64.(pam_hasa)), eps(Float64))
-    colors = [:red, :orange, :cyan, :magenta, :lime]
-    while length(colors) < length(threshold_ratios)
-        append!(colors, colors)
-    end
+    best_geo = best_threshold_entry_3d(geo_stats)
+    best_hasa = best_threshold_entry_3d(hasa_stats)
+    geo_outlines = threshold_outline_entries_3d(geo_stats)
+    hasa_outlines = threshold_outline_entries_3d(hasa_stats)
 
-    fig = Figure(size=(1550, 1200))
+    fig = Figure(size=(1550, 1450))
     projections = (:depth_y, :depth_z, :y_z)
     titles = Dict(
         :depth_y => "Depth-Y max projection",
@@ -1376,8 +1457,7 @@ function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg
             fig, 1, col, "Geometric: $(titles[projection])",
             pam_geo, truth_mask, grid, cfg, sources;
             projection=projection,
-            threshold_ratios=threshold_ratios,
-            colors=colors,
+            outline_entries=geo_outlines,
             global_ref=global_ref,
             c=c,
         )
@@ -1385,22 +1465,26 @@ function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg
             fig, 2, col, "HASA: $(titles[projection])",
             pam_hasa, truth_mask, grid, cfg, sources;
             projection=projection,
-            threshold_ratios=threshold_ratios,
-            colors=colors,
+            outline_entries=hasa_outlines,
             global_ref=global_ref,
             c=c,
         )
     end
     Colorbar(fig[1:2, 4], hm; label="Norm. PAM intensity")
-    legend_elements = [LineElement(color=colors[i], linewidth=3) for i in eachindex(threshold_ratios)]
-    legend_labels = ["thr=$(round(r; digits=2))" for r in threshold_ratios]
+    legend_specs = [
+        (label="best F1", color=:cyan),
+        (label="more recall", color=:lime),
+        (label="more precision", color=:magenta),
+    ]
+    legend_elements = [LineElement(color=spec.color, linewidth=3) for spec in legend_specs]
+    legend_labels = [spec.label for spec in legend_specs]
     Legend(fig[3, 1:2], legend_elements, legend_labels; orientation=:horizontal, tellheight=true, framevisible=false)
-    Label(fig[3, 3], "Truth mask shown as dashed white contours; sources are x markers."; tellwidth=false, halign=:left)
-    add_threshold_table_3d!(fig, 4, 1:2, "Geometric source-aware metrics", geo_stats)
-    add_threshold_table_3d!(fig, 4, 3:4, "HASA source-aware metrics", hasa_stats)
+    Label(fig[3, 3], "Truth mask shown as dashed white contours; sources are x markers. Curves use the dense threshold search grid."; tellwidth=false, halign=:left)
+    add_threshold_curve_panel_3d!(fig, 4, 1:2, "Geometric threshold response", geo_stats; outline_entries=geo_outlines)
+    add_threshold_curve_panel_3d!(fig, 4, 3:4, "HASA threshold response", hasa_stats; outline_entries=hasa_outlines)
+    add_threshold_table_3d!(fig, 5, 1:2, "Geometric selected thresholds", geo_stats; outline_entries=geo_outlines)
+    add_threshold_table_3d!(fig, 5, 3:4, "HASA selected thresholds", hasa_stats; outline_entries=hasa_outlines)
     save(path, fig)
-    best_geo = best_threshold_entry_3d(geo_stats)
-    best_hasa = best_threshold_entry_3d(hasa_stats)
     return Dict(
         "threshold_ratios" => threshold_ratios,
         "selection_metric" => "source_f1",
@@ -1409,6 +1493,14 @@ function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg
         "best_geometric_metric" => string_key_dict(best_geo),
         "best_hasa_threshold" => best_hasa[:threshold_ratio],
         "best_hasa_metric" => string_key_dict(best_hasa),
+        "geometric_selected_outlines" => [
+            Dict("kind" => String(outline.kind), "label" => outline.label, "metric" => string_key_dict(outline.entry))
+            for outline in geo_outlines
+        ],
+        "hasa_selected_outlines" => [
+            Dict("kind" => String(outline.kind), "label" => outline.label, "metric" => string_key_dict(outline.entry))
+            for outline in hasa_outlines
+        ],
         "geometric" => [string_key_dict(stats) for stats in geo_stats],
         "hasa" => [string_key_dict(stats) for stats in hasa_stats],
     )
@@ -1659,6 +1751,8 @@ peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean
 detection_truth_radius_m = parse(Float64, opts["vascular-radius-mm"]) * 1e-3
 detection_threshold_ratio = parse(Float64, opts["detection-threshold-ratio"])
 boundary_threshold_ratios = parse_threshold_ratios(opts["boundary-threshold-ratios"])
+auto_threshold_search = parse_bool(opts["auto-threshold-search"])
+threshold_score_ratios = auto_threshold_search ? parse_threshold_search_ratios(opts) : boundary_threshold_ratios
 
 if dimension == 3
     isempty(from_run_dir) || error("--from-run-dir is not implemented for 3D PAM yet.")
@@ -1766,10 +1860,12 @@ if dimension == 3
         results[:kgrid],
         cfg,
         sources;
-        threshold_ratios=boundary_threshold_ratios,
+        threshold_ratios=threshold_score_ratios,
         truth_radius=detection_truth_radius_m,
         c=c,
     )
+    activity_boundary_metrics["auto_threshold_search"] = auto_threshold_search
+    activity_boundary_metrics["display_threshold_mode"] = "selected_best_recall_precision"
     best_volume_path = joinpath(out_dir, "best_threshold_3d.png")
     best_volume_metrics = save_best_threshold_volume_3d(
         best_volume_path,
@@ -1820,6 +1916,15 @@ if dimension == 3
         "n_frames" => Int(get(results, :n_frames, 1)),
         "source_variability" => Dict(
             "frequency_jitter_percent" => source_variability.frequency_jitter_fraction * 100.0,
+        ),
+        "threshold_search" => Dict(
+            "auto" => auto_threshold_search,
+            "min_ratio" => minimum(threshold_score_ratios),
+            "max_ratio" => maximum(threshold_score_ratios),
+            "step" => auto_threshold_search ? parse(Float64, opts["auto-threshold-step"]) : nothing,
+            "count" => length(threshold_score_ratios),
+            "selection_metric" => "source_f1",
+            "display_threshold_mode" => "selected_best_recall_precision",
         ),
         "physical_source_count" => length(sources),
         "emission_event_count" => Int(get(results, :emission_event_count, length(sources))),

@@ -417,7 +417,10 @@ julia --project=. scripts/run_pam.jl `
   --recon-window-us=40 `
   --recon-hop-us=20 `
   --recon-bandwidth-khz=400 `
-  --boundary-threshold-ratios=0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9 `
+  --auto-threshold-search=true `
+  --auto-threshold-min=0.10 `
+  --auto-threshold-max=0.95 `
+  --auto-threshold-step=0.01 `
   --sim-mode=kwave `
   --use-gpu=true `
   --window-batch=2 `
@@ -427,7 +430,10 @@ julia --project=. scripts/run_pam.jl `
 For sparse 3D squiggle sources, the threshold summary reports both voxel overlap
 metrics and source-aware metrics. `source_f1` combines voxel precision with the
 fraction of simulated bubble centers hit within the source detection radius, and
-is used to select the best 3D threshold.
+is used to select the best 3D threshold. By default, 3D analysis runs a dense
+post-reconstruction threshold search and `activity_boundaries.png` shows the
+precision, recall, and F1 curves plus three readable outlines: best F1, a
+recall-biased threshold, and a precision-biased threshold.
 
 The reconstruction bandwidth is an important runtime knob: tighter bandwidths
 select fewer FFT frequency bins for ASA/HASA, reducing reconstruction time
@@ -462,7 +468,7 @@ julia --project=. scripts/run_pam.jl `
 The PAM run scripts write:
 
 - `overview.png`
-- `activity_boundaries.png`, with threshold-dependent active-region boundaries overlaid on the heatmaps plus a quantitative metrics table
+- `activity_boundaries.png`, with threshold-dependent active-region boundaries overlaid on the heatmaps, precision/recall/F1 threshold curves, and selected-threshold metrics
 - `summary.json`
 - `result.jld2`
 

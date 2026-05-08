@@ -11,6 +11,10 @@ function focused_sweep_opts(args)
     !("random-seed" in provided) && (opts["random-seed"] = "42")
     !("boundary-threshold-ratios" in provided) &&
         (opts["boundary-threshold-ratios"] = "0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9")
+    !("auto-threshold-search" in provided) && (opts["auto-threshold-search"] = "true")
+    !("auto-threshold-min" in provided) && (opts["auto-threshold-min"] = "0.10")
+    !("auto-threshold-max" in provided) && (opts["auto-threshold-max"] = "0.95")
+    !("auto-threshold-step" in provided) && (opts["auto-threshold-step"] = "0.01")
     return opts
 end
 
@@ -45,6 +49,10 @@ function focused_base_args(opts)
         "recon-hop-us" => "20",
         "recon-bandwidth-khz" => "500",
         "boundary-threshold-ratios" => opts["boundary-threshold-ratios"],
+        "auto-threshold-search" => opts["auto-threshold-search"],
+        "auto-threshold-min" => opts["auto-threshold-min"],
+        "auto-threshold-max" => opts["auto-threshold-max"],
+        "auto-threshold-step" => opts["auto-threshold-step"],
         "frequency-jitter-percent" => "1",
         "axial-gain-power" => "1.5",
         "sim-mode" => "kwave",
