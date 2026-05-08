@@ -211,21 +211,22 @@ function _pam_cuda_setup_3d(
 end
 
 # Each thread handles one (iy, iz) lateral index.
-# intensity: (padded_ny, padded_nz, W, nx); src: (padded_ny, padded_nz, nfreq*W)
+# intensity: (ny, nz, W, nx); src: (padded_ny, padded_nz, nfreq, W)
 # row: axial row index (1-based) into intensity
-function _accum_abs2_sum_batched_3d!(intensity, src, nfreq_per_w, row)
+function _accum_abs2_sum_batched_3d!(intensity, src, nfreq_per_w, row, crop_y0, crop_z0)
     i = CUDA.threadIdx().x + (CUDA.blockIdx().x - 1) * CUDA.blockDim().x
-    pny = size(src, 1)
-    pnz = size(src, 2)
-    i > pny * pnz && return
-    iy = (i - 1) % pny + 1
-    iz = (i - 1) ÷ pny + 1
-    W  = size(intensity, 3)
+    ny = size(intensity, 1)
+    nz = size(intensity, 2)
+    i > ny * nz && return
+    iy = (i - 1) % ny + 1
+    iz = (i - 1) ÷ ny + 1
+    src_y = crop_y0 + iy - 1
+    src_z = crop_z0 + iz - 1
+    W  = size(src, 4)
     @inbounds for w in 1:W
         acc = zero(real(eltype(src)))
-        base = (w - 1) * nfreq_per_w
         for j in 1:nfreq_per_w
-            v = src[iy, iz, base + j]
+            v = src[src_y, src_z, j, w]
             acc += real(v)^2 + imag(v)^2
         end
         intensity[iy, iz, w, row] += acc
@@ -245,7 +246,6 @@ function _reconstruct_pam_cuda_3d(
     fn_start = time()
     W           = length(rf_windows)
     nfreq       = setup.nfreq
-    nfreq_W     = nfreq * W
     padded_ny   = setup.padded_ny
     padded_nz   = setup.padded_nz
     nx          = setup.nx
@@ -266,28 +266,35 @@ function _reconstruct_pam_cuda_3d(
         flush(stdout)
     end
 
-    # Tile un-tiled base operators W times along the frequency dimension.
-    prop_d          = repeat(setup.prop_d1,          1, 1, W)
-    corr_d          = repeat(setup.corr_d1,          1, 1, W)
-    weight_d        = repeat(setup.weight_d1,        1, 1, W)
-    prop_weight_d   = prop_d .* weight_d
-    corr_weight_d   = corr_d .* weight_d
-    prop_n_weight_d = repeat(setup.prop_n_weight_d1, 1, 1, W)
-    k0_sq_d         = reshape(repeat(reshape(setup.k0_sq_d1, 1, 1, nfreq), 1, 1, W), 1, 1, nfreq_W)
+    # Keep the window axis explicit so the frequency-domain operators broadcast
+    # over windows instead of being physically repeated W times.
+    weight_d        = reshape(setup.weight_d1,        padded_ny, padded_nz, nfreq, 1)
+    prop_n_weight_d = corrected ? nothing : reshape(setup.prop_n_weight_d1, padded_ny, padded_nz, nfreq, 1)
+    prop_weight_d   = corrected ? reshape(setup.prop_d1 .* setup.weight_d1, padded_ny, padded_nz, nfreq, 1) : nothing
+    corr_weight_d   = corrected ? reshape(setup.corr_d1 .* setup.weight_d1, padded_ny, padded_nz, nfreq, 1) : nothing
+    k0_sq_d         = corrected ? reshape(setup.k0_sq_d1, 1, 1, nfreq, 1) : nothing
 
-    # Intensity accumulator: (padded_ny, padded_nz, W, nx)
-    ny_nz = padded_ny * padded_nz
-    intensity_yzWx_d = CUDA.zeros(T, padded_ny, padded_nz, W, nx)
+    # Intensity accumulator: (ny, nz, W, nx). The zero-padded halo is only
+    # needed while propagating; storing it for every row/window is too large.
+    crop_ny = length(crop_range_y)
+    crop_nz = length(crop_range_z)
+    crop_y0 = first(crop_range_y)
+    crop_z0 = first(crop_range_z)
+    padded_ny_nz = padded_ny * padded_nz
+    crop_ny_nz = crop_ny * crop_nz
+    intensity_yzWx_d = CUDA.zeros(T, crop_ny, crop_nz, W, nx)
 
-    # Build batched initial conditions: (padded_ny, padded_nz, nfreq*W).
-    p0_d = CUDA.zeros(CT, padded_ny, padded_nz, nfreq_W)
+    # Build batched initial conditions: (padded_ny, padded_nz, nfreq, W).
+    p0_d = CUDA.zeros(CT, padded_ny, padded_nz, nfreq, W)
     for (w, (rf_w, t0_w)) in enumerate(zip(rf_windows, t0_windows))
         rf_fft_w   = fft(CUDA.CuArray(T.(rf_w)), 3)  # time FFT → (ny, nz, nt)
-        col_offset = (w - 1) * nfreq
         for (f, (freq, bin)) in enumerate(zip(setup.selected_freqs, setup.selected_bins))
             phase = CT(cis(-T(2π) * T(freq) * T(t0_w)))
-            p0_d[crop_range_y, crop_range_z, col_offset + f] .= rf_fft_w[:, :, bin] .* phase
+            p0_d[crop_range_y, crop_range_z, f, w] .= rf_fft_w[:, :, bin] .* phase
         end
+        rf_fft_w = nothing
+        GC.gc(false)
+        CUDA.reclaim()
     end
 
     plan_fwd = plan_fft!(p0_d, (1, 2))
@@ -295,9 +302,9 @@ function _reconstruct_pam_cuda_3d(
     plan_fwd * p0_d
     current_d = p0_d
     current_d .*= weight_d
-    next_d    = similar(current_d)
-    tmp_d     = similar(current_d)
-    p_space_d = similar(current_d)
+    next_d    = corrected ? similar(current_d) : nothing
+    tmp_d     = corrected ? similar(current_d) : nothing
+    p_space_d = corrected ? similar(current_d) : nothing
     p_row_d   = similar(current_d)
 
     t_batch_setup = time() - fn_start
@@ -306,8 +313,8 @@ function _reconstruct_pam_cuda_3d(
 
     march_wall_start = time()
 
-    nthreads = min(ny_nz, 512)
-    nblocks  = cld(ny_nz, nthreads)
+    nthreads = min(crop_ny_nz, 512)
+    nblocks  = cld(crop_ny_nz, nthreads)
 
     eta_yznx_d = setup.eta_yznx_d
 
@@ -318,7 +325,7 @@ function _reconstruct_pam_cuda_3d(
                     t_fft_s += CUDA.@elapsed (p_space_d .= current_d; plan_bwd * p_space_d)
                     t_ew_s  += CUDA.@elapsed (tmp_d .= k0_sq_d .* eta_yznx_d[:, :, row:row] .* p_space_d)
                     t_fft_s += CUDA.@elapsed (plan_fwd * tmp_d)
-                    t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_d .+ corr_d .* tmp_d)
+                    t_ew_s  += CUDA.@elapsed (next_d .= current_d .* prop_weight_d .+ corr_weight_d .* tmp_d)
                     current_d, next_d = next_d, current_d
                 end
                 t_fft_s += CUDA.@elapsed (p_space_d .= current_d; plan_bwd * p_space_d)
@@ -329,9 +336,11 @@ function _reconstruct_pam_cuda_3d(
                 t_ew_s  += CUDA.@elapsed (current_d .*= prop_n_weight_d)
             end
             t_ew_s  += CUDA.@elapsed (p_row_d .= current_d)
+            # Inverse FFT on the full padded plane first; only crop when
+            # accumulating intensity so lateral wraparound stays suppressed.
             t_fft_s += CUDA.@elapsed (plan_bwd * p_row_d)
             t_ew_s  += CUDA.@elapsed CUDA.@cuda threads=nthreads blocks=nblocks _accum_abs2_sum_batched_3d!(
-                intensity_yzWx_d, p_row_d, nfreq, row,
+                intensity_yzWx_d, p_row_d, nfreq, row, crop_y0, crop_z0,
             )
         end
         march_gpu_s = t_fft_s + t_ew_s
@@ -343,7 +352,7 @@ function _reconstruct_pam_cuda_3d(
                     plan_bwd * p_space_d
                     tmp_d .= k0_sq_d .* eta_yznx_d[:, :, row:row] .* p_space_d
                     plan_fwd * tmp_d
-                    next_d .= current_d .* prop_d .+ corr_d .* tmp_d
+                    next_d .= current_d .* prop_weight_d .+ corr_weight_d .* tmp_d
                     current_d, next_d = next_d, current_d
                 end
                 p_space_d .= current_d
@@ -355,9 +364,11 @@ function _reconstruct_pam_cuda_3d(
                 current_d .*= prop_n_weight_d
             end
             p_row_d .= current_d
+            # Inverse FFT on the full padded plane first; only crop when
+            # accumulating intensity so lateral wraparound stays suppressed.
             plan_bwd * p_row_d
             CUDA.@cuda threads=nthreads blocks=nblocks _accum_abs2_sum_batched_3d!(
-                intensity_yzWx_d, p_row_d, nfreq, row,
+                intensity_yzWx_d, p_row_d, nfreq, row, crop_y0, crop_z0,
             )
         end
     end
@@ -365,15 +376,16 @@ function _reconstruct_pam_cuda_3d(
 
     passes_substep  = 13
     passes_last_row = corrected ? 19 : 9
+    nfreq_total = nfreq * W
     bytes_march = Int64(row_stop - rr) * (
-        (corrected ? Int64(axial_substeps - 1) * passes_substep : 0) * ny_nz * nfreq_W * sizeof(CT) +
-        passes_last_row * ny_nz * nfreq_W * sizeof(CT)
+        (corrected ? Int64(axial_substeps - 1) * passes_substep : 0) * padded_ny_nz * nfreq_total * sizeof(CT) +
+        passes_last_row * padded_ny_nz * nfreq_total * sizeof(CT)
     )
     bandwidth_GBps = bytes_march / march_gpu_s / 1e9
 
     t_download = @elapsed begin
-        # intensity_yzWx_d: (padded_ny, padded_nz, W, nx)
-        # permute → (padded_ny, padded_nz, nx, W), then slice per w → (padded_ny, padded_nz, nx) → (nx, ny, nz)
+        # intensity_yzWx_d: (ny, nz, W, nx)
+        # permute → (ny, nz, nx, W), then slice per w → (ny, nz, nx) → (nx, ny, nz)
         raw_all = permutedims(Array(intensity_yzWx_d), (1, 2, 4, 3))  # (ny, nz, nx, W)
     end
     raws = [Float64.(permutedims(raw_all[:, :, :, w], (3, 1, 2))) for w in 1:W]  # each: (nx, ny, nz)
@@ -402,6 +414,22 @@ function _reconstruct_pam_cuda_3d(
         :axial_substeps  => axial_substeps,
         :bytes_march_est => bytes_march,
     )
+    prop_n_weight_d = nothing
+    prop_weight_d = nothing
+    corr_weight_d = nothing
+    k0_sq_d = nothing
+    weight_d = nothing
+    p0_d = nothing
+    current_d = nothing
+    next_d = nothing
+    tmp_d = nothing
+    p_space_d = nothing
+    p_row_d = nothing
+    intensity_yzWx_d = nothing
+    plan_fwd = nothing
+    plan_bwd = nothing
+    GC.gc(false)
+    CUDA.reclaim()
     return raws, timing
 end
 
@@ -463,8 +491,7 @@ function reconstruct_pam_3d(
     raws, gpu_timing = _reconstruct_pam_cuda_3d(
         setup, [rf], [t0], corrected, recon_label, show_progress, benchmark,
     )
-    intensity_padded = raws[1]  # (nx, padded_ny, padded_nz)
-    intensity = intensity_padded[:, crop_range_y, crop_range_z]
+    intensity = raws[1]  # (nx, ny, nz)
     _apply_axial_gain_3d!(intensity, cfg)
 
     grid = pam_grid_3d(cfg)
@@ -600,10 +627,13 @@ function reconstruct_pam_windowed_3d(
         )
 
         for (raw_w, rng, en) in zip(b_raws, b_ranges, b_energies)
-            intensity .+= raw_w[:, b_crop_y, b_crop_z]
+            intensity .+= raw_w
             push!(used_ranges, rng)
             push!(used_energy, en)
         end
+        b_raws = nothing
+        GC.gc(false)
+        CUDA.reclaim()
 
         batch_info = Dict{Symbol, Any}(
             :frequencies    => sel_freqs,

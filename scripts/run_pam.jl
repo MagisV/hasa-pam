@@ -85,9 +85,9 @@ function parse_cli(args)
         "vascular-squiggle-wavelength-mm" => "8",
         "vascular-squiggle-slope" => "0.0",
         "squiggle-phase-x-deg" => "90",
-        "vascular-source-spacing-mm" => "0.8",
-        "vascular-position-jitter-mm" => "0.15",
-        "vascular-min-separation-mm" => "0.3",
+        "vascular-source-spacing-mm" => "2.0",
+        "vascular-position-jitter-mm" => "0.05",
+        "vascular-min-separation-mm" => "1.0",
         "vascular-max-sources-per-anchor" => "0",
         "vascular-radius-mm" => "1.0",
         "analysis-mode" => "auto",
@@ -156,7 +156,7 @@ function apply_model_defaults!(opts, provided_keys::Set{String})
         !("frequency-mhz" in provided_keys) && (opts["frequency-mhz"] = "0.5")
         !("recon-bandwidth-khz" in provided_keys) && (opts["recon-bandwidth-khz"] = "0")
         !("receiver-aperture-mm" in provided_keys) && (opts["receiver-aperture-mm"] = "full")
-        !("dx-mm" in provided_keys) && (opts["dx-mm"] = "0.5")
+        !("dx-mm" in provided_keys) && (opts["dx-mm"] = "0.2")
         !("dy-mm" in provided_keys) && (opts["dy-mm"] = "0.5")
         !("dz-mm" in provided_keys) && (opts["dz-mm"] = "0.5")
         !("axial-mm" in provided_keys) && (opts["axial-mm"] = "60")
@@ -166,7 +166,7 @@ function apply_model_defaults!(opts, provided_keys::Set{String})
         !("zero-pad-factor" in provided_keys) && (opts["zero-pad-factor"] = "4")
         !("num-cycles" in provided_keys) && (opts["num-cycles"] = "5")
         !("phase-mode" in provided_keys) && (opts["phase-mode"] = "coherent")
-        !("recon-step-um" in provided_keys) && (opts["recon-step-um"] = string(parse(Float64, opts["dx-mm"]) * 1000))
+        !("recon-step-um" in provided_keys) && (opts["recon-step-um"] = "50")
         !("use-gpu" in provided_keys) && (opts["use-gpu"] = "true")
     end
     source_model = parse_source_model(opts["source-model"])
