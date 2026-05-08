@@ -734,15 +734,45 @@ function run_pam_case_3d(
     benchmark::Bool=false,
     window_batch::Int=1,
     sim_mode::Symbol=:analytic,
+    source_phase_mode::Symbol=:coherent,
+    rng::Random.AbstractRNG=Random.default_rng(),
+    source_variability::SourceVariabilityConfig=SourceVariabilityConfig(),
 )
     use_gpu || error("3D PAM reconstruction currently requires --use-gpu=true.")
     recon_freqs = isnothing(frequencies) ? default_recon_frequencies(sources) : Float64.(frequencies)
-    rf, grid, sim_info = if sim_mode == :kwave
-        simulate_point_sources_3d(c, rho, sources, cfg; use_gpu=use_gpu)
-    else
-        analytic_rf_for_point_sources_3d(cfg, sources)
+    phase_mode = TranscranialFUS._normalize_source_phase_mode(source_phase_mode)
+    recon_mode = phase_mode == :random_phase_per_window ?
+        :windowed :
+        TranscranialFUS._normalize_reconstruction_mode(reconstruction_mode)
+    effective_window_config = PAMWindowConfig(;
+        enabled=recon_mode == :windowed,
+        window_duration=window_config.window_duration,
+        hop=window_config.hop,
+        taper=window_config.taper,
+        min_energy_ratio=window_config.min_energy_ratio,
+        accumulation=window_config.accumulation,
+    )
+    sim_sources = sources
+    n_frames = 1
+    if phase_mode == :random_static_phase
+        sim_sources = TranscranialFUS._resample_source_phases_3d(sources, rng)
+    elseif phase_mode == :random_phase_per_window
+        sim_sources, n_frames = TranscranialFUS._expand_sources_per_window(
+            sources,
+            effective_window_config.window_duration,
+            effective_window_config.hop,
+            cfg.t_max,
+            rng;
+            variability=source_variability,
+        )
+    elseif phase_mode == :random_phase_per_realization
+        error("3D PAM does not implement --source-phase-mode=random_phase_per_realization yet.")
     end
-    recon_mode = TranscranialFUS._normalize_reconstruction_mode(reconstruction_mode)
+    rf, grid, sim_info = if sim_mode == :kwave
+        simulate_point_sources_3d(c, rho, sim_sources, cfg; use_gpu=use_gpu)
+    else
+        analytic_rf_for_point_sources_3d(cfg, sim_sources)
+    end
     recon_kwargs = (
         frequencies=recon_freqs,
         bandwidth=bandwidth,
@@ -752,14 +782,6 @@ function run_pam_case_3d(
         show_progress=show_progress,
         benchmark=benchmark,
         window_batch=window_batch,
-    )
-    effective_window_config = PAMWindowConfig(;
-        enabled=recon_mode == :windowed,
-        window_duration=window_config.window_duration,
-        hop=window_config.hop,
-        taper=window_config.taper,
-        min_energy_ratio=window_config.min_energy_ratio,
-        accumulation=window_config.accumulation,
     )
     pam_geo, _, geo_info = if recon_mode == :windowed
         reconstruct_pam_windowed_3d(
@@ -799,7 +821,10 @@ function run_pam_case_3d(
         :reconstruction_frequencies => recon_freqs,
         :analysis_mode => any(s -> s isa BubbleCluster3D, sources) ? :detection : :localization,
         :analysis_source_count => length(sources),
+        :emission_event_count => length(sim_sources),
         :reconstruction_mode => recon_mode,
+        :source_phase_mode => phase_mode,
+        :n_frames => n_frames,
         :window_config => TranscranialFUS._window_config_info(effective_window_config),
         :use_gpu => use_gpu,
         :show_progress => show_progress,
@@ -1623,6 +1648,15 @@ if dimension == 3
     reconstruction_mode = resolve_reconstruction_mode(opts["recon-mode"], source_model)
     recon_bandwidth_hz = parse(Float64, opts["recon-bandwidth-khz"]) * 1e3
     window_config = make_window_config(opts, reconstruction_mode)
+    source_phase_mode = parse_source_phase_mode(opts["source-phase-mode"])
+    rng_sim = Random.MersenneTwister(parse(Int, opts["random-seed"]) + 1)
+    source_variability = parse_source_variability(opts)
+    if source_model == :squiggle
+        emission_meta["activity_model"] = Dict(
+            "activity_mode" => String(source_phase_mode),
+            "frequency_jitter_percent" => source_variability.frequency_jitter_fraction * 100.0,
+        )
+    end
 
     sim_mode = parse_sim_mode(opts["sim-mode"])
     sim_mode == :analytic && aberrator == :skull && error("--sim-mode=analytic is not compatible with --aberrator=skull; use --sim-mode=kwave.")
@@ -1641,6 +1675,9 @@ if dimension == 3
         benchmark=parse_bool(opts["benchmark"]),
         window_batch=parse(Int, opts["window-batch"]),
         sim_mode=sim_mode,
+        source_phase_mode=source_phase_mode,
+        rng=rng_sim,
+        source_variability=source_variability,
     )
 
     medium_summary = Dict{String, Any}()
@@ -1707,6 +1744,13 @@ if dimension == 3
         "reconstruction_bandwidth_hz" => recon_bandwidth_hz,
         "reconstruction_mode" => String(results[:reconstruction_mode]),
         "reconstruction_progress" => parse_bool(opts["recon-progress"]),
+        "source_phase_mode" => String(results[:source_phase_mode]),
+        "n_frames" => Int(get(results, :n_frames, 1)),
+        "source_variability" => Dict(
+            "frequency_jitter_percent" => source_variability.frequency_jitter_fraction * 100.0,
+        ),
+        "physical_source_count" => length(sources),
+        "emission_event_count" => Int(get(results, :emission_event_count, length(sources))),
         "window_config" => string_key_dict(results[:window_config]),
         "window_info" => Dict(
             "geometric" => compact_window_info(results[:geo_info]),

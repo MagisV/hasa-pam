@@ -281,6 +281,54 @@ function _resample_source_phases_3d(
     end
 end
 
+function _expand_sources_per_window(
+    sources::AbstractVector{<:EmissionSource3D},
+    window_duration::Real,
+    hop::Real,
+    t_max::Real,
+    rng::Random.AbstractRNG;
+    variability::SourceVariabilityConfig=SourceVariabilityConfig(),
+)
+    frame_dur = Float64(window_duration)
+    hop_s = Float64(hop)
+    frame_dur > 0 || error("window_duration must be positive.")
+    hop_s > 0 || error("hop must be positive.")
+    n_frames = max(1, floor(Int, (Float64(t_max) - frame_dur) / hop_s) + 1)
+    expanded = EmissionSource3D[]
+    sizehint!(expanded, length(sources) * n_frames)
+    fjitter = variability.frequency_jitter_fraction
+    fjitter >= 0.0 || error("frequency_jitter_fraction must be non-negative.")
+    for src in sources
+        for k in 1:n_frames
+            d = src.delay + hop_s * (k - 1)
+            fscale = fjitter > 0.0 ? max(0.01, 1.0 + fjitter * randn(rng)) : 1.0
+            evt = if src isa BubbleCluster3D
+                BubbleCluster3D(
+                    depth=src.depth, lateral_y=src.lateral_y, lateral_z=src.lateral_z,
+                    fundamental=src.fundamental * fscale, amplitude=src.amplitude,
+                    n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                    harmonic_amplitudes=copy(src.harmonic_amplitudes),
+                    harmonic_phases=2pi .* rand(rng, length(src.harmonics)),
+                    gate_duration=min(src.gate_duration, frame_dur), taper_ratio=src.taper_ratio,
+                    delay=d,
+                )
+            elseif src isa PointSource3D
+                nc = max(1, round(Int, min(Float64(src.num_cycles) / src.frequency, frame_dur) * src.frequency * fscale))
+                PointSource3D(
+                    depth=src.depth, lateral_y=src.lateral_y, lateral_z=src.lateral_z,
+                    frequency=src.frequency * fscale, amplitude=src.amplitude,
+                    phase=2pi * rand(rng), delay=d, num_cycles=Float64(nc),
+                )
+            else
+                src
+            end
+            push!(expanded, evt)
+        end
+    end
+    isempty(expanded) && error("_expand_sources_per_window: no emissions generated.")
+    return expanded, n_frames
+end
+
 # ── factory ───────────────────────────────────────────────────────────────────
 
 """
