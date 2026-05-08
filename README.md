@@ -413,10 +413,11 @@ julia --project=. scripts/run_pam.jl `
   --frequency-mhz=0.5 `
   --receiver-aperture-mm=full `
   --source-phase-mode=random_phase_per_window `
+  --frequency-jitter-percent=3 `
   --recon-window-us=40 `
   --recon-hop-us=20 `
-  --recon-bandwidth-khz=500 `
-  --boundary-threshold-ratios=0.5,0.55,0.6,0.65,0.7,0.75 `
+  --recon-bandwidth-khz=400 `
+  --boundary-threshold-ratios=0.45,0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9 `
   --sim-mode=kwave `
   --use-gpu=true `
   --window-batch=2 `
@@ -427,6 +428,13 @@ For sparse 3D squiggle sources, the threshold summary reports both voxel overlap
 metrics and source-aware metrics. `source_f1` combines voxel precision with the
 fraction of simulated bubble centers hit within the source detection radius, and
 is used to select the best 3D threshold.
+
+The reconstruction bandwidth is an important runtime knob: tighter bandwidths
+select fewer FFT frequency bins for ASA/HASA, reducing reconstruction time
+roughly in proportion to the frequency-bin count. In the focused 3D skull
+sweeps, `400 kHz` preserved the score while reducing HASA frequency bins from
+60 to 49; `300 kHz` was comparable and is a good next check when optimizing
+throughput.
 
 3D heterogeneous skull medium (CT-backed):
 
