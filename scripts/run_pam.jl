@@ -1109,6 +1109,19 @@ end
 
 _metric_value(entry, key::Symbol, fallback::Symbol=key) = Float64(get(entry, key, entry[fallback]))
 
+function _argmax_by(entries, scorefn)
+    best = first(entries)
+    best_score = scorefn(best)
+    for entry in entries[2:end]
+        score = scorefn(entry)
+        if score > best_score
+            best = entry
+            best_score = score
+        end
+    end
+    return best
+end
+
 function _threshold_tradeoff_entry_3d(stats, best, target::Symbol)
     best_f1 = _metric_value(best, :source_f1, :f1)
     best_value = _metric_value(best, target, target == :source_recall ? :recall : target)
@@ -1119,13 +1132,13 @@ function _threshold_tradeoff_entry_3d(stats, best, target::Symbol)
         viable = [entry for entry in candidates if _metric_value(entry, :source_f1, :f1) >= floor_fraction * best_f1]
         isempty(viable) && continue
         if target == :source_recall
-            return maximum(viable; by=entry -> (
+            return _argmax_by(viable, entry -> (
                 _metric_value(entry, :source_recall, :recall),
                 _metric_value(entry, :source_f1, :f1),
                 _metric_value(entry, :precision),
             ))
         else
-            return maximum(viable; by=entry -> (
+            return _argmax_by(viable, entry -> (
                 _metric_value(entry, :precision),
                 _metric_value(entry, :source_f1, :f1),
                 _metric_value(entry, :source_recall, :recall),
@@ -1216,16 +1229,25 @@ function add_threshold_panel!(
 end
 
 function add_threshold_table!(fig, row, col, title, stats)
-    lines = ["thr    F1    Prec  Recall"]
-    for entry in stats
-        push!(lines, @sprintf("%.2f  %.3f  %.3f  %.3f",
-            Float64(entry[:threshold_ratio]),
-            Float64(entry[:f1]),
-            Float64(entry[:precision]),
-            Float64(entry[:recall]),
-        ))
+    gl = GridLayout(fig[row, col]; tellwidth=false, tellheight=true)
+    Label(gl[1, 1:4], title; font="DejaVu Sans Mono", fontsize=13, halign=:left, tellwidth=false)
+    headers = ["thr", "F1", "Prec", "Recall"]
+    for (c, h) in enumerate(headers)
+        Label(gl[2, c], h; font="DejaVu Sans Mono", fontsize=11, halign=:center)
     end
-    Label(fig[row, col], title * "\n" * join(lines, "\n"); font="DejaVu Sans Mono", tellwidth=false, halign=:left)
+    for (r, entry) in enumerate(stats)
+        vals = [
+            @sprintf("%.2f", Float64(entry[:threshold_ratio])),
+            @sprintf("%.3f", Float64(entry[:f1])),
+            @sprintf("%.3f", Float64(entry[:precision])),
+            @sprintf("%.3f", Float64(entry[:recall])),
+        ]
+        for (c, v) in enumerate(vals)
+            Label(gl[2 + r, c], v; font="DejaVu Sans Mono", fontsize=11, halign=:center)
+        end
+    end
+    colgap!(gl, 10)
+    rowgap!(gl, 2)
 end
 
 function _project3d_values(intensity::AbstractArray{<:Real, 3}, projection::Symbol)
@@ -1343,23 +1365,31 @@ function add_projection_panel_3d!(
 end
 
 function add_threshold_table_3d!(fig, row, col, title, stats; outline_entries=nothing)
-    lines = ["thr    SrcF1 Prec  SrcRc  VoxF1  Vox"]
-    rows = isnothing(outline_entries) ? [(label="", entry=entry) for entry in stats] :
+    rows_data = isnothing(outline_entries) ? [(label="", entry=entry) for entry in stats] :
         [(label=outline.label, entry=outline.entry) for outline in outline_entries]
-    for row_entry in rows
-        entry = row_entry.entry
-        prefix = isempty(row_entry.label) ? "" : row_entry.label * " "
-        push!(lines, @sprintf("%s%.2f  %.3f  %.3f  %.3f  %.3f  %d",
-            prefix,
-            Float64(entry[:threshold_ratio]),
-            Float64(get(entry, :source_f1, entry[:f1])),
-            Float64(entry[:precision]),
-            Float64(get(entry, :source_recall, entry[:recall])),
-            Float64(get(entry, :voxel_f1, entry[:f1])),
-            Int(entry[:predicted_voxels]),
-        ))
+    gl = GridLayout(fig[row, col]; tellwidth=false, tellheight=true)
+    Label(gl[1, 1:8], title; font="DejaVu Sans Mono", fontsize=13, halign=:left, tellwidth=false)
+    headers = ["", "thr", "SrcF1", "Prec", "SrcRc", "VoxF1", "Vox"]
+    for (c, h) in enumerate(headers)
+        Label(gl[2, c], h; font="DejaVu Sans Mono", fontsize=11, halign=c == 1 ? :right : :center)
     end
-    Label(fig[row, col], title * "\n" * join(lines, "\n"); font="DejaVu Sans Mono", tellwidth=false, halign=:left)
+    for (r, row_entry) in enumerate(rows_data)
+        entry = row_entry.entry
+        vals = [
+            row_entry.label,
+            @sprintf("%.2f",  Float64(entry[:threshold_ratio])),
+            @sprintf("%.3f",  Float64(get(entry, :source_f1, entry[:f1]))),
+            @sprintf("%.3f",  Float64(entry[:precision])),
+            @sprintf("%.3f",  Float64(get(entry, :source_recall, entry[:recall]))),
+            @sprintf("%.3f",  Float64(get(entry, :voxel_f1, entry[:f1]))),
+            @sprintf("%d",    Int(entry[:predicted_voxels])),
+        ]
+        for (c, v) in enumerate(vals)
+            Label(gl[2 + r, c], v; font="DejaVu Sans Mono", fontsize=11, halign=c == 1 ? :right : :center)
+        end
+    end
+    colgap!(gl, 10)
+    rowgap!(gl, 2)
 end
 
 function add_threshold_curve_panel_3d!(fig, row, col, title, stats; outline_entries)
