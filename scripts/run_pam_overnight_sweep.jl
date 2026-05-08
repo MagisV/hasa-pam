@@ -248,7 +248,6 @@ function read_summary_metrics(out_dir)
             copy_float_property!(metrics, "best_hasa_threshold", best_hasa, :threshold_ratio)
             copy_float_property!(metrics, "best_hasa_precision", best_hasa, :precision)
             copy_float_property!(metrics, "best_hasa_recall", best_hasa, :recall)
-            copy_float_property!(metrics, "best_hasa_jaccard", best_hasa, :jaccard)
         end
         if !isnothing(best_geo)
             metrics["best_geo_f1"] = best_geo_f1
@@ -281,7 +280,6 @@ function append_csv(path, row)
         "best_hasa_threshold",
         "best_hasa_precision",
         "best_hasa_recall",
-        "best_hasa_jaccard",
         "best_geo_f1",
         "hasa_psf_corr",
         "hasa_psf_l2",

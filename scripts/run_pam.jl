@@ -85,14 +85,14 @@ function parse_cli(args)
         "vascular-squiggle-wavelength-mm" => "8",
         "vascular-squiggle-slope" => "0.0",
         "squiggle-phase-x-deg" => "90",
-        "vascular-source-spacing-mm" => "2.0",
+        "vascular-source-spacing-mm" => "0.5",
         "vascular-position-jitter-mm" => "0.05",
-        "vascular-min-separation-mm" => "1.0",
+        "vascular-min-separation-mm" => "0.25",
         "vascular-max-sources-per-anchor" => "0",
         "vascular-radius-mm" => "1.0",
         "analysis-mode" => "auto",
         "detection-threshold-ratio" => "0.2",
-        "boundary-threshold-ratios" => "0.6,0.65,0.7",
+        "boundary-threshold-ratios" => "0.5,0.55,0.6,0.65,0.7,0.75",
         "peak-method" => "argmax",
         "clean-loop-gain" => "0.1",
         "clean-max-iter" => "500",
@@ -170,6 +170,13 @@ function apply_model_defaults!(opts, provided_keys::Set{String})
         !("use-gpu" in provided_keys) && (opts["use-gpu"] = "true")
     end
     source_model = parse_source_model(opts["source-model"])
+    if dimension == 3 && source_model == :squiggle
+        !("vascular-source-spacing-mm" in provided_keys) && (opts["vascular-source-spacing-mm"] = "0.5")
+        !("vascular-min-separation-mm" in provided_keys) && (opts["vascular-min-separation-mm"] = "0.25")
+        !("recon-window-us" in provided_keys) && (opts["recon-window-us"] = "40")
+        !("recon-hop-us" in provided_keys) && (opts["recon-hop-us"] = "20")
+        !("boundary-threshold-ratios" in provided_keys) && (opts["boundary-threshold-ratios"] = "0.5,0.55,0.6,0.65,0.7,0.75")
+    end
     if source_model == :point
         !("source-phase-mode" in provided_keys) && (opts["source-phase-mode"] = "coherent")
         !("recon-bandwidth-khz" in provided_keys) && (opts["recon-bandwidth-khz"] = "0")
@@ -977,6 +984,61 @@ function threshold_detection_stats(intensity, kgrid, cfg, sources; threshold_rat
     ]
 end
 
+function source_detection_stats_3d(pred, grid, cfg::PAMConfig3D, sources; radius::Real)
+    radius_m = Float64(radius)
+    radius_m >= 0 || error("source detection radius must be non-negative.")
+    isempty(sources) && return Dict{Symbol, Any}(
+        :source_recall => 0.0,
+        :detected_source_count => 0,
+        :num_truth_sources => 0,
+        :mean_detected_source_distance_mm => nothing,
+        :max_detected_source_distance_mm => nothing,
+    )
+    x = collect(grid.x)
+    y = collect(grid.y)
+    z = collect(grid.z)
+    r0 = receiver_row(cfg)
+    row_r = ceil(Int, radius_m / cfg.dx)
+    col_r_y = ceil(Int, radius_m / cfg.dy)
+    col_r_z = ceil(Int, radius_m / cfg.dz)
+    radius2 = radius_m^2
+
+    detected = 0
+    distances_mm = Float64[]
+    for src in sources
+        src_x = x[r0] + src.depth
+        row0 = r0 + round(Int, src.depth / cfg.dx)
+        col0_y = argmin(abs.(y .- src.lateral_y))
+        col0_z = argmin(abs.(z .- src.lateral_z))
+        best_d2 = Inf
+        for row in max(r0 + 1, row0 - row_r):min(size(pred, 1), row0 + row_r)
+            dx2 = (x[row] - src_x)^2
+            for iy in max(1, col0_y - col_r_y):min(size(pred, 2), col0_y + col_r_y)
+                dy2 = (y[iy] - src.lateral_y)^2
+                for iz in max(1, col0_z - col_r_z):min(size(pred, 3), col0_z + col_r_z)
+                    pred[row, iy, iz] || continue
+                    d2 = dx2 + dy2 + (z[iz] - src.lateral_z)^2
+                    if d2 <= radius2 && d2 < best_d2
+                        best_d2 = d2
+                    end
+                end
+            end
+        end
+        if isfinite(best_d2)
+            detected += 1
+            push!(distances_mm, sqrt(best_d2) * 1e3)
+        end
+    end
+
+    return Dict{Symbol, Any}(
+        :source_recall => detected / length(sources),
+        :detected_source_count => detected,
+        :num_truth_sources => length(sources),
+        :mean_detected_source_distance_mm => isempty(distances_mm) ? nothing : mean(distances_mm),
+        :max_detected_source_distance_mm => isempty(distances_mm) ? nothing : maximum(distances_mm),
+    )
+end
+
 function threshold_detection_stats_3d(intensity, grid, cfg, sources; threshold_ratios, truth_radius, truth_mask)
     truth = isnothing(truth_mask) ? pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius) : truth_mask
     local_ref = max(maximum(Float64.(intensity)), eps(Float64))
@@ -989,19 +1051,23 @@ function threshold_detection_stats_3d(intensity, grid, cfg, sources; threshold_r
             precision = tp + fp == 0 ? 0.0 : tp / (tp + fp)
             recall = tp + fn == 0 ? 0.0 : tp / (tp + fn)
             f1 = precision + recall == 0 ? 0.0 : 2 * precision * recall / (precision + recall)
-            jaccard = tp + fp + fn == 0 ? 0.0 : tp / (tp + fp + fn)
-            Dict(
+            source_stats = source_detection_stats_3d(pred, grid, cfg, sources; radius=truth_radius)
+            source_recall = Float64(source_stats[:source_recall])
+            source_f1 = precision + source_recall == 0 ? 0.0 : 2 * precision * source_recall / (precision + source_recall)
+            merge(Dict(
                 :threshold_ratio => ratio,
-                :f1 => f1,
+                :f1 => source_f1,
+                :source_f1 => source_f1,
+                :voxel_f1 => f1,
                 :precision => precision,
-                :recall => recall,
-                :jaccard => jaccard,
+                :recall => source_recall,
+                :voxel_recall => recall,
                 :true_positive_voxels => tp,
                 :false_positive_voxels => fp,
                 :false_negative_voxels => fn,
                 :predicted_voxels => count(pred),
                 :truth_voxels => count(truth),
-            )
+            ), source_stats)
         end
         for ratio in threshold_ratios
     ]
@@ -1011,8 +1077,10 @@ function best_threshold_entry_3d(stats)
     isempty(stats) && error("No 3D threshold stats available.")
     best = first(stats)
     for entry in stats[2:end]
-        score = (Float64(entry[:f1]), Float64(entry[:jaccard]), Float64(entry[:precision]), Float64(entry[:threshold_ratio]))
-        best_score = (Float64(best[:f1]), Float64(best[:jaccard]), Float64(best[:precision]), Float64(best[:threshold_ratio]))
+        score_metric = haskey(entry, :source_f1) ? :source_f1 : :f1
+        best_metric = haskey(best, :source_f1) ? :source_f1 : :f1
+        score = (Float64(entry[score_metric]), Float64(entry[:precision]), Float64(entry[:threshold_ratio]))
+        best_score = (Float64(best[best_metric]), Float64(best[:precision]), Float64(best[:threshold_ratio]))
         if score > best_score
             best = entry
         end
@@ -1090,14 +1158,13 @@ function add_threshold_panel!(
 end
 
 function add_threshold_table!(fig, row, col, title, stats)
-    lines = ["thr    F1    Prec  Recall  Jacc"]
+    lines = ["thr    F1    Prec  Recall"]
     for entry in stats
-        push!(lines, @sprintf("%.2f  %.3f  %.3f  %.3f  %.3f",
+        push!(lines, @sprintf("%.2f  %.3f  %.3f  %.3f",
             Float64(entry[:threshold_ratio]),
             Float64(entry[:f1]),
             Float64(entry[:precision]),
             Float64(entry[:recall]),
-            Float64(entry[:jaccard]),
         ))
     end
     Label(fig[row, col], title * "\n" * join(lines, "\n"); font="DejaVu Sans Mono", tellwidth=false, halign=:left)
@@ -1218,14 +1285,14 @@ function add_projection_panel_3d!(
 end
 
 function add_threshold_table_3d!(fig, row, col, title, stats)
-    lines = ["thr    F1    Prec  Recall  Jacc   Vox"]
+    lines = ["thr    SrcF1 Prec  SrcRc  VoxF1  Vox"]
     for entry in stats
         push!(lines, @sprintf("%.2f  %.3f  %.3f  %.3f  %.3f  %d",
             Float64(entry[:threshold_ratio]),
-            Float64(entry[:f1]),
+            Float64(get(entry, :source_f1, entry[:f1])),
             Float64(entry[:precision]),
-            Float64(entry[:recall]),
-            Float64(entry[:jaccard]),
+            Float64(get(entry, :source_recall, entry[:recall])),
+            Float64(get(entry, :voxel_f1, entry[:f1])),
             Int(entry[:predicted_voxels]),
         ))
     end
@@ -1329,12 +1396,17 @@ function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg
     legend_labels = ["thr=$(round(r; digits=2))" for r in threshold_ratios]
     Legend(fig[3, 1:2], legend_elements, legend_labels; orientation=:horizontal, tellheight=true, framevisible=false)
     Label(fig[3, 3], "Truth mask shown as dashed white contours; sources are x markers."; tellwidth=false, halign=:left)
-    add_threshold_table_3d!(fig, 4, 1:2, "Geometric voxel metrics", geo_stats)
-    add_threshold_table_3d!(fig, 4, 3:4, "HASA voxel metrics", hasa_stats)
+    add_threshold_table_3d!(fig, 4, 1:2, "Geometric source-aware metrics", geo_stats)
+    add_threshold_table_3d!(fig, 4, 3:4, "HASA source-aware metrics", hasa_stats)
     save(path, fig)
+    best_geo = best_threshold_entry_3d(geo_stats)
     best_hasa = best_threshold_entry_3d(hasa_stats)
     return Dict(
         "threshold_ratios" => threshold_ratios,
+        "selection_metric" => "source_f1",
+        "source_detection_radius_m" => Float64(truth_radius),
+        "best_geometric_threshold" => best_geo[:threshold_ratio],
+        "best_geometric_metric" => string_key_dict(best_geo),
         "best_hasa_threshold" => best_hasa[:threshold_ratio],
         "best_hasa_metric" => string_key_dict(best_hasa),
         "geometric" => [string_key_dict(stats) for stats in geo_stats],

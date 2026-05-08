@@ -695,7 +695,6 @@ function analyse_pam_detection_2d(
     recall = _safe_fraction(tp, tp + fn)
     f1 = (precision + recall) > 0 ? 2 * precision * recall / (precision + recall) : 0.0
     dice = _safe_fraction(2 * tp, 2 * tp + fp + fn)
-    jaccard = _safe_fraction(tp, tp + fp + fn)
 
     prediction_components, matched_prediction_components, spurious_prediction_components =
         _component_overlap_counts(predicted, truth)
@@ -757,7 +756,6 @@ function analyse_pam_detection_2d(
         :recall => recall,
         :f1 => f1,
         :dice => dice,
-        :jaccard => jaccard,
         :truth_area_mm2 => count(truth) * pixel_area_mm2,
         :predicted_area_mm2 => count(predicted) * pixel_area_mm2,
         :overlap_area_mm2 => tp * pixel_area_mm2,

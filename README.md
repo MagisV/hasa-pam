@@ -397,6 +397,8 @@ julia --project=. scripts/run_pam.jl `
   --vascular-squiggle-amplitude-x-mm=0.2 `
   --vascular-squiggle-wavelength-mm=8 `
   --squiggle-phase-x-deg=90 `
+  --vascular-source-spacing-mm=0.5 `
+  --vascular-min-separation-mm=0.25 `
   --harmonics=2,3,4 `
   --harmonic-amplitudes=1.0,0.6,0.3 `
   --aberrator=skull `
@@ -420,6 +422,11 @@ julia --project=. scripts/run_pam.jl `
   --window-batch=2 `
   --recon-progress=true
 ```
+
+For sparse 3D squiggle sources, the threshold summary reports both voxel overlap
+metrics and source-aware metrics. `source_f1` combines voxel precision with the
+fraction of simulated bubble centers hit within the source detection radius, and
+is used to select the best 3D threshold.
 
 3D heterogeneous skull medium (CT-backed):
 
