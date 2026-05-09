@@ -26,7 +26,7 @@ function parse_cli(args)
         "dy-mm" => "0.2",
         "dz-mm" => "0.2",
         "max-windows" => "0",
-        "fps" => "12",
+        "fps" => "2",
         "frames-only" => "false",
         "dry-run" => "false",
         "recon-progress" => "false",
@@ -233,7 +233,14 @@ function best_final_threshold(final_intensity, truth_mask, grid, cfg, sources; t
         truth_radius=truth_radius,
         truth_mask=truth_mask,
     )
-    best = best_threshold_entry_3d(entries)
+    best = first(entries)
+    for entry in entries[2:end]
+        score = (Float64(entry[:voxel_f1]), Float64(entry[:precision]), Float64(entry[:threshold_ratio]))
+        best_score = (Float64(best[:voxel_f1]), Float64(best[:precision]), Float64(best[:threshold_ratio]))
+        if score > best_score
+            best = entry
+        end
+    end
     best[:absolute_cutoff] = Float64(best[:threshold_ratio]) * local_ref
     return best, entries
 end
@@ -262,6 +269,19 @@ function qualify_windows(rf, cfg, window_config, max_windows::Integer)
     return selected, selected_energy, skipped, window_samples, hop_samples, threshold
 end
 
+function reconstruct_or_load_window(recons_dir, idx, rf, c, cfg, range, window_config, recon_frequencies, bandwidth_hz;
+    use_gpu::Bool, show_progress::Bool)
+    path = joinpath(recons_dir, @sprintf("window_%04d.jld2", idx))
+    if isfile(path)
+        d = load(path)
+        return d["intensity"], d["grid"]
+    end
+    intensity, grid = reconstruct_one_window(rf, c, cfg, range, window_config, recon_frequencies, bandwidth_hz;
+        use_gpu=use_gpu, show_progress=show_progress)
+    @save path intensity grid
+    return intensity, grid
+end
+
 function reconstruct_one_window(rf, c, cfg, range, window_config, recon_frequencies, bandwidth_hz;
     use_gpu::Bool, show_progress::Bool)
     taper = TranscranialFUS._pam_temporal_taper(length(range), window_config.taper)
@@ -283,54 +303,6 @@ function reconstruct_one_window(rf, c, cfg, range, window_config, recon_frequenc
     return intensity, grid
 end
 
-depth_mm(grid, cfg) = (collect(grid.x) .- grid.x[receiver_row(cfg)]) .* 1e3
-y_mm(grid) = collect(grid.y) .* 1e3
-z_mm(grid) = collect(grid.z) .* 1e3
-
-function mask_projection(mask, projection::Symbol)
-    if projection == :depth_y
-        return dropdims(any(mask; dims=3); dims=3)
-    elseif projection == :depth_z
-        return dropdims(any(mask; dims=2); dims=2)
-    elseif projection == :y_z
-        return dropdims(any(mask; dims=1); dims=1)
-    end
-    error("Unknown projection: $projection")
-end
-
-function volume_projection(volume, projection::Symbol)
-    if projection == :depth_y
-        return dropdims(maximum(volume; dims=3); dims=3)
-    elseif projection == :depth_z
-        return dropdims(maximum(volume; dims=2); dims=2)
-    elseif projection == :y_z
-        return dropdims(maximum(volume; dims=1); dims=1)
-    end
-    error("Unknown projection: $projection")
-end
-
-function projection_axes(grid, cfg, projection::Symbol)
-    if projection == :depth_y
-        return depth_mm(grid, cfg), y_mm(grid), "Depth [mm]", "Y [mm]"
-    elseif projection == :depth_z
-        return depth_mm(grid, cfg), z_mm(grid), "Depth [mm]", "Z [mm]"
-    elseif projection == :y_z
-        return y_mm(grid), z_mm(grid), "Y [mm]", "Z [mm]"
-    end
-    error("Unknown projection: $projection")
-end
-
-function normalized_projection(volume, projection::Symbol)
-    proj = Float64.(volume_projection(volume, projection))
-    ref = max(maximum(proj), eps(Float64))
-    return log10.(1 .+ 99 .* (proj ./ ref)) ./ 2
-end
-
-function add_contour_if_valid!(ax, xs, ys, mask; color, linewidth=2.0, linestyle=:solid)
-    any(mask) || return
-    any(.!mask) || return
-    contour!(ax, xs, ys, Float64.(mask); levels=[0.5], color=color, linewidth=linewidth, linestyle=linestyle)
-end
 
 function threshold_voxel_points(mask, intensity, grid, cfg; max_points::Int=25000)
     idxs = findall(mask)
@@ -358,21 +330,67 @@ function threshold_voxel_points(mask, intensity, grid, cfg; max_points::Int=2500
     return xs, ys, zs, cs
 end
 
-function render_frame(path, cumulative, current, truth_mask, fixed_cutoff, best_ratio, grid, cfg, sources, centerlines, stats, frame_idx, total_frames)
+function precompute_skull_surface(c, grid, cfg, medium_info; c_threshold=1600.0, stride=2)
+    rr = receiver_row(cfg)
+    nx, ny, nz = size(c)
+    row_start = haskey(medium_info, :outer_row) ? max(1, Int(medium_info[:outer_row]) - 3) : 1
+    row_end   = haskey(medium_info, :inner_row) ? min(nx, Int(medium_info[:inner_row]) + 3) : nx
+
+    iy_range = 1:stride:ny
+    iz_range = 1:stride:nz
+    n_y = length(iy_range)
+    n_z = length(iz_range)
+
+    ys        = Float32[grid.y[iy] * 1e3 for iy in iy_range]
+    zs        = Float32[grid.z[iz] * 1e3 for iz in iz_range]
+    outer_d   = fill(NaN32, n_y, n_z)
+    outer_sos = fill(NaN32, n_y, n_z)
+
+    for (jy, iy) in enumerate(iy_range)
+        for (jz, iz) in enumerate(iz_range)
+            found = false
+            for ix in row_start:row_end
+                if Float64(c[ix, iy, iz]) > c_threshold
+                    outer_d[jy, jz]   = Float32((grid.x[ix] - grid.x[rr]) * 1e3)
+                    outer_sos[jy, jz] = Float32(c[ix, iy, iz])
+                    found = true
+                    break
+                end
+            end
+        end
+    end
+
+    has_skull = !all(isnan, outer_d)
+    return (; ys, zs, outer_d, outer_sos, has_skull)
+end
+
+function compute_axis_limits(grid, cfg)
+    rr = receiver_row(cfg)
+    return (
+        y_min = minimum(grid.y) * 1e3,
+        y_max = maximum(grid.y) * 1e3,
+        z_min = minimum(grid.z) * 1e3,
+        z_max = maximum(grid.z) * 1e3,
+        d_min = (minimum(grid.x) - grid.x[rr]) * 1e3,
+        d_max = (maximum(grid.x) - grid.x[rr]) * 1e3,
+    )
+end
+
+function render_frame(path, cumulative, current, fixed_cutoff, best_ratio, grid, cfg, sources, centerlines, skull_surf, ax_limits, metrics_history, stats, frame_idx, total_frames)
     pred_mask = cumulative .>= fixed_cutoff
     current_mask = current .>= fixed_cutoff
     flags = stats[:detected_flags]
 
-    update_theme!(fontsize=15)
-    fig = Figure(size=(1600, 950), backgroundcolor=:black)
+    update_theme!(fontsize=14)
+    fig = Figure(size=(1700, 960), backgroundcolor=:black)
 
+    # ── 3D reconstruction view ────────────────────────────────────────────────
     ax3 = Axis3(
-        fig[1:3, 1:2];
+        fig[1, 1];
         xlabel="Y [mm]",
         ylabel="Z [mm]",
         zlabel="Depth [mm]",
-        title="3D cumulative HASA detection",
-        aspect=:data,
+        title="3D cumulative HASA — window $frame_idx / $total_frames",
         perspectiveness=0.35,
         azimuth=5pi / 8,
         elevation=pi / 7,
@@ -385,6 +403,26 @@ function render_frame(path, cumulative, current, truth_mask, fixed_cutoff, best_
         yticklabelcolor=:white,
         zticklabelcolor=:white,
     )
+    xlims!(ax3, ax_limits.y_min, ax_limits.y_max)
+    ylims!(ax3, ax_limits.z_min, ax_limits.z_max)
+    zlims!(ax3, ax_limits.d_min, ax_limits.d_max)
+
+    # ── Receiver array plane at depth 0 ──────────────────────────────────────
+    let ry = [ax_limits.y_min, ax_limits.y_max],
+        rz = [ax_limits.z_min, ax_limits.z_max]
+        surface!(ax3, ry, rz, zeros(Float32, 2, 2); color=(:orchid, 0.18), shading=NoShading)
+        yc = [ax_limits.y_min, ax_limits.y_max, ax_limits.y_max, ax_limits.y_min, ax_limits.y_min]
+        zc = [ax_limits.z_min, ax_limits.z_min, ax_limits.z_max, ax_limits.z_max, ax_limits.z_min]
+        lines!(ax3, yc, zc, zeros(5); color=(:orchid, 0.8), linewidth=2.0)
+    end
+
+    # ── Skull outer surface ───────────────────────────────────────────────────
+    if skull_surf.has_skull
+        sos_norm = clamp.((skull_surf.outer_sos .- 1600.0f0) ./ (2500.0f0 - 1600.0f0), 0.0f0, 1.0f0)
+        surface!(ax3, skull_surf.ys, skull_surf.zs, skull_surf.outer_d;
+            color=sos_norm, colormap=:Greys, colorrange=(0.0, 1.0),
+            alpha=0.65, shading=NoShading)
+    end
 
     for line in centerlines
         ys = [p[2] * 1e3 for p in line]
@@ -395,7 +433,12 @@ function render_frame(path, cumulative, current, truth_mask, fixed_cutoff, best_
 
     vx, vy, vz, vc = threshold_voxel_points(pred_mask, cumulative, grid, cfg; max_points=22000)
     if !isempty(vx)
-        scatter!(ax3, vx, vy, vz; color=vc, colormap=:Oranges, colorrange=(0.0, 1.0), markersize=2.2, alpha=0.28)
+        scatter!(ax3, vx, vy, vz; color=vc, colormap=:Oranges, colorrange=(0.0, 1.0), markersize=2.2, alpha=0.4)
+    end
+
+    cx, cy, cz, _ = threshold_voxel_points(current_mask, current, grid, cfg; max_points=10000)
+    if !isempty(cx)
+        scatter!(ax3, cx, cy, cz; color=(:deepskyblue, 0.3), markersize=2.0)
     end
 
     src_y = [src.lateral_y * 1e3 for src in sources]
@@ -404,70 +447,88 @@ function render_frame(path, cumulative, current, truth_mask, fixed_cutoff, best_
     src_colors = [flags[i] ? :lime : (:gray80, 0.45) for i in eachindex(sources)]
     scatter!(ax3, src_y, src_z, src_d; color=src_colors, markersize=8, strokecolor=:black, strokewidth=0.7)
 
-    projections = [
-        (:depth_y, "Depth-Y MIP"),
-        (:depth_z, "Depth-Z MIP"),
-        (:y_z, "Y-Z MIP"),
-    ]
-    for (col, (projection, title)) in enumerate(projections)
-        xs, ys, xlabel, ylabel = projection_axes(grid, cfg, projection)
-        ax = Axis(
-            fig[1, col + 2];
-            title=title,
-            xlabel=xlabel,
-            ylabel=ylabel,
-            aspect=DataAspect(),
-            backgroundcolor=:black,
-            titlecolor=:white,
-            xlabelcolor=:white,
-            ylabelcolor=:white,
-            xticklabelcolor=:white,
-            yticklabelcolor=:white,
-        )
-        heatmap!(ax, xs, ys, normalized_projection(cumulative, projection); colormap=:inferno, colorrange=(0, 1))
-        add_contour_if_valid!(ax, xs, ys, mask_projection(truth_mask, projection); color=(:white, 0.9), linewidth=2.0, linestyle=:dash)
-        add_contour_if_valid!(ax, xs, ys, mask_projection(pred_mask, projection); color=(:orange, 0.95), linewidth=2.2)
-        add_contour_if_valid!(ax, xs, ys, mask_projection(current_mask, projection); color=(:deepskyblue, 0.75), linewidth=1.5)
-    end
+    # ── Metrics convergence plot ──────────────────────────────────────────────
+    ax_m = Axis(
+        fig[1, 2];
+        xlabel="window",
+        title="convergence",
+        backgroundcolor=:black,
+        titlecolor=:white,
+        xlabelcolor=:white,
+        ylabelcolor=:white,
+        xticklabelcolor=:white,
+        yticklabelcolor=:white,
+        xgridcolor=(:white, 0.12),
+        ygridcolor=(:white, 0.12),
+        bottomspinecolor=:white,
+        leftspinecolor=:white,
+        topspinecolor=:transparent,
+        rightspinecolor=:transparent,
+        yticks=0.0:0.2:1.0,
+    )
+    xlims!(ax_m, 0.5, total_frames + 0.5)
+    ylims!(ax_m, 0.0, 1.0)
 
+    ws = Float64[m[:frame_index]  for m in metrics_history]
+    pr = Float64[m[:precision]    for m in metrics_history]
+    rc = Float64[m[:voxel_recall] for m in metrics_history]
+    f1 = Float64[m[:voxel_f1]    for m in metrics_history]
+
+    lines!(ax_m, ws, pr; color=:deepskyblue, linewidth=2, label="precision")
+    lines!(ax_m, ws, rc; color=:lime,        linewidth=2, label="recall")
+    lines!(ax_m, ws, f1; color=:orange,      linewidth=2, label="voxel F1")
+    scatter!(ax_m, ws, pr; color=:deepskyblue, markersize=7)
+    scatter!(ax_m, ws, rc; color=:lime,        markersize=7)
+    scatter!(ax_m, ws, f1; color=:orange,      markersize=7)
+    vlines!(ax_m, [Float64(frame_idx)]; color=(:white, 0.35), linewidth=1.2, linestyle=:dash)
+    axislegend(ax_m; position=:lb, backgroundcolor=(:black, 0.8), labelcolor=:white,
+        framevisible=false, labelsize=13, padding=(4, 4, 4, 4))
+
+    text!(ax_m, 0.97, 0.97;
+        text=@sprintf("prec:   %.3f\nrecall: %.3f\nF1:     %.3f",
+            Float64(stats[:precision]),
+            Float64(stats[:voxel_recall]),
+            Float64(stats[:voxel_f1])),
+        color=:white, fontsize=13, align=(:right, :top), space=:relative,
+    )
+
+    # ── Stats bar ────────────────────────────────────────────────────────────
     stats_text = @sprintf(
-        "window %d / %d\nfixed threshold: %.2f of final max\nsource F1: %.3f\nprecision: %.3f\nsource recall: %.3f\ndetected: %d / %d\npredicted voxels: %d",
-        frame_idx,
-        total_frames,
+        "threshold: %.2f of final max (voxel F1-optimal)   voxel F1: %.3f   precision: %.3f   voxel recall: %.3f   TP: %d   FP: %d   FN: %d   predicted: %d / truth: %d voxels",
         best_ratio,
-        Float64(stats[:source_f1]),
+        Float64(stats[:voxel_f1]),
         Float64(stats[:precision]),
-        Float64(stats[:source_recall]),
-        Int(stats[:detected_source_count]),
-        Int(stats[:num_truth_sources]),
+        Float64(stats[:voxel_recall]),
+        Int(stats[:true_positive_voxels]),
+        Int(stats[:false_positive_voxels]),
+        Int(stats[:false_negative_voxels]),
         Int(stats[:predicted_voxels]),
+        Int(stats[:truth_voxels]),
     )
-    Label(
-        fig[2:3, 3:5],
-        stats_text;
-        color=:white,
-        fontsize=24,
-        halign=:left,
-        valign=:top,
-        tellheight=false,
-        tellwidth=false,
-    )
+    Label(fig[2, 1:2], stats_text; color=:white, fontsize=14, halign=:center, tellheight=true)
 
     Legend(
-        fig[4, 1:5],
+        fig[3, 1:2],
         [
-            LineElement(color=(:white, 0.9), linestyle=:dash, linewidth=2),
-            LineElement(color=(:orange, 0.95), linewidth=3),
-            LineElement(color=(:deepskyblue, 0.75), linewidth=2),
-            MarkerElement(color=:lime, marker=:circle, markersize=12),
-            MarkerElement(color=(:gray80, 0.45), marker=:circle, markersize=12),
+            LineElement(color=(:orchid, 0.9), linewidth=2),
+            PolyElement(color=(:gray60, 0.6)),
+            LineElement(color=(:white, 0.7), linewidth=2),
+            MarkerElement(color=:orange, marker=:circle, markersize=10),
+            MarkerElement(color=(:deepskyblue, 0.6), marker=:circle, markersize=10),
+            MarkerElement(color=:lime, marker=:circle, markersize=10),
+            MarkerElement(color=(:gray80, 0.45), marker=:circle, markersize=10),
         ],
-        ["truth mask", "cumulative prediction", "current window", "detected source", "not yet detected"];
+        ["receiver array", "skull surface", "vascular network", "cumulative HASA", "current window", "detected source", "not yet detected"];
         orientation=:horizontal,
         framevisible=false,
         labelcolor=:white,
         tellheight=true,
     )
+
+    # ── Column / row sizing (must come after all content is placed) ───────────
+    colsize!(fig.layout, 1, Relative(0.62))
+    rowsize!(fig.layout, 2, Fixed(38))
+    rowsize!(fig.layout, 3, Fixed(48))
 
     save(path, fig)
     return path
@@ -557,10 +618,15 @@ function main()
     use_gpu_recon = parse_bool(opts["recon-use-gpu"])
     show_progress = parse_bool(opts["recon-progress"])
 
-    out_dir = isempty(strip(opts["out-dir"])) ?
-        joinpath(@__DIR__, "outputs", "$(timestamp())_window_convergence") :
+    out_dir = if !isempty(strip(opts["out-dir"]))
         abspath(opts["out-dir"])
+    elseif !isempty(from_data)
+        dirname(abspath(from_data))
+    else
+        joinpath(@__DIR__, "outputs", "$(timestamp())_window_convergence")
+    end
     frames_dir = joinpath(out_dir, "frames")
+    recons_dir = joinpath(out_dir, "recons")
     data_path = joinpath(out_dir, "data.jld2")
     summary_path = joinpath(out_dir, "summary.json")
     mp4_path = joinpath(out_dir, "pam_window_convergence.mp4")
@@ -599,6 +665,7 @@ function main()
     end
 
     mkpath(frames_dir)
+    mkpath(recons_dir)
 
     if isempty(from_data)
         println("Building medium...")
@@ -647,13 +714,17 @@ function main()
     truth_mask = pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius)
     centerlines = network_meta[:centerlines]
 
+    println("Precomputing skull scatter points...")
+    skull_surf = precompute_skull_surface(c, grid, cfg, medium_info)
+    println("  skull surface: $(skull_surf.has_skull ? "$(sum(.!isnan.(skull_surf.outer_d))) bone pixels" : "none (water run)")")
+
     println("Accumulating $(length(selected_ranges)) reconstructed windows to choose final threshold...")
     cumulative_sum = zeros(Float64, pam_Nx(cfg), pam_Ny(cfg), pam_Nz(cfg))
     final_grid = grid
     for (idx, range) in pairs(selected_ranges)
         @printf("  accumulation window %d/%d samples %d:%d\n", idx, length(selected_ranges), first(range), last(range))
-        current, final_grid = reconstruct_one_window(
-            rf, c, cfg, range, window_config, recon_frequencies, bandwidth_hz;
+        current, final_grid = reconstruct_or_load_window(
+            recons_dir, idx, rf, c, cfg, range, window_config, recon_frequencies, bandwidth_hz;
             use_gpu=use_gpu_recon,
             show_progress=show_progress,
         )
@@ -672,11 +743,12 @@ function main()
     )
     fixed_cutoff = Float64(best_threshold[:absolute_cutoff])
     best_ratio = Float64(best_threshold[:threshold_ratio])
-    @printf("Selected final threshold %.2f of final max: source F1 %.3f, precision %.3f, source recall %.3f\n",
+    ax_limits = compute_axis_limits(grid, cfg)
+    @printf("Selected final threshold %.2f of final max: voxel F1 %.3f, precision %.3f, voxel recall %.3f\n",
         best_ratio,
-        Float64(best_threshold[:source_f1]),
+        Float64(best_threshold[:voxel_f1]),
         Float64(best_threshold[:precision]),
-        Float64(best_threshold[:source_recall]),
+        Float64(best_threshold[:voxel_recall]),
     )
 
     metrics_by_frame = Dict{Symbol, Any}[]
@@ -684,8 +756,8 @@ function main()
     fill!(cumulative_sum, 0.0)
     for (idx, range) in pairs(selected_ranges)
         @printf("  render window %d/%d\n", idx, length(selected_ranges))
-        current, final_grid = reconstruct_one_window(
-            rf, c, cfg, range, window_config, recon_frequencies, bandwidth_hz;
+        current, final_grid = reconstruct_or_load_window(
+            recons_dir, idx, rf, c, cfg, range, window_config, recon_frequencies, bandwidth_hz;
             use_gpu=use_gpu_recon,
             show_progress=show_progress,
         )
@@ -700,13 +772,15 @@ function main()
             frame_path,
             cumulative,
             current,
-            truth_mask,
             fixed_cutoff,
             best_ratio,
             final_grid,
             cfg,
             sources,
             centerlines,
+            skull_surf,
+            ax_limits,
+            metrics_by_frame,
             stats,
             idx,
             length(selected_ranges),
