@@ -162,6 +162,7 @@ function simulate_point_sources(
     sources::AbstractVector{<:EmissionSource2D},
     cfg::PAMConfig;
     use_gpu::Bool=false,
+    kwave_data_path::Union{Nothing, AbstractString}=nothing,
 )
     isempty(sources) && error("At least one emission source is required.")
 
@@ -230,11 +231,13 @@ function simulate_point_sources(
     sensor.mask = sensor_mask
     sensor.record = pc.pybuiltins.list(("p",))
 
+    sim_dir = mktempdir(isnothing(kwave_data_path) ? tempdir() : String(kwave_data_path))
     sim_opts = mods.simopts.SimulationOptions(
         pml_inside=false,
         pml_size=pml_guard,
         data_recast=false,
         save_to_disk=true,
+        data_path=sim_dir,
     )
     exec_opts = mods.execopts.SimulationExecutionOptions(
         is_gpu_simulation=use_gpu,
@@ -254,6 +257,7 @@ function simulate_point_sources(
     sensor_data = _as_sensor_matrix(pc.pyconvert(Array, sensor_data_py), length(col_range), nt)
     rf = zeros(Float64, ny, nt)
     rf[col_range, :] .= sensor_data
+    rm(sim_dir; recursive=true, force=true)
 
     info = Dict{Symbol, Any}(
         :receiver_row => row,
@@ -271,6 +275,7 @@ function simulate_point_sources_3d(
     sources::AbstractVector{<:EmissionSource3D},
     cfg::PAMConfig3D;
     use_gpu::Bool=false,
+    kwave_data_path::Union{Nothing, AbstractString}=nothing,
 )
     isempty(sources) && error("At least one emission source is required.")
 
@@ -345,11 +350,13 @@ function simulate_point_sources_3d(
     sensor.mask = sensor_mask
     sensor.record = pc.pybuiltins.list(("p",))
 
+    sim_dir = mktempdir(isnothing(kwave_data_path) ? tempdir() : String(kwave_data_path))
     sim_opts = mods.simopts.SimulationOptions(
         pml_inside=false,
         pml_size=pml_guard,
         data_recast=false,
         save_to_disk=true,
+        data_path=sim_dir,
     )
     exec_opts = mods.execopts.SimulationExecutionOptions(
         is_gpu_simulation=use_gpu,
@@ -376,6 +383,7 @@ function simulate_point_sources_3d(
     end
     # Julia reshape is column-major: ny varies fastest, matching k-Wave's Fortran-order enumeration.
     rf = reshape(sensor_data_flat, ny, nz, nt)
+    rm(sim_dir; recursive=true, force=true)
 
     info = Dict{Symbol, Any}(
         :receiver_row => row,

@@ -96,6 +96,23 @@ geo_recon_ms     = fill(NaN, n_ax, n_y, n_z)
 hasa_recon_ms    = fill(NaN, n_ax, n_y, n_z)
 sim_time_s       = fill(NaN, n_ax, n_y, n_z)
 
+# Progress file: written after every source so a crash loses at most one run.
+const PROGRESS_FILE = joinpath(@__DIR__, "progress.jld2")
+
+function save_progress(;total_elapsed_min=NaN)
+    jldsave(PROGRESS_FILE;
+        geo_errors_mm, hasa_errors_mm,
+        geo_recon_ms, hasa_recon_ms,
+        sim_time_s,
+        AXIAL_MM, LATERAL_Y_MM, LATERAL_Z_MM,
+        APERTURE_MM, FREQ, NUM_CYCLES, AXIAL_STEP,
+        DX, DT, T_MAX, AXIAL_DIM, TRANS_DIM,
+        SKULL_DIST, SLICE_INDEX,
+        med_info,
+        total_time_min=total_elapsed_min,
+    )
+end
+
 # ── Main sweep ────────────────────────────────────────────────────────────────
 
 t_sweep_start = time()
@@ -162,6 +179,9 @@ for (ai, ax_mm) in enumerate(AXIAL_MM),
     @printf("    geo=%.2f mm  hasa=%.2f mm  (geo %.0f ms / hasa %.0f ms GPU march)\n",
             geo_errors_mm[ai, yi, zi], hasa_errors_mm[ai, yi, zi],
             geo_recon_ms[ai, yi, zi], hasa_recon_ms[ai, yi, zi])
+
+    save_progress()
+    @printf("    [progress saved — %d/%d done]\n", s_count, n_total)
 end
 
 total_time_min = (time() - t_sweep_start) / 60
@@ -203,15 +223,6 @@ outdir  = @__DIR__
 ts      = Dates.format(now(), "yyyymmdd_HHMMSS")
 outfile = joinpath(outdir, "results_$(ts).jld2")
 
-jldsave(outfile;
-    geo_errors_mm, hasa_errors_mm,
-    geo_recon_ms, hasa_recon_ms,
-    sim_time_s,
-    AXIAL_MM, LATERAL_Y_MM, LATERAL_Z_MM,
-    APERTURE_MM, FREQ, NUM_CYCLES, AXIAL_STEP,
-    DX, DT, T_MAX, AXIAL_DIM, TRANS_DIM,
-    SKULL_DIST, SLICE_INDEX,
-    med_info,
-    total_time_min,
-)
+save_progress(total_elapsed_min=total_time_min)
+mv(PROGRESS_FILE, outfile; force=true)
 println("Results saved → $outfile")
