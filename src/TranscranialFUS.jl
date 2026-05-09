@@ -34,7 +34,7 @@ export EmissionSource3D, PointSource3D, BubbleCluster3D, make_squiggle_bubble_so
 export PAMConfig3D, pam_Nz, pam_grid_3d, receiver_col_range_y, receiver_col_range_z, depth_coordinates_3d, fit_pam_config_3d, source_grid_index_3d
 export make_pam_medium_3d
 export PAMCUDASetup3D, reconstruct_pam_3d, reconstruct_pam_windowed_3d
-export find_pam_peaks_3d, pam_truth_mask_3d, analyse_pam_3d
+export find_pam_peaks_3d, pam_truth_mask_3d, source_detection_stats_3d, threshold_detection_stats_3d, best_threshold_entry_3d, threshold_outline_entries_3d, analyse_pam_3d
 
 include("focus.jl")
 include("pam.jl")

@@ -79,6 +79,162 @@ function pam_truth_mask_3d(
     return mask
 end
 
+function source_detection_stats_3d(pred, grid, cfg::PAMConfig3D, sources; radius::Real)
+    radius_m = Float64(radius)
+    radius_m >= 0 || error("source detection radius must be non-negative.")
+    isempty(sources) && return Dict{Symbol, Any}(
+        :source_recall => 0.0,
+        :detected_source_count => 0,
+        :num_truth_sources => 0,
+        :mean_detected_source_distance_mm => nothing,
+        :max_detected_source_distance_mm => nothing,
+    )
+    x = collect(grid.x)
+    y = collect(grid.y)
+    z = collect(grid.z)
+    r0 = receiver_row(cfg)
+    row_r = ceil(Int, radius_m / cfg.dx)
+    col_r_y = ceil(Int, radius_m / cfg.dy)
+    col_r_z = ceil(Int, radius_m / cfg.dz)
+    radius2 = radius_m^2
+
+    detected = 0
+    distances_mm = Float64[]
+    for src in sources
+        src_x = x[r0] + src.depth
+        row0 = r0 + round(Int, src.depth / cfg.dx)
+        col0_y = argmin(abs.(y .- src.lateral_y))
+        col0_z = argmin(abs.(z .- src.lateral_z))
+        best_d2 = Inf
+        for row in max(r0 + 1, row0 - row_r):min(size(pred, 1), row0 + row_r)
+            dx2 = (x[row] - src_x)^2
+            for iy in max(1, col0_y - col_r_y):min(size(pred, 2), col0_y + col_r_y)
+                dy2 = (y[iy] - src.lateral_y)^2
+                for iz in max(1, col0_z - col_r_z):min(size(pred, 3), col0_z + col_r_z)
+                    pred[row, iy, iz] || continue
+                    d2 = dx2 + dy2 + (z[iz] - src.lateral_z)^2
+                    if d2 <= radius2 && d2 < best_d2
+                        best_d2 = d2
+                    end
+                end
+            end
+        end
+        if isfinite(best_d2)
+            detected += 1
+            push!(distances_mm, sqrt(best_d2) * 1e3)
+        end
+    end
+
+    return Dict{Symbol, Any}(
+        :source_recall => detected / length(sources),
+        :detected_source_count => detected,
+        :num_truth_sources => length(sources),
+        :mean_detected_source_distance_mm => isempty(distances_mm) ? nothing : mean(distances_mm),
+        :max_detected_source_distance_mm => isempty(distances_mm) ? nothing : maximum(distances_mm),
+    )
+end
+
+function threshold_detection_stats_3d(intensity, grid, cfg, sources; threshold_ratios, truth_radius, truth_mask)
+    truth = isnothing(truth_mask) ? pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius) : truth_mask
+    local_ref = max(maximum(Float64.(intensity)), eps(Float64))
+    return [
+        begin
+            pred = intensity .>= ratio * local_ref
+            tp = count(pred .& truth)
+            fp = count(pred .& .!truth)
+            fn = count(.!pred .& truth)
+            precision = tp + fp == 0 ? 0.0 : tp / (tp + fp)
+            recall = tp + fn == 0 ? 0.0 : tp / (tp + fn)
+            f1 = precision + recall == 0 ? 0.0 : 2 * precision * recall / (precision + recall)
+            source_stats = source_detection_stats_3d(pred, grid, cfg, sources; radius=truth_radius)
+            source_recall = Float64(source_stats[:source_recall])
+            source_f1 = precision + source_recall == 0 ? 0.0 : 2 * precision * source_recall / (precision + source_recall)
+            merge(Dict(
+                :threshold_ratio => ratio,
+                :f1 => source_f1,
+                :source_f1 => source_f1,
+                :voxel_f1 => f1,
+                :precision => precision,
+                :recall => source_recall,
+                :voxel_recall => recall,
+                :true_positive_voxels => tp,
+                :false_positive_voxels => fp,
+                :false_negative_voxels => fn,
+                :predicted_voxels => count(pred),
+                :truth_voxels => count(truth),
+            ), source_stats)
+        end
+        for ratio in threshold_ratios
+    ]
+end
+
+function best_threshold_entry_3d(stats)
+    isempty(stats) && error("No 3D threshold stats available.")
+    best = first(stats)
+    for entry in stats[2:end]
+        score_metric = haskey(entry, :source_f1) ? :source_f1 : :f1
+        best_metric = haskey(best, :source_f1) ? :source_f1 : :f1
+        score = (Float64(entry[score_metric]), Float64(entry[:precision]), Float64(entry[:threshold_ratio]))
+        best_score = (Float64(best[best_metric]), Float64(best[:precision]), Float64(best[:threshold_ratio]))
+        if score > best_score
+            best = entry
+        end
+    end
+    return best
+end
+
+_metric_value(entry, key::Symbol, fallback::Symbol=key) = Float64(get(entry, key, entry[fallback]))
+
+function _argmax_by(entries, scorefn)
+    best = first(entries)
+    best_score = scorefn(best)
+    for entry in entries[2:end]
+        score = scorefn(entry)
+        if score > best_score
+            best = entry
+            best_score = score
+        end
+    end
+    return best
+end
+
+function _threshold_tradeoff_entry_3d(stats, best, target::Symbol)
+    best_f1 = _metric_value(best, :source_f1, :f1)
+    best_value = _metric_value(best, target, target == :source_recall ? :recall : target)
+    metric_key = target == :source_recall ? :source_recall : :precision
+    fallback_key = target == :source_recall ? :recall : :precision
+    candidates = [entry for entry in stats if _metric_value(entry, metric_key, fallback_key) > best_value + 1e-9]
+    for floor_fraction in (0.95, 0.90, 0.0)
+        viable = [entry for entry in candidates if _metric_value(entry, :source_f1, :f1) >= floor_fraction * best_f1]
+        isempty(viable) && continue
+        if target == :source_recall
+            return _argmax_by(viable, entry -> (
+                _metric_value(entry, :source_recall, :recall),
+                _metric_value(entry, :source_f1, :f1),
+                _metric_value(entry, :precision),
+            ))
+        else
+            return _argmax_by(viable, entry -> (
+                _metric_value(entry, :precision),
+                _metric_value(entry, :source_f1, :f1),
+                _metric_value(entry, :source_recall, :recall),
+            ))
+        end
+    end
+    return best
+end
+
+function threshold_outline_entries_3d(stats)
+    best = best_threshold_entry_3d(stats)
+    recall = _threshold_tradeoff_entry_3d(stats, best, :source_recall)
+    precision = _threshold_tradeoff_entry_3d(stats, best, :precision)
+    return [
+        (kind=:best_f1, label="best F1", color=:cyan, entry=best),
+        (kind=:more_recall, label="more recall", color=:lime, entry=recall),
+        (kind=:more_precision, label="more precision", color=:magenta, entry=precision),
+    ]
+end
+
 function analyse_pam_3d(
     intensity::AbstractArray{<:Real, 3},
     grid::NamedTuple,

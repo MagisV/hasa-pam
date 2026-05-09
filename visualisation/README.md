@@ -16,9 +16,10 @@ Default case:
 - 3D network source at `45:0:0 mm`
 - CT skull aberrator, `slice-index=250`, skull distance `20 mm`
 - `dx=0.2 mm`, `dy=0.2 mm`, `dz=0.2 mm`
-- `t_max=400 us`
+- `t_max=300 us`
 - `40 us` windows, `20 us` hop
 - `40 kHz` reconstruction bandwidth
+- random source phases resampled per reconstruction window
 - GPU k-Wave and GPU reconstruction
 
 The default run is intentionally heavy. A quick water smoke test is:
@@ -43,8 +44,8 @@ visualisation/outputs/<timestamp>_window_convergence/
 
 The folder contains:
 
-- `data.jld2`: final cumulative volume, truth mask, threshold search results,
-  selected windows, and per-frame metrics
+- `data.jld2`: RF data, medium arrays, final cumulative volume, truth mask,
+  threshold search results, selected windows, and per-frame metrics
 - `summary.json`: human-readable run summary
 - `frames/frame_0001.png`, etc.
 - `pam_window_convergence.mp4`
@@ -72,10 +73,22 @@ Useful options:
 ```powershell
 julia --project=. visualisation/make_window_convergence.jl `
   --out-dir=visualisation/outputs/test_run `
-  --t-max-us=400 `
+  --t-max-us=300 `
   --dy-mm=0.2 `
   --dz-mm=0.2 `
   --max-windows=0 `
   --fps=12 `
   --frames-only=false
 ```
+
+To reuse an existing k-Wave simulation and medium cache:
+
+```powershell
+julia --project=. visualisation/make_window_convergence.jl `
+  --from-data=visualisation/outputs/<timestamp>_window_convergence/data.jld2 `
+  --out-dir=visualisation/outputs/rerender_attempt
+```
+
+`--from-data` skips medium construction and k-Wave RF simulation. It still
+reruns the window reconstructions so you can adjust rendering and threshold
+logic without paying the forward-simulation cost again.

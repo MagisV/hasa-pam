@@ -22,7 +22,7 @@ function parse_cli(args)
         "out-dir" => "",
         "random-seed" => "42",
         "aberrator" => "skull",
-        "t-max-us" => "400",
+        "t-max-us" => "300",
         "dy-mm" => "0.2",
         "dz-mm" => "0.2",
         "max-windows" => "0",
@@ -33,6 +33,7 @@ function parse_cli(args)
         "kwave-use-gpu" => "true",
         "recon-use-gpu" => "true",
         "zero-pad-factor" => "2",
+        "from-data" => "",
     )
     for arg in args
         startswith(arg, "--") || error("Unsupported argument format: $arg")
@@ -127,9 +128,16 @@ function make_demo_sources(cfg::PAMConfig3D, seed::Integer)
         harmonic_amplitudes = [1.0, 0.6, 0.3],
         gate_duration = 50e-6,
         taper_ratio = 0.25,
-        phase_mode = :geometric,
+        # The actual simulated events are expanded below with fresh random
+        # phases per reconstruction window. Keep the template sources neutral
+        # so the saved metadata does not imply geometric phase driving.
+        phase_mode = :random,
         transducer_depth = -30e-3,
         rng = rng,
+    )
+    meta[:activity_model] = Dict(
+        "activity_mode" => "random_phase_per_window",
+        "template_phase_mode" => "random",
     )
     return sources, meta
 end
@@ -216,20 +224,17 @@ end
 function best_final_threshold(final_intensity, truth_mask, grid, cfg, sources; truth_radius::Real)
     local_ref = max(maximum(Float64.(final_intensity)), eps(Float64))
     thresholds = collect(0.10:0.01:0.95)
-    entries = Dict{Symbol, Any}[]
-    for ratio in thresholds
-        cutoff = Float64(ratio) * local_ref
-        entry = fixed_threshold_stats_3d(final_intensity, cutoff, truth_mask, grid, cfg, sources; truth_radius=truth_radius)
-        entry[:threshold_ratio] = Float64(ratio)
-        entry[:absolute_cutoff] = cutoff
-        push!(entries, entry)
-    end
-    best = first(entries)
-    for entry in entries[2:end]
-        score = (Float64(entry[:source_f1]), Float64(entry[:precision]), Float64(entry[:threshold_ratio]))
-        best_score = (Float64(best[:source_f1]), Float64(best[:precision]), Float64(best[:threshold_ratio]))
-        score > best_score && (best = entry)
-    end
+    entries = threshold_detection_stats_3d(
+        final_intensity,
+        grid,
+        cfg,
+        sources;
+        threshold_ratios=thresholds,
+        truth_radius=truth_radius,
+        truth_mask=truth_mask,
+    )
+    best = best_threshold_entry_3d(entries)
+    best[:absolute_cutoff] = Float64(best[:threshold_ratio]) * local_ref
     return best, entries
 end
 
@@ -468,8 +473,24 @@ function render_frame(path, cumulative, current, truth_mask, fixed_cutoff, best_
     return path
 end
 
-function encode_mp4(frames_dir, mp4_path, fps::Integer)
+function find_ffmpeg()
     ffmpeg = Sys.which("ffmpeg")
+    !isnothing(ffmpeg) && return ffmpeg
+    if Sys.iswindows() && haskey(ENV, "LOCALAPPDATA")
+        winget_root = joinpath(ENV["LOCALAPPDATA"], "Microsoft", "WinGet", "Packages")
+        if isdir(winget_root)
+            for (root, _, files) in walkdir(winget_root)
+                if "ffmpeg.exe" in files
+                    return joinpath(root, "ffmpeg.exe")
+                end
+            end
+        end
+    end
+    return nothing
+end
+
+function encode_mp4(frames_dir, mp4_path, fps::Integer)
+    ffmpeg = find_ffmpeg()
     pattern = joinpath(frames_dir, "frame_%04d.png")
     if isnothing(ffmpeg)
         println("ffmpeg not found on PATH. Frames are ready in: $frames_dir")
@@ -499,12 +520,33 @@ function print_dry_run(opts, cfg, fitted_cfg, sources, out_dir, window_config)
     println("  recon freqs MHz  : ", join(round.(default_recon_frequencies(sources) ./ 1e6; digits=3), ", "))
     println("  CUDA functional  : ", CUDA.functional())
     println("  k-Wave available : ", kwave_available())
-    println("  ffmpeg           : ", something(Sys.which("ffmpeg"), "not found"))
+    println("  ffmpeg           : ", something(find_ffmpeg(), "not found"))
     return nothing
+end
+
+function load_cached_inputs(path::AbstractString)
+    d = load(path)
+    required = ["cfg", "sources", "network_meta", "c", "rho", "medium_info", "rf", "grid", "simulation_info"]
+    missing = filter(key -> !haskey(d, key), required)
+    isempty(missing) || error("--from-data is missing required keys: $(join(missing, ", "))")
+    return (
+        cfg = d["cfg"],
+        sources = d["sources"],
+        network_meta = d["network_meta"],
+        c = d["c"],
+        rho = d["rho"],
+        medium_info = d["medium_info"],
+        rf = d["rf"],
+        grid = d["grid"],
+        simulation_info = d["simulation_info"],
+        sim_sources = haskey(d, "sim_sources") ? d["sim_sources"] : EmissionSource3D[],
+        n_frames = haskey(d, "n_frames") ? d["n_frames"] : missing,
+    )
 end
 
 function main()
     opts = parse_cli(ARGS)
+    from_data = strip(opts["from-data"])
     seed = parse(Int, opts["random-seed"])
     aberrator = parse_aberrator(opts["aberrator"])
     dry_run = parse_bool(opts["dry-run"])
@@ -523,14 +565,6 @@ function main()
     summary_path = joinpath(out_dir, "summary.json")
     mp4_path = joinpath(out_dir, "pam_window_convergence.mp4")
 
-    cfg_base = make_demo_config(opts)
-    sources, network_meta = make_demo_sources(cfg_base, seed)
-    cfg = fit_pam_config_3d(
-        cfg_base,
-        sources;
-        min_bottom_margin=10e-3,
-        reference_depth=aberrator == :skull ? 20e-3 : nothing,
-    )
     window_config = PAMWindowConfig(
         enabled=true,
         window_duration=40e-6,
@@ -540,34 +574,68 @@ function main()
         accumulation=:intensity,
     )
 
+    cfg_base = make_demo_config(opts)
+    if isempty(from_data)
+        sources, network_meta = make_demo_sources(cfg_base, seed)
+        cfg = fit_pam_config_3d(
+            cfg_base,
+            sources;
+            min_bottom_margin=10e-3,
+            reference_depth=aberrator == :skull ? 20e-3 : nothing,
+        )
+    else
+        cached = load_cached_inputs(abspath(from_data))
+        cfg = cached.cfg
+        sources = cached.sources
+        network_meta = cached.network_meta
+    end
+
     if dry_run
         print_dry_run(opts, cfg_base, cfg, sources, out_dir, window_config)
+        if !isempty(from_data)
+            println("  from data        : ", abspath(from_data))
+        end
         return nothing
     end
 
     mkpath(frames_dir)
 
-    println("Building medium...")
-    c, rho, medium_info = make_pam_medium_3d(
-        cfg;
-        aberrator=aberrator,
-        skull_to_transducer=20e-3,
-        slice_index_z=250,
-    )
+    if isempty(from_data)
+        println("Building medium...")
+        c, rho, medium_info = make_pam_medium_3d(
+            cfg;
+            aberrator=aberrator,
+            skull_to_transducer=20e-3,
+            slice_index_z=250,
+        )
 
-    println("Expanding random-phase-per-window source events...")
-    rng_sim = Random.MersenneTwister(seed + 1)
-    sim_sources, n_frames = TranscranialFUS._expand_sources_per_window(
-        sources,
-        window_config.window_duration,
-        window_config.hop,
-        cfg.t_max,
-        rng_sim;
-        variability=SourceVariabilityConfig(frequency_jitter_fraction=0.01),
-    )
+        println("Expanding random-phase-per-window source events...")
+        rng_sim = Random.MersenneTwister(seed + 1)
+        sim_sources, n_frames = TranscranialFUS._expand_sources_per_window(
+            sources,
+            window_config.window_duration,
+            window_config.hop,
+            cfg.t_max,
+            rng_sim;
+            variability=SourceVariabilityConfig(frequency_jitter_fraction=0.01),
+        )
 
-    println("Simulating RF data with $(length(sim_sources)) emission events...")
-    rf, grid, simulation_info = simulate_point_sources_3d(c, rho, sim_sources, cfg; use_gpu=use_gpu_sim)
+        println("Simulating RF data with $(length(sim_sources)) emission events...")
+        rf, grid, simulation_info = simulate_point_sources_3d(c, rho, sim_sources, cfg; use_gpu=use_gpu_sim)
+        println("Saving RF/medium cache to $data_path")
+        @save data_path cfg sources network_meta c rho medium_info rf grid simulation_info sim_sources n_frames window_config
+    else
+        println("Loading cached RF/medium data from $(abspath(from_data))")
+        cached = load_cached_inputs(abspath(from_data))
+        c = cached.c
+        rho = cached.rho
+        medium_info = cached.medium_info
+        rf = cached.rf
+        grid = cached.grid
+        simulation_info = cached.simulation_info
+        sim_sources = cached.sim_sources
+        n_frames = cached.n_frames
+    end
 
     selected_ranges, selected_energy, skipped_ranges, window_samples, hop_samples, energy_threshold =
         qualify_windows(rf, cfg, window_config, max_windows)
@@ -654,6 +722,7 @@ function main()
         "mp4_path" => mp4_path,
         "random_seed" => seed,
         "aberrator" => String(aberrator),
+        "from_data" => isempty(from_data) ? nothing : abspath(from_data),
         "grid" => Dict(
             "nx" => pam_Nx(cfg),
             "ny" => pam_Ny(cfg),
@@ -666,6 +735,7 @@ function main()
             "zero_pad_factor" => cfg.zero_pad_factor,
         ),
         "source_model" => "network3d",
+        "source_phase_mode" => "random_phase_per_window",
         "source_count" => length(sources),
         "emission_event_count" => length(sim_sources),
         "n_frames_from_source_expansion" => n_frames,
@@ -699,7 +769,7 @@ function main()
     println("Saving data bundle...")
     selected_ranges_pairs = [[first(r), last(r)] for r in selected_ranges]
     skipped_ranges_pairs = [[first(r), last(r)] for r in skipped_ranges]
-    @save data_path cfg sources network_meta medium_info simulation_info recon_frequencies bandwidth_hz truth_radius truth_mask final_cumulative best_threshold threshold_entries selected_ranges_pairs skipped_ranges_pairs metrics_by_frame
+    @save data_path cfg sources network_meta c rho medium_info rf grid simulation_info sim_sources n_frames window_config recon_frequencies bandwidth_hz truth_radius truth_mask final_cumulative best_threshold threshold_entries selected_ranges_pairs skipped_ranges_pairs metrics_by_frame
 
     open(summary_path, "w") do io
         JSON3.pretty(io, summary)
