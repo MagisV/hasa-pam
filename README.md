@@ -39,12 +39,19 @@ The PAM workflow uses the complementary problem. Here the sources are real emitt
 - `src/ct.jl`: DICOM loading, ROI crop, and XY resampling
 - `src/medium.jl`: HU conversion, skull masking, and focusing-medium construction
 - `src/focus.jl`: focusing configs, placement handling, HASA/geometric delays, and plotting helpers
-- `src/pam.jl`: PAM configs, point-source models, skull/lens medium generation, reconstruction, metrics, and sweeps
+- `src/pam.jl`: compatibility include for the split PAM implementation under `src/pam/`
+- `src/pam/sources.jl`: PAM source models, squiggle source construction, source signals, and phase variability
+- `src/pam/config.jl`: PAM configs, grid helpers, fitting, and source indexing
+- `src/pam/medium.jl`: skull/lens PAM medium generation
+- `src/pam/reconstruction.jl`: geometric ASA/HASA propagation and windowed reconstruction loop
+- `src/pam/analysis.jl`: PAM peaks, masks, PSF helpers, localization metrics, and detection metrics
+- `src/pam/workflow.jl`: case-level simulation/reconstruction orchestration
+- `src/pam/sweep.jl`: PAM sweep helpers and aggregation
 - `src/kwave_wrapper.jl`: Julia-to-`k-wave-python` bridge
 - `src/analysis.jl`: focusing analysis helpers and `run_focus_case`
 - `scripts/run_focus_case.jl`: run one focusing case
 - `scripts/compare_estimators.jl`: compare geometric and HASA focusing
-- `scripts/run_pam_case.jl`: simulate point emitters and reconstruct them with PAM
+- `scripts/run_pam.jl`: unified PAM runner for coordinate-placed point sources and squiggle activity
 - `scripts/run_pam_sweep.jl`: run a single-source localization sweep and summarize corrected vs uncorrected error
 - `test/runtests.jl`: unit tests, smoke tests, and optional integration tests
 
@@ -67,9 +74,9 @@ The first call into the k-Wave wrapper may need to resolve Python packages and k
 
 ## CT Data
 
-The default CT path mirrors the local notebook setup:
+The default CT path points to the local DICOM folder:
 
-`../Ultrasound/DIRU_20240404_human_skull_phase_correction_1_2_(skull_Normal)/DICOM/PAT_0000/STD_0000/SER_0002/OBJ_0001`
+`C:\Users\AU-FUS-Valentin\Desktop\OBJ_0001`
 
 You can override it in the scripts with `--ct-path=...`.
 
@@ -203,7 +210,6 @@ Core types:
 - `PointSource2D`
 - `BubbleCluster2D`
 - `GaussianPulseCluster2D`
-- `StochasticSource2D`
 - `PAMConfig`
 - `PAMWindowConfig`
 - `SourceVariabilityConfig`
@@ -211,8 +217,7 @@ Core types:
 Key helpers:
 
 - `fit_pam_config`
-- `make_vascular_bubble_clusters`
-- `make_burst_train_sources`
+- `make_squiggle_bubble_sources`
 - `make_pam_medium`
 - `simulate_point_sources`
 - `reconstruct_pam`
@@ -243,161 +248,319 @@ For `--aberrator=skull`:
 
 ### Run One PAM Case
 
-Default single-source example:
+The maintained PAM entrypoint is `scripts/run_pam.jl`. It supports coordinate-placed point sources and squiggle activity sources.
+
+Single-source homogeneous-water baseline:
 
 ```bash
-julia --project=. scripts/run_pam_case.jl \
-  --sources-mm=30:0 \
-  --aberrator=lens
-```
-
-Homogeneous-water baseline:
-
-```bash
-julia --project=. scripts/run_pam_case.jl \
+julia --project=. scripts/run_pam.jl \
+  --source-model=point \
   --sources-mm=30:0 \
   --aberrator=none
 ```
 
-Single-source transcranial case:
+Simple 3D homogeneous-water point-source run (requires a CUDA-capable GPU):
 
 ```bash
-julia --project=. scripts/run_pam_case.jl \
-  --sources-mm=50:0 \
-  --aberrator=skull \
-  --slice-index=250 \
-  --skull-transducer-distance-mm=30
+julia --project=. scripts/run_pam.jl \
+  --dimension=3 \
+  --source-model=point \
+  --sources-mm=30:2:-1 \
+  --aberrator=none \
+  --use-gpu=true
 ```
 
 Multiple point emitters with explicit phase and delay control:
 
 ```bash
-julia --project=. scripts/run_pam_case.jl \
+julia --project=. scripts/run_pam.jl \
+  --source-model=point \
   --sources-mm=25:-6,32:0,40:8 \
   --phases-deg=0,90,180 \
   --delays-us=0,2,4 \
   --aberrator=lens
 ```
 
-Vascular-like bubble aggregate with skull correction. `--clusters-mm` gives one or more vascular anchors; each anchor expands into many small harmonic bubble emitters along a paper-like squiggly vessel by default. The default aggregate analysis mode is detection, so `summary.json` reports precision/recall-style map recovery instead of one distance error per cluster. Squiggle and bundle topologies use a continuous centerline tube truth mask for detection; `--vascular-topology=tree` keeps the older branching stress case.
-Cluster runs default to an 80 mm axial domain so activity below the skull is not clipped near 60 mm; override with `--axial-mm=...` if needed. The reconstruction reference speed is averaged over the receiver-to-source region, so extra trailing axial padding does not change the correction.
-
-For vascular PAM, the default cluster workflow is an activity-area reconstruction rather than single-bubble localization. In `--recon-mode=auto`, `--cluster-model=vascular` selects windowed incoherent reconstruction, while point-source runs keep the original full-record reconstruction. The RF record is split into short tapered windows, low-energy windows are skipped, each remaining window is reconstructed with the existing geometric ASA and HASA code, and the output maps are accumulated as intensity:
+Squiggle activity uses `--anchors-mm=depth:lateral,...`; each anchor expands into harmonic bubble emitters sampled along one squiggly centerline. In `--recon-mode=auto`, `--source-model=squiggle` selects windowed incoherent reconstruction:
 
 ```text
 I_total(x,z) = mean_windows sum_f |p_hasa(x,z,f,window)|^2
 ```
 
-The important detail is that windows are combined after `abs2`, not by summing complex pressure. This avoids preserving arbitrary phase interference between simultaneously active bubbles and instead estimates where acoustic activity occurred over the vascular region. The resulting vascular figures and detection metrics should be interpreted as accumulated activity or dose maps, not individual bubble position estimates.
-
-The synthetic vascular source model also has a time-varying mode. `--activity-mode=burst-train` expands each physical vascular emitter into short delayed Gaussian pulse events within the gate. By default, every physical emitter can be active in each activity frame, with small amplitude and phase jitter across frames to decorrelate the windows. `summary.json` records both `physical_source_count` and `emission_event_count`.
+Current leading squiggle setting:
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=54:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
-  --vascular-length-mm=12 \
-  --vascular-squiggle-amplitude-mm=1.5 \
-  --vascular-squiggle-wavelength-mm=8 \
-  --vascular-source-spacing-mm=0.8 \
-  --vascular-radius-mm=1.0 \
-  --detection-threshold-ratio=0.2 \
-  --fundamental-mhz=0.5 \
-  --harmonics=2,3 \
-  --harmonic-amplitudes=1.0,0.6 \
-  --gate-us=50 \
-  --phase-mode=geometric \
-  --aberrator=skull
+julia --project=. scripts/run_pam.jl `
+  --source-model=squiggle `
+  --anchors-mm=45:0 `
+  --aberrator=skull `
+  --boundary-threshold-ratios=0.6,0.65,0.7 `
+  --cavitation-model=harmonic-cos `
+  --frequency-jitter-percent=1 `
+  --harmonic-amplitudes=1.0,0.6,0.3 `
+  --harmonics=2,3,4 `
+  --random-seed=45 `
+  --receiver-aperture-mm=full `
+  --recon-bandwidth-khz=500 `
+  --recon-hop-us=10 `
+  --recon-min-window-energy-ratio=0.001 `
+  --recon-window-us=20 `
+  --skull-transducer-distance-mm=30 `
+  --slice-index=250 `
+  --source-phase-mode=random_phase_per_window `
+  --t-max-us=500 `
+  --transverse-mm=102.4 `
+  --vascular-length-mm=12 `
+  --recon-progress=true `
+  --use-gpu=true `
+  --benchmark=true
 ```
 
-Longer squiggle example in homogeneous water, using the windowed activity model explicitly:
+Running reconstruction only with previous k-wave simulation as data:
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=45:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
-  --vascular-length-mm=30 \
-  --vascular-squiggle-amplitude-mm=1 \
-  --vascular-squiggle-wavelength-mm=30 \
-  --vascular-source-spacing-mm=0.2 \
-  --vascular-min-separation-mm=0.15 \
-  --vascular-max-sources-per-anchor=150 \
-  --vascular-position-jitter-mm=0.5 \
-  --vascular-radius-mm=1.0 \
-  --fundamental-mhz=0.2 \
-  --harmonics=2,4,6 \
-  --harmonic-amplitudes=1.0,0.6,0.4 \
-  --cavitation-model=gaussian-pulse \
-  --gate-us=30 \
-  --n-bubbles=1 \
-  --phase-mode=geometric \
-  --random-seed=1 \
-  --recon-mode=windowed \
-  --recon-window-us=10 \
-  --recon-hop-us=5 \
-  --recon-window-taper=hann \
-  --recon-min-window-energy-ratio=0.001 \
-  --recon-bandwidth-khz=150 \
-  --activity-mode=burst-train \
-  --activity-frame-us=10 \
-  --activity-hop-us=5 \
-  --activity-phase-jitter-rad=0.3 \
-  --activity-amplitude-jitter=0.5 \
-  --activity-active-probability=1.0 \
-  --aberrator=none
+julia --project=. scripts/run_pam.jl `
+  --from-run-dir=outputs/20260507_102449_run_pam_skull_squiggle_1anchors_21src_ax80p0mm_lat102p0mm_f0p5mhz_h234_slice250_st30p0mm_randomphaseperwindow `
+  --boundary-threshold-ratios=0.6,0.65,0.7 `
+  --recon-bandwidth-khz=500 `
+  --recon-hop-us=10 `
+  --recon-min-window-energy-ratio=0.001 `
+  --recon-window-us=20 `
+  --recon-progress=true `
+  --use-gpu=true `
+  --window-batch=8 `
+  --benchmark=false
 ```
 
-Use `--vascular-topology=bundle --vascular-bundle-count=3 --vascular-bundle-spacing-mm=2.0` for a small set of parallel squiggly vessels, or `--vascular-topology=tree --vascular-branch-levels=2` for the previous branching model.
-
-The one-emitter-per-aggregate behavior is available with `--cluster-model=point --analysis-mode=localization`.
-
-Current leading setting from the `20260506_103348_pam_aperture_sweep` run, ranked by `best_hasa_f1`, uses a wide receiver aperture with no dropout. In the first completed seed, `--receiver-aperture-mm=100` and `--receiver-aperture-mm=full` are effectively tied (`best_hasa_f1` about `0.428`), and both are clearly better than the earlier `50 mm` aperture:
+3D
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=point `
+  --sources-mm=30:2:-1 `
+  --aberrator=none `
+  --use-gpu=true `
+```
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --aberrator=skull \
-  --activity-mode=static \
-  --boundary-threshold-ratios=0.6,0.65,0.7 \
-  --cavitation-model=harmonic-cos \
-  --cluster-model=vascular \
-  --clusters-mm=45:0 \
-  --dropout-probability=0.0 \
-  --frequency-jitter-percent=1 \
-  --harmonic-amplitudes=1.0,0.6,0.3 \
-  --harmonics=2,3,4 \
-  --random-seed=42 \
-  --receiver-aperture-mm=100 \
-  --recon-bandwidth-khz=500 \
-  --recon-hop-us=10 \
-  --recon-min-window-energy-ratio=0.001 \
-  --recon-window-us=20 \
-  --skull-transducer-distance-mm=30 \
-  --slice-index=250 \
-  --source-phase-mode=random_phase_per_window \
-  --t-max-us=500 \
-  --transverse-mm=102.4 \
-  --vascular-length-mm=12 \
-  --vascular-topology=squiggle
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=point `
+  --sources-mm=30:2:-1 `
+  --frequency-mhz=0.5 `
+  --num-cycles=5 `
+  --aberrator=none `
+  --axial-mm=60 `
+  --transverse-mm=32 `
+  --t-max-us=60 `
+  --receiver-aperture-mm=full `
+  --use-gpu=true `
+  --recon-progress=true
+
+```
+
+3D squiggle vascular source (homogeneous water):
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=squiggle `
+  --anchors-mm=55:0:0 `
+  --vascular-length-mm=12 `
+  --vascular-squiggle-amplitude-mm=1.5 `
+  --vascular-squiggle-amplitude-x-mm=1.0 `
+  --squiggle-phase-x-deg=90 `
+  --harmonics=2,3,4 `
+  --harmonic-amplitudes=1.0,0.6,0.3 `
+  --aberrator=none `
+  --axial-mm=80 `
+  --transverse-mm=64 `
+  --dx-mm=0.2 `
+  --dy-mm=0.5 `
+  --dz-mm=0.5 `
+  --t-max-us=250 `
+  --sim-mode=kwave `
+  --use-gpu=true `
+  --recon-progress=true
+```
+
+3D squiggle vascular source with CT skull:
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=squiggle `
+  --gate-us=45 `
+  --anchors-mm=42:0:0 `
+  --vascular-length-mm=12 `
+  --vascular-squiggle-amplitude-mm=0.3 `
+  --vascular-squiggle-amplitude-x-mm=0.2 `
+  --vascular-squiggle-wavelength-mm=8 `
+  --squiggle-phase-x-deg=90 `
+  --vascular-source-spacing-mm=0.5 `
+  --vascular-min-separation-mm=0.25 `
+  --harmonics=2,3,4 `
+  --harmonic-amplitudes=1.0,0.6,0.3 `
+  --aberrator=skull `
+  --skull-transducer-distance-mm=20 `
+  --slice-index=250 `
+  --axial-mm=70 `
+  --transverse-mm=64 `
+  --dx-mm=0.2 `
+  --dy-mm=0.5 `
+  --dz-mm=0.5 `
+  --t-max-us=250 `
+  --fundamental-mhz=0.5 `
+  --receiver-aperture-mm=full `
+  --source-phase-mode=random_phase_per_window `
+  --frequency-jitter-percent=1 `
+  --recon-window-us=40 `
+  --recon-hop-us=20 `
+  --recon-bandwidth-khz=40 `
+  --auto-threshold-search=true `
+  --auto-threshold-min=0.10 `
+  --auto-threshold-max=0.95 `
+  --auto-threshold-step=0.01 `
+  --sim-mode=kwave `
+  --use-gpu=true `
+  --window-batch=2 `
+  --recon-progress=true
+```
+
+3D synthetic vascular network at the transducer focus:
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=network `
+  --anchors-mm=45:0:0 `
+  --network-axial-radius-mm=10 `
+  --network-lateral-y-radius-mm=1.5 `
+  --network-lateral-z-radius-mm=1.5 `
+  --network-root-count=12 `
+  --network-generations=3 `
+  --network-branch-length-mm=5 `
+  --network-branch-step-mm=0.4 `
+  --network-branch-angle-deg=36 `
+  --network-tortuosity=0.18 `
+  --network-orientation=isotropic `
+  --network-density-axial-sigma-mm=10.0 `
+  --network-density-lateral-y-sigma-mm=1.5 `
+  --network-density-lateral-z-sigma-mm=1.5 `
+  --network-max-sources-per-center=80 `
+  --vascular-source-spacing-mm=0.5 `
+  --vascular-min-separation-mm=0.25 `
+  --fundamental-mhz=0.5 `
+  --harmonics=2,3,4 `
+  --harmonic-amplitudes=1.0,0.6,0.3 `
+  --aberrator=skull `
+  --skull-transducer-distance-mm=20 `
+  --slice-index=250 `
+  --axial-mm=70 `
+  --transverse-mm=64 `
+  --dx-mm=0.2 `
+  --dy-mm=0.5 `
+  --dz-mm=0.5 `
+  --t-max-us=250 `
+  --receiver-aperture-mm=full `
+  --source-phase-mode=random_phase_per_window `
+  --frequency-jitter-percent=1 `
+  --recon-window-us=40 `
+  --recon-hop-us=20 `
+  --recon-bandwidth-khz=40 `
+  --auto-threshold-search=true `
+  --auto-threshold-min=0.10 `
+  --auto-threshold-max=0.95 `
+  --auto-threshold-step=0.01 `
+  --sim-mode=kwave `
+  --use-gpu=true `
+  --window-batch=2 `
+  --recon-progress=true
+```
+
+`--source-model=network` grows a random branching 3D centerline structure, clips
+it to an ellipsoid around each `--anchors-mm=depth:y:z` center, then samples
+bubble emitters along those branches with an anisotropic Gaussian density. The
+default 500 kHz focal-volume support is roughly `20 mm` axial length by `3 mm`
+lateral width (`10 mm` axial radius and `1.5 mm` Y/Z radii). The default density
+sigmas match those radii, and the source cap is `80` bubbles per center.
+`--network-orientation=horizontal` and `--network-orientation=axial` are
+available for controlled priors, and `--network-radius-mm` remains available as
+a spherical shorthand.
+
+For sparse 3D squiggle and network sources, the threshold summary reports both voxel overlap
+metrics and source-aware metrics. `source_f1` combines voxel precision with the
+fraction of simulated bubble centers hit within the source detection radius, and
+is used to select the best 3D threshold. By default, 3D analysis runs a dense
+post-reconstruction threshold search and `activity_boundaries.png` shows the
+precision, recall, and F1 curves plus three readable outlines: best F1, a
+recall-biased threshold, and a precision-biased threshold.
+
+The reconstruction bandwidth is an important runtime knob: tighter bandwidths
+select fewer FFT frequency bins for ASA/HASA, reducing reconstruction time
+roughly in proportion to the frequency-bin count. In the focused 3D skull
+sweeps, `40 kHz` bandwidth with `1%` frequency jitter was the best runtime
+default: it stayed in the same F1 range as wider bands while reducing the HASA
+march time substantially. `60 kHz` with `2%` jitter recovered a little more F1
+at extra cost and is a useful accuracy check.
+
+3D heterogeneous skull medium (CT-backed):
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --transverse-mm=64 `
+  --axial-mm=80 `
+  --dx-mm=0.2 `
+  --dy-mm=0.5 `
+  --dz-mm=0.5 `
+  --t-max-us=80 `
+  --source-model=point `
+  --sources-mm=50:2:-1 `
+  --num-cycles=5 `
+  --aberrator=skull `
+  --skull-transducer-distance-mm=30 `
+  --frequency-mhz=0.5 `
+  --slice-index=250 `
+  --receiver-aperture-mm=full `
+  --use-gpu=true `
+  --recon-progress=true
 ```
 
 The PAM run scripts write:
 
 - `overview.png`
-- `activity_boundaries.png` for vascular cluster runs, with threshold-dependent active-region boundaries overlaid on the heatmaps plus a quantitative metrics table
+- `activity_boundaries.png`, with threshold-dependent active-region boundaries overlaid on the heatmaps, precision/recall/F1 threshold curves, and selected-threshold metrics
 - `summary.json`
 - `result.jld2`
 
 To rerun only reconstruction and figure generation from saved RF data, pass an existing output folder:
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --from-run-dir=outputs/20260504_135027_run_pam_clusters_skull_vascular_1anchors_68src_f0p5mhz_h23_geometric_ax200p0mm_slice250_st30p0mm \
+julia --project=. scripts/run_pam.jl \
+  --from-run-dir=outputs/previous_pam_run \
   --recon-bandwidth-khz=20
 ```
 
-`--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources/clusters, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, time step, and GPU simulation are rejected in this mode; reconstruction and analysis options such as `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, `--peak-method`, and cluster detection thresholds remain adjustable.
+`--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, and time step are rejected in this mode; reconstruction and analysis options such as `--use-gpu`, `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, `--peak-method`, and detection thresholds remain adjustable.
+
+### CUDA PAM Reconstruction
+
+`--use-gpu=true` enables the CUDA.jl PAM reconstruction backend. It requires a functional NVIDIA CUDA GPU; if CUDA.jl cannot see one, reconstruction errors clearly instead of silently falling back to CPU. The first CUDA path uses Float32 device arithmetic, keeps the existing shifted FFT convention (`fftshift`/`ifftshift`) for CPU/GPU parity, and still marches corrected HASA rows serially while running the lateral FFTs and per-row vector operations on the GPU.
+
+Small case for fast CUDA iteration (no CT data required, ~10 s end-to-end):
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --source-model=point `
+  --sources-mm=30:0 `
+  --aberrator=none `
+  --axial-mm=40 `
+  --transverse-mm=51.2 `
+  --t-max-us=100 `
+  --use-gpu=true `
+  --recon-progress=true
+```
 
 ### Source Phase Modes
 
@@ -409,14 +572,13 @@ julia --project=. scripts/run_pam_clusters.jl \
 | `random_static_phase` | Each source draws a random phase once at setup and keeps it for the full simulation. |
 | `random_phase_per_window` | Each source emits once per reconstruction window with fresh random phases. A **single** k-Wave simulation spans all windows; windowed reconstruction is forced automatically. |
 | `random_phase_per_realization` | Each of `--n-realizations` k-Wave runs draws fresh random phases; intensity maps are averaged across runs. |
-| `stochastic_broadband` | Each source is replaced with a `StochasticSource2D` that emits independent bandlimited noise centred on the cluster harmonics. |
 
 **Coherent baseline** — sources lock in phase, single simulation:
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=point \
+julia --project=. scripts/run_pam.jl \
+  --source-model=point \
+  --sources-mm=30:0 \
   --source-phase-mode=coherent \
   --phase-mode=coherent \
   --aberrator=none
@@ -425,10 +587,9 @@ julia --project=. scripts/run_pam_clusters.jl \
 **Random static phase** — fixed random phases, single simulation:
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
+julia --project=. scripts/run_pam.jl \
+  --source-model=squiggle \
+  --anchors-mm=30:0 \
   --vascular-length-mm=12 \
   --source-phase-mode=random_static_phase \
   --phase-mode=random \
@@ -439,10 +600,9 @@ julia --project=. scripts/run_pam_clusters.jl \
 **Incoherent averaging over realizations** — 20 independent phase draws:
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
+julia --project=. scripts/run_pam.jl \
+  --source-model=squiggle \
+  --anchors-mm=30:0 \
   --vascular-length-mm=12 \
   --source-phase-mode=random_phase_per_realization \
   --n-realizations=20 \
@@ -453,10 +613,9 @@ julia --project=. scripts/run_pam_clusters.jl \
 **Incoherent averaging per window** — single k-Wave run; each source gets fresh random phases per window:
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
+julia --project=. scripts/run_pam.jl \
+  --source-model=squiggle \
+  --anchors-mm=30:0 \
   --vascular-length-mm=12 \
   --source-phase-mode=random_phase_per_window \
   --recon-window-us=10 \
@@ -465,80 +624,18 @@ julia --project=. scripts/run_pam_clusters.jl \
   --aberrator=none
 ```
 
-Per-window source variability can be added to the same mode. Dropout is off by default with `--dropout-probability=0.0`; amplitudes are fixed by default with `--amplitude-distribution=fixed`; frequency jitter is off by default with `--frequency-jitter-percent=0.0`.
+For per-window random phase, `--frequency-jitter-percent` applies a multiplicative jitter to each source fundamental frequency.
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
+julia --project=. scripts/run_pam.jl \
+  --source-model=squiggle \
+  --anchors-mm=30:0 \
   --vascular-length-mm=12 \
   --source-phase-mode=random_phase_per_window \
   --recon-window-us=10 \
   --recon-hop-us=5 \
-  --amplitude-distribution=lognormal \
-  --amplitude-sigma=0.5 \
   --frequency-jitter-percent=5 \
-  --dropout-probability=0.5 \
   --t-max-us=200 \
-  --random-seed=42 \
-  --aberrator=none
-```
-1
-```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
-  --vascular-length-mm=12 \
-  --source-phase-mode=random_phase_per_window \
-  --recon-window-us=10 \
-  --recon-hop-us=5 \
-  --amplitude-distribution=lognormal \
-  --amplitude-sigma=0.5 \
-  --frequency-jitter-percent=5 \
-  --dropout-probability=0 \
-  --t-max-us=500 \
-  --random-seed=42 \
-  --aberrator=none
-```
-
-2
-
-3
-```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
-  --vascular-length-mm=12 \
-  --source-phase-mode=random_phase_per_window \
-  --recon-window-us=10 \
-  --recon-hop-us=5 \
-  --amplitude-distribution=fixed \
-  --amplitude-sigma=0.5 \
-  --frequency-jitter-percent=5 \
-  --dropout-probability=0 \
-  --t-max-us=500 \
-  --random-seed=42 \
-  --aberrator=none
-```
-
-4
-```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
-  --vascular-length-mm=12 \
-  --source-phase-mode=random_phase_per_window \
-  --recon-window-us=10 \
-  --recon-hop-us=5 \
-  --amplitude-distribution=fixed \
-  --amplitude-sigma=0.5 \
-  --frequency-jitter-percent=0 \
-  --dropout-probability=0 \
-  --t-max-us=500 \
   --random-seed=42 \
   --aberrator=none
 ```
@@ -548,12 +645,11 @@ Supported amplitude distributions are `fixed`, `uniform`, `lognormal`, and `gaus
 **Stochastic broadband** — each source emits independent noise centred on its harmonic frequencies:
 
 ```bash
-julia --project=. scripts/run_pam_clusters.jl \
-  --clusters-mm=30:0 \
-  --cluster-model=vascular \
-  --vascular-topology=squiggle \
+julia --project=. scripts/run_pam.jl \
+  --source-model=squiggle \
+  --anchors-mm=30:0 \
   --vascular-length-mm=12 \
-  --source-phase-mode=stochastic_broadband \
+  --source-phase-mode=random_phase_per_window \
   --random-seed=42 \
   --aberrator=none
 ```
@@ -641,10 +737,10 @@ The tests currently cover:
 - HU-to-medium conversion
 - skull boundary detection and masking
 - focusing placement resolution
-- vascular PAM source generation and detection metrics
+- squiggle PAM source generation and detection metrics
 - PAM medium fitting and skull placement
 - PAM sweep aggregation and target filtering
-- source phase mode normalisation, `StochasticSource2D` signal generation, phase resampling
+- source phase mode normalisation and per-window phase/frequency resampling
 - opt-in k-Wave smoke tests
 
 ## AI Usage

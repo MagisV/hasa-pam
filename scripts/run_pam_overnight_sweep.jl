@@ -5,7 +5,7 @@ using JSON3
 using Printf
 
 const PROJECT_ROOT = normpath(joinpath(@__DIR__, ".."))
-const CLUSTER_SCRIPT = joinpath(PROJECT_ROOT, "scripts", "run_pam_clusters.jl")
+const PAM_SCRIPT = joinpath(PROJECT_ROOT, "scripts", "run_pam.jl")
 
 function parse_cli(args)
     opts = Dict{String, String}(
@@ -13,12 +13,16 @@ function parse_cli(args)
         "per-run-timeout-min" => "90",
         "output-root" => "",
         "from-run-dir" => "",
-        "clusters-mm" => "45:0",
+        "anchors-mm" => "45:0",
         "random-seed" => "42",
         "simulation-random-seeds" => "42,43,44,45,46",
         "slice-index" => "250",
         "skull-transducer-distance-mm" => "30",
         "boundary-threshold-ratios" => "0.6,0.65,0.7",
+        "auto-threshold-search" => "true",
+        "auto-threshold-min" => "0.10",
+        "auto-threshold-max" => "0.95",
+        "auto-threshold-step" => "0.01",
         "use-gpu" => "false",
         "dry-run" => "false",
         "force" => "false",
@@ -58,9 +62,8 @@ end
 
 function common_sim_args(opts; seed=opts["random-seed"])
     return Dict(
-        "clusters-mm" => opts["clusters-mm"],
-        "cluster-model" => "vascular",
-        "vascular-topology" => "squiggle",
+        "source-model" => "squiggle",
+        "anchors-mm" => opts["anchors-mm"],
         "vascular-length-mm" => "12",
         "aberrator" => "skull",
         "slice-index" => opts["slice-index"],
@@ -68,6 +71,10 @@ function common_sim_args(opts; seed=opts["random-seed"])
         "random-seed" => seed,
         "use-gpu" => opts["use-gpu"],
         "boundary-threshold-ratios" => opts["boundary-threshold-ratios"],
+        "auto-threshold-search" => opts["auto-threshold-search"],
+        "auto-threshold-min" => opts["auto-threshold-min"],
+        "auto-threshold-max" => opts["auto-threshold-max"],
+        "auto-threshold-step" => opts["auto-threshold-step"],
         "recon-min-window-energy-ratio" => "0.001",
     )
 end
@@ -96,6 +103,10 @@ function cached_reconstruction_jobs(opts)
     base = Dict(
         "from-run-dir" => from_run_dir,
         "boundary-threshold-ratios" => opts["boundary-threshold-ratios"],
+        "auto-threshold-search" => opts["auto-threshold-search"],
+        "auto-threshold-min" => opts["auto-threshold-min"],
+        "auto-threshold-max" => opts["auto-threshold-max"],
+        "auto-threshold-step" => opts["auto-threshold-step"],
     )
     specs = [
         ("cached_w20_bw300_step50", Dict("recon-window-us" => "20", "recon-hop-us" => "10", "recon-bandwidth-khz" => "300", "recon-step-um" => "50")),
@@ -118,402 +129,49 @@ function simulation_jobs(opts)
 
     priority_specs = [
         (
-            "sim_harmonic_h23_rpw_w20_bw300_t500",
+            "sim_squiggle_h234_rpw_w20_bw500_t500",
             Dict(
                 "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3",
-                "harmonic-amplitudes" => "1.0,0.6",
+                "harmonics" => "2,3,4",
+                "harmonic-amplitudes" => "1.0,0.6,0.3",
                 "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
                 "recon-window-us" => "20",
                 "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "300",
+                "recon-bandwidth-khz" => "500",
                 "t-max-us" => "500",
                 "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
             ),
-            "Baseline harmonic random-phase-per-window with longer windows.",
+            "Current best harmonic squiggle random-phase-per-window setting.",
         ),
         (
-            "sim_harmonic_h23_rpw_w30_bw500_t500",
+            "sim_squiggle_h234_rpw_w30_bw500_t500",
             Dict(
                 "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3",
-                "harmonic-amplitudes" => "1.0,0.6",
+                "harmonics" => "2,3,4",
+                "harmonic-amplitudes" => "1.0,0.6,0.3",
                 "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
                 "recon-window-us" => "30",
                 "recon-hop-us" => "15",
                 "recon-bandwidth-khz" => "500",
                 "t-max-us" => "500",
                 "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
             ),
-            "Longer coherent window and wider reconstruction band.",
+            "Longer window comparison.",
         ),
         (
-            "sim_harmonic_h234_rpw_w20_bw500_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Adds fourth harmonic to improve axial bandwidth.",
-        ),
-        (
-            "sim_gaussian_h23_rpw_w20_bw500_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3",
-                "harmonic-amplitudes" => "1.0,0.6",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Gaussian pulse source for more usable bandwidth.",
-        ),
-        (
-            "sim_gaussian_h234_rpw_w20_bw700_t500",
+            "sim_squiggle_gaussian_h234_rpw_w20_bw700_t500",
             Dict(
                 "cavitation-model" => "gaussian-pulse",
                 "harmonics" => "2,3,4",
                 "harmonic-amplitudes" => "1.0,0.6,0.3",
                 "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
                 "recon-window-us" => "20",
                 "recon-hop-us" => "10",
                 "recon-bandwidth-khz" => "700",
                 "t-max-us" => "500",
                 "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
             ),
-            "Broadest discrete harmonic/gaussian candidate.",
-        ),
-        (
-            "sim_stochastic_static_w20_bw500_t500",
-            Dict(
-                "source-phase-mode" => "stochastic_broadband",
-                "activity-mode" => "static",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-            ),
-            "Broadband stochastic source with enough record length for stable maps.",
-        ),
-        (
-            "sim_gaussian_burst_w20_bw500_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "coherent",
-                "activity-mode" => "burst-train",
-                "activity-frame-us" => "10",
-                "activity-hop-us" => "5",
-                "activity-amplitude-jitter" => "0.5",
-                "activity-phase-jitter-rad" => "0.3",
-                "activity-active-probability" => "1.0",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-            ),
-            "Explicit burst-train instead of full-record random-phase expansion.",
-        ),
-        (
-            "sim_harmonic_h234_rpw_w30_bw700_t1000",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "30",
-                "recon-hop-us" => "15",
-                "recon-bandwidth-khz" => "700",
-                "t-max-us" => "1000",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Long-record high-bandwidth harmonic candidate; scheduled late because it is likely expensive.",
-        ),
-    ]
-
-    broader_specs = [
-        (
-            "sim_harmonic_h23_rpw_w15_bw300_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3",
-                "harmonic-amplitudes" => "1.0,0.6",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "15",
-                "recon-hop-us" => "7.5",
-                "recon-bandwidth-khz" => "300",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Shorter window to reduce axial smearing while keeping 500 us RF.",
-        ),
-        (
-            "sim_harmonic_h23_rpw_w40_bw500_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3",
-                "harmonic-amplitudes" => "1.0,0.6",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "40",
-                "recon-hop-us" => "20",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Longer window candidate for improved frequency selectivity.",
-        ),
-        (
-            "sim_harmonic_h234_rpw_w15_bw500_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "15",
-                "recon-hop-us" => "7.5",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Fourth harmonic with shorter window.",
-        ),
-        (
-            "sim_harmonic_h234_rpw_w30_bw500_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "30",
-                "recon-hop-us" => "15",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Fourth harmonic with longer window and moderate bandwidth.",
-        ),
-        (
-            "sim_gaussian_h23_rpw_w15_bw500_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3",
-                "harmonic-amplitudes" => "1.0,0.6",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "15",
-                "recon-hop-us" => "7.5",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Gaussian source with shorter window.",
-        ),
-        (
-            "sim_gaussian_h23_rpw_w30_bw500_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3",
-                "harmonic-amplitudes" => "1.0,0.6",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "30",
-                "recon-hop-us" => "15",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Gaussian source with longer window.",
-        ),
-        (
-            "sim_gaussian_h234_rpw_w15_bw700_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "15",
-                "recon-hop-us" => "7.5",
-                "recon-bandwidth-khz" => "700",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Broad gaussian/fourth-harmonic candidate with shorter window.",
-        ),
-        (
-            "sim_gaussian_h234_rpw_w30_bw700_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "30",
-                "recon-hop-us" => "15",
-                "recon-bandwidth-khz" => "700",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Broad gaussian/fourth-harmonic candidate with longer window.",
-        ),
-        (
-            "sim_gaussian_h234_rpw_w20_bw900_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "900",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Very broad comparison; useful if 700 kHz is still too restrictive.",
-        ),
-        (
-            "sim_harmonic_h234_rpw_w20_bw500_no_dropout_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.0",
-            ),
-            "Removes dropout to separate algorithm limits from source intermittency.",
-        ),
-        (
-            "sim_harmonic_h234_rpw_w20_bw500_dropout50_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.5",
-            ),
-            "Higher dropout stress test.",
-        ),
-        (
-            "sim_harmonic_h234_rpw_w20_bw500_jitter3_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_phase_per_window",
-                "activity-mode" => "static",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "3",
-                "dropout-probability" => "0.25",
-            ),
-            "More frequency jitter to add decorrelation/bandwidth.",
-        ),
-        (
-            "sim_harmonic_h234_static_phase_w20_bw500_t500",
-            Dict(
-                "cavitation-model" => "harmonic-cos",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "random_static_phase",
-                "activity-mode" => "static",
-                "recon-window-us" => "20",
-                "recon-hop-us" => "10",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-                "frequency-jitter-percent" => "1",
-                "dropout-probability" => "0.25",
-            ),
-            "Static random phase comparison against random phase per window.",
-        ),
-        (
-            "sim_gaussian_burst_w15_bw500_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "coherent",
-                "activity-mode" => "burst-train",
-                "activity-frame-us" => "10",
-                "activity-hop-us" => "5",
-                "activity-amplitude-jitter" => "0.5",
-                "activity-phase-jitter-rad" => "0.3",
-                "activity-active-probability" => "1.0",
-                "recon-window-us" => "15",
-                "recon-hop-us" => "7.5",
-                "recon-bandwidth-khz" => "500",
-                "t-max-us" => "500",
-            ),
-            "Burst train with shorter reconstruction windows.",
-        ),
-        (
-            "sim_gaussian_burst_w30_bw700_t500",
-            Dict(
-                "cavitation-model" => "gaussian-pulse",
-                "harmonics" => "2,3,4",
-                "harmonic-amplitudes" => "1.0,0.6,0.3",
-                "source-phase-mode" => "coherent",
-                "activity-mode" => "burst-train",
-                "activity-frame-us" => "10",
-                "activity-hop-us" => "5",
-                "activity-amplitude-jitter" => "0.5",
-                "activity-phase-jitter-rad" => "0.3",
-                "activity-active-probability" => "1.0",
-                "recon-window-us" => "30",
-                "recon-hop-us" => "15",
-                "recon-bandwidth-khz" => "700",
-                "t-max-us" => "500",
-            ),
-            "Burst train with wider reconstruction band.",
+            "Gaussian pulse comparison using the same squiggle geometry.",
         ),
     ]
 
@@ -531,24 +189,13 @@ function simulation_jobs(opts)
         end
     end
 
-    for (id, args, note) in broader_specs
-        push!(jobs, sim_job(id, merge_args(common_sim_args(opts; seed=primary_seed), args); note=note))
-    end
-
-    for seed in secondary_seeds
-        for (id, args, note) in broader_specs
-            seeded_id = "$(id)_seed$(seed)"
-            seeded_note = "$note Seed repeat to check robustness."
-            push!(jobs, sim_job(seeded_id, merge_args(common_sim_args(opts; seed=seed), args); note=seeded_note))
-        end
-    end
     return jobs
 end
 
 function make_command(job, out_dir)
     args = copy(job["args"])
     args["out-dir"] = out_dir
-    cmd = `$(Base.julia_cmd()) --project=$(PROJECT_ROOT) $(CLUSTER_SCRIPT)`
+    cmd = `$(Base.julia_cmd()) --project=$(PROJECT_ROOT) $(PAM_SCRIPT)`
     for key in sort(collect(keys(args)))
         cmd = `$cmd --$key=$(args[key])`
     end
@@ -613,7 +260,6 @@ function read_summary_metrics(out_dir)
             copy_float_property!(metrics, "best_hasa_threshold", best_hasa, :threshold_ratio)
             copy_float_property!(metrics, "best_hasa_precision", best_hasa, :precision)
             copy_float_property!(metrics, "best_hasa_recall", best_hasa, :recall)
-            copy_float_property!(metrics, "best_hasa_jaccard", best_hasa, :jaccard)
         end
         if !isnothing(best_geo)
             metrics["best_geo_f1"] = best_geo_f1
@@ -646,7 +292,6 @@ function append_csv(path, row)
         "best_hasa_threshold",
         "best_hasa_precision",
         "best_hasa_recall",
-        "best_hasa_jaccard",
         "best_geo_f1",
         "hasa_psf_corr",
         "hasa_psf_l2",

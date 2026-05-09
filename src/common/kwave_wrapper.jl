@@ -13,6 +13,7 @@ function _kwave_modules()
         ksource=PythonCall.pyimport("kwave.ksource"),
         ksensor=PythonCall.pyimport("kwave.ksensor"),
         kspace=PythonCall.pyimport("kwave.kspaceFirstOrder2D"),
+        kspace3d=PythonCall.pyimport("kwave.kspaceFirstOrder3D"),
         simopts=PythonCall.pyimport("kwave.options.simulation_options"),
         execopts=PythonCall.pyimport("kwave.options.simulation_execution_options"),
         signals=PythonCall.pyimport("kwave.utils.signals"),
@@ -257,6 +258,129 @@ function simulate_point_sources(
     info = Dict{Symbol, Any}(
         :receiver_row => row,
         :receiver_cols => col_range,
+        :source_indices => source_indices,
+        :num_input_sources => length(sources),
+        :num_source_points => length(grouped_sources),
+    )
+    return rf, kgrid, info
+end
+
+function simulate_point_sources_3d(
+    c::AbstractArray{<:Real, 3},
+    rho::AbstractArray{<:Real, 3},
+    sources::AbstractVector{<:EmissionSource3D},
+    cfg::PAMConfig3D;
+    use_gpu::Bool=false,
+)
+    isempty(sources) && error("At least one emission source is required.")
+
+    nx, ny, nz = pam_Nx(cfg), pam_Ny(cfg), pam_Nz(cfg)
+    size(c) == (nx, ny, nz) || error("Sound-speed map size $(size(c)) does not match PAMConfig3D ($nx, $ny, $nz).")
+    size(rho) == (nx, ny, nz) || error("Density map size $(size(rho)) does not match PAMConfig3D ($nx, $ny, $nz).")
+
+    mods = _kwave_modules()
+    pc = mods.PythonCall
+    np = mods.np
+    deepcopy_py = mods.copy.deepcopy
+
+    nt = pam_Nt(cfg)
+    kgrid = pam_grid_3d(cfg)
+    pml_guard = _pam_pml_guard_3d(cfg)
+    py_kgrid = mods.kgrid.kWaveGrid(pc.Py([nx, ny, nz]), pc.Py([cfg.dx, cfg.dy, cfg.dz]))
+    py_kgrid.dt = cfg.dt
+    py_kgrid.Nt = nt
+
+    c_py = np.array(pc.Py(Float32.(c)), dtype=np.float32)
+    rho_py = np.array(pc.Py(Float32.(rho)), dtype=np.float32)
+    medium = mods.kmedium.kWaveMedium(sound_speed=c_py, density=rho_py)
+
+    indexed_sources = [(source_grid_index_3d(src, cfg), src) for src in sources]
+    sort!(indexed_sources; by=entry -> begin
+        (row, cy, cz) = first(entry)
+        row + (cy - 1) * nx + (cz - 1) * nx * ny
+    end)
+
+    grouped_sources = Vector{Tuple{Tuple{Int,Int,Int}, Vector{EmissionSource3D}}}()
+    for (grid_index, src) in indexed_sources
+        if !isempty(grouped_sources) && first(last(grouped_sources)) == grid_index
+            push!(last(grouped_sources)[2], src)
+        else
+            push!(grouped_sources, (grid_index, EmissionSource3D[src]))
+        end
+    end
+
+    source = mods.ksource.kSource()
+    src_mask_jl = falses(nx, ny, nz)
+    source_signals = Matrix{Float64}(undef, length(grouped_sources), nt)
+    source_indices = Tuple{Int,Int,Int}[]
+    for (idx, ((row, col_y, col_z), cell_sources)) in pairs(grouped_sources)
+        src_mask_jl[row, col_y, col_z] = true
+        source_signals[idx, :] .= 0.0
+        for src in cell_sources
+            source_signals[idx, :] .+= _source_signal(nt, cfg.dt, src)
+        end
+        push!(source_indices, (row, col_y, col_z))
+    end
+    source.p_mask = np.array(pc.Py(Array(src_mask_jl)), dtype=pc.pybuiltins.bool)
+    source.p = np.array(pc.Py(source_signals), dtype=np.float64)
+    source.medium = medium
+    all_freqs = Float64[]
+    for (_, src) in indexed_sources
+        append!(all_freqs, _emission_frequencies(src))
+    end
+    unique_freqs = unique(all_freqs)
+    if length(unique_freqs) == 1
+        source.p_frequency_ref = unique_freqs[1]
+    end
+
+    sensor = mods.ksensor.kSensor()
+    row = receiver_row(cfg)
+    col_range_y = receiver_col_range_y(cfg)
+    col_range_z = receiver_col_range_z(cfg)
+    # Build sensor mask: fill the full ny×nz receiver plane at the given row.
+    # Use Julia array then convert, avoiding PythonCall slice translation issues.
+    sensor_mask_jl = falses(nx, ny, nz)
+    sensor_mask_jl[row, :, :] .= true
+    sensor_mask = np.array(pc.Py(Array(sensor_mask_jl)), dtype=pc.pybuiltins.bool)
+    sensor.mask = sensor_mask
+    sensor.record = pc.pybuiltins.list(("p",))
+
+    sim_opts = mods.simopts.SimulationOptions(
+        pml_inside=false,
+        pml_size=pml_guard,
+        data_recast=false,
+        save_to_disk=true,
+    )
+    exec_opts = mods.execopts.SimulationExecutionOptions(
+        is_gpu_simulation=use_gpu,
+        delete_data=false,
+    )
+
+    data = mods.kspace3d.kspaceFirstOrder3D(
+        kgrid=deepcopy_py(py_kgrid),
+        medium=deepcopy_py(medium),
+        source=deepcopy_py(source),
+        sensor=deepcopy_py(sensor),
+        simulation_options=sim_opts,
+        execution_options=exec_opts,
+    )
+
+    sensor_data_py = np.array(data["p"], dtype=np.float64)
+    # k-Wave returns (Nt, ny*nz) in Python (row-major). pyconvert gives (ny*nz, Nt) in Julia.
+    sensor_data_flat = pc.pyconvert(Matrix{Float64}, sensor_data_py)  # (ny*nz, Nt) or (Nt, ny*nz)
+    # Normalise to (ny*nz, Nt) regardless of which axis k-Wave put time on.
+    if size(sensor_data_flat, 1) == nt && size(sensor_data_flat, 2) == ny * nz
+        sensor_data_flat = permutedims(sensor_data_flat)  # → (ny*nz, Nt)
+    elseif size(sensor_data_flat, 1) != ny * nz || size(sensor_data_flat, 2) != nt
+        error("Unexpected sensor data shape $(size(sensor_data_flat)); expected ($(ny*nz), $nt) or ($nt, $(ny*nz)).")
+    end
+    # Julia reshape is column-major: ny varies fastest, matching k-Wave's Fortran-order enumeration.
+    rf = reshape(sensor_data_flat, ny, nz, nt)
+
+    info = Dict{Symbol, Any}(
+        :receiver_row => row,
+        :receiver_cols_y => col_range_y,
+        :receiver_cols_z => col_range_z,
         :source_indices => source_indices,
         :num_input_sources => length(sources),
         :num_source_points => length(grouped_sources),
