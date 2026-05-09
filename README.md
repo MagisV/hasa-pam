@@ -434,14 +434,19 @@ julia --project=. scripts/run_pam.jl `
   --dimension=3 `
   --source-model=network `
   --anchors-mm=42:0:0 `
-  --network-radius-mm=5 `
-  --network-root-count=5 `
+  --network-axial-radius-mm=10 `
+  --network-lateral-y-radius-mm=1.5 `
+  --network-lateral-z-radius-mm=1.5 `
+  --network-root-count=12 `
   --network-generations=3 `
-  --network-branch-length-mm=2.5 `
+  --network-branch-length-mm=5 `
   --network-branch-step-mm=0.4 `
   --network-branch-angle-deg=36 `
   --network-tortuosity=0.18 `
-  --network-density-sigma-mm=2.0 `
+  --network-orientation=isotropic `
+  --network-density-axial-sigma-mm=10.0 `
+  --network-density-lateral-y-sigma-mm=1.5 `
+  --network-density-lateral-z-sigma-mm=1.5 `
   --network-max-sources-per-center=80 `
   --vascular-source-spacing-mm=0.5 `
   --vascular-min-separation-mm=0.25 `
@@ -473,11 +478,15 @@ julia --project=. scripts/run_pam.jl `
   --recon-progress=true
 ```
 
-`--source-model=network` grows a random branching 3D centerline structure inside
-a sphere around each `--anchors-mm=depth:y:z` center, then samples bubble
-emitters along those branches with a Gaussian radial density. The default
-network radius is `5 mm`, the density sigma is `2 mm`, and the source cap is
-`80` bubbles per center.
+`--source-model=network` grows a random branching 3D centerline structure, clips
+it to an ellipsoid around each `--anchors-mm=depth:y:z` center, then samples
+bubble emitters along those branches with an anisotropic Gaussian density. The
+default 500 kHz focal-volume support is roughly `20 mm` axial length by `3 mm`
+lateral width (`10 mm` axial radius and `1.5 mm` Y/Z radii). The default density
+sigmas match those radii, and the source cap is `80` bubbles per center.
+`--network-orientation=horizontal` and `--network-orientation=axial` are
+available for controlled priors, and `--network-radius-mm` remains available as
+a spherical shorthand.
 
 For sparse 3D squiggle and network sources, the threshold summary reports both voxel overlap
 metrics and source-aware metrics. `source_f1` combines voxel precision with the

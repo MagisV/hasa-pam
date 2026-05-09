@@ -467,10 +467,38 @@ function _random_unit_vector_3d(rng::Random.AbstractRNG)
     return (v[1] / n, v[2] / n, v[3] / n)
 end
 
+function _random_ellipsoid_direction_3d(rng::Random.AbstractRNG, radii::NTuple{3, Float64})
+    v = _random_unit_vector_3d(rng)
+    return _normalize3((radii[1] * v[1], radii[2] * v[2], radii[3] * v[3]))
+end
+
+function _random_horizontal_direction_3d(rng::Random.AbstractRNG)
+    return _normalize3((0.2 * randn(rng), randn(rng), randn(rng)))
+end
+
 function _normalize3(v::NTuple{3, Float64})
     n = sqrt(v[1]^2 + v[2]^2 + v[3]^2)
     n > eps(Float64) || return (1.0, 0.0, 0.0)
     return (v[1] / n, v[2] / n, v[3] / n)
+end
+
+function _normalize_network_orientation(orientation)
+    value = Symbol(replace(lowercase(string(orientation)), "-" => "_"))
+    value == :lateral && return :horizontal
+    value == :ellipsoid && return :axial
+    value in (:horizontal, :isotropic, :axial) ||
+        error("network_orientation must be horizontal, isotropic, or axial.")
+    return value
+end
+
+function _random_network_direction_3d(
+    rng::Random.AbstractRNG,
+    radii::NTuple{3, Float64},
+    orientation::Symbol,
+)
+    orientation == :horizontal && return _random_horizontal_direction_3d(rng)
+    orientation == :axial && return _random_ellipsoid_direction_3d(rng, radii)
+    return _random_unit_vector_3d(rng)
 end
 
 function _orthogonal_unit3(v::NTuple{3, Float64}, rng::Random.AbstractRNG)
@@ -504,11 +532,15 @@ function _blend_direction3(
     ))
 end
 
-function _within_network_sphere(point::NTuple{3, Float64}, center::NTuple{3, Float64}, radius::Real)
+function _within_network_ellipsoid(
+    point::NTuple{3, Float64},
+    center::NTuple{3, Float64},
+    radii::NTuple{3, Float64},
+)
     dx = point[1] - center[1]
     dy = point[2] - center[2]
     dz = point[3] - center[3]
-    return dx^2 + dy^2 + dz^2 <= Float64(radius)^2
+    return (dx / radii[1])^2 + (dy / radii[2])^2 + (dz / radii[3])^2 <= 1.0
 end
 
 function _network_child_direction(
@@ -530,10 +562,11 @@ function _grow_network_branch_3d(
     start::NTuple{3, Float64},
     direction::NTuple{3, Float64},
     center::NTuple{3, Float64};
-    sphere_radius::Real,
+    ellipsoid_radii::NTuple{3, Float64},
     segment_length::Real,
     step::Real,
     tortuosity::Real,
+    network_orientation::Symbol,
     depth_bounds::Tuple{<:Real, <:Real},
     lateral_y_bounds::Tuple{<:Real, <:Real},
     lateral_z_bounds::Tuple{<:Real, <:Real},
@@ -547,14 +580,18 @@ function _grow_network_branch_3d(
     dir = _normalize3(direction)
     for _ in 1:n_steps
         if tortuosity > 0
-            dir = _blend_direction3(dir, _random_unit_vector_3d(rng), tortuosity)
+            dir = _blend_direction3(
+                dir,
+                _random_network_direction_3d(rng, ellipsoid_radii, network_orientation),
+                tortuosity,
+            )
         end
         next_point = (
             current[1] + spacing * dir[1],
             current[2] + spacing * dir[2],
             current[3] + spacing * dir[3],
         )
-        _within_network_sphere(next_point, center, sphere_radius) || break
+        _within_network_ellipsoid(next_point, center, ellipsoid_radii) || break
         _within_bounds_3d(next_point, depth_bounds, lateral_y_bounds, lateral_z_bounds) || break
         push!(points, next_point)
         current = next_point
@@ -562,15 +599,16 @@ function _grow_network_branch_3d(
     return points, dir
 end
 
-function _generate_spherical_network_centerlines_3d(
+function _generate_ellipsoid_network_centerlines_3d(
     center::NTuple{3, Float64};
-    sphere_radius::Real,
+    ellipsoid_radii::NTuple{3, Float64},
     root_count::Integer,
     generations::Integer,
     branch_length::Real,
     step::Real,
     branch_angle::Real,
     tortuosity::Real,
+    network_orientation::Symbol,
     depth_bounds::Tuple{<:Real, <:Real},
     lateral_y_bounds::Tuple{<:Real, <:Real},
     lateral_z_bounds::Tuple{<:Real, <:Real},
@@ -579,9 +617,9 @@ function _generate_spherical_network_centerlines_3d(
     root_count > 0 || error("network root count must be positive.")
     generations > 0 || error("network generations must be positive.")
     centerlines = Vector{NTuple{3, Float64}}[]
-    tips = [(center, _random_unit_vector_3d(rng))]
+    tips = [(center, _random_network_direction_3d(rng, ellipsoid_radii, network_orientation))]
     while length(tips) < Int(root_count)
-        push!(tips, (center, _random_unit_vector_3d(rng)))
+        push!(tips, (center, _random_network_direction_3d(rng, ellipsoid_radii, network_orientation)))
     end
 
     for gen in 1:Int(generations)
@@ -593,10 +631,11 @@ function _generate_spherical_network_centerlines_3d(
                 start,
                 dir,
                 center;
-                sphere_radius=sphere_radius,
+                ellipsoid_radii=ellipsoid_radii,
                 segment_length=seg_len,
                 step=step,
                 tortuosity=tortuosity,
+                network_orientation=network_orientation,
                 depth_bounds=depth_bounds,
                 lateral_y_bounds=lateral_y_bounds,
                 lateral_z_bounds=lateral_z_bounds,
@@ -620,15 +659,14 @@ function _sample_network_sources_3d(
     centerlines::AbstractVector;
     center::NTuple{3, Float64},
     source_spacing::Real,
-    density_sigma::Real,
+    density_sigmas::NTuple{3, Float64},
     min_separation::Real,
     max_sources::Union{Nothing, Integer},
     rng::Random.AbstractRNG,
 )
     spacing = Float64(source_spacing)
     spacing > 0 || error("source_spacing must be positive.")
-    sigma = Float64(density_sigma)
-    sigma > 0 || error("network density sigma must be positive.")
+    all(s -> s > 0, density_sigmas) || error("network density sigmas must be positive.")
     points = NTuple{3, Float64}[]
     weights = Float64[]
 
@@ -644,8 +682,11 @@ function _sample_network_sources_3d(
         n = max(2, ceil(Int, total_len / spacing) + 1)
         for distance in range(0.0, total_len; length=n)
             depth, y, z, _, _, _ = _interp_centerline_point_3d(centerline, distance)
-            r2 = (depth - center[1])^2 + (y - center[2])^2 + (z - center[3])^2
-            weight = exp(-r2 / (2 * sigma^2))
+            normalized_r2 =
+                ((depth - center[1]) / density_sigmas[1])^2 +
+                ((y - center[2]) / density_sigmas[2])^2 +
+                ((z - center[3]) / density_sigmas[3])^2
+            weight = exp(-0.5 * normalized_r2)
             rand(rng) <= weight || continue
             point = (depth, y, z)
             _far_enough_3d(point, points, min_separation) || continue
@@ -669,22 +710,30 @@ end
 """
     make_network_bubble_sources_3d(centers; kwargs...)
 
-Generate a synthetic branching vascular network inside a sphere around each
+Generate a synthetic branching vascular network inside an ellipsoid around each
 `(depth, lateral_y, lateral_z)` center. Bubble emitters are sampled along the
-network centerlines with Gaussian density around the center, so the source
-population is highest at the geometric focus and tapers toward the sphere edge.
+network centerlines with anisotropic Gaussian density around the center, so the
+source population is highest at the geometric focus and tapers toward the focal
+volume edge.
 """
 function make_network_bubble_sources_3d(
     centers::AbstractVector;
-    sphere_radius::Real = 5e-3,
-    root_count::Integer = 5,
+    sphere_radius::Real = 0.0,
+    axial_radius::Real = 10e-3,
+    lateral_y_radius::Real = 1.5e-3,
+    lateral_z_radius::Real = 1.5e-3,
+    root_count::Integer = 12,
     generations::Integer = 3,
-    branch_length::Real = 2.5e-3,
+    branch_length::Real = 5.0e-3,
     branch_step::Real = 0.4e-3,
     branch_angle::Real = pi / 5,
     tortuosity::Real = 0.18,
+    network_orientation = :isotropic,
     source_spacing::Real = 0.4e-3,
-    density_sigma::Real = 2.0e-3,
+    density_sigma::Real = 0.0,
+    density_sigma_depth::Real = 10.0e-3,
+    density_sigma_y::Real = 1.5e-3,
+    density_sigma_z::Real = 1.5e-3,
     min_separation::Real = 0.25e-3,
     max_sources_per_center::Union{Nothing, Integer} = 80,
     depth_bounds::Tuple{<:Real, <:Real} = (0.0, Inf),
@@ -713,6 +762,17 @@ function make_network_bubble_sources_3d(
     length(harmonic_amplitudes_f) == length(harmonics_i) ||
         error("harmonic_amplitudes must have the same length as harmonics.")
     mode = _normalize_cluster_phase_mode(phase_mode)
+    legacy_radius = Float64(sphere_radius)
+    ellipsoid_radii = legacy_radius > 0 ?
+        (legacy_radius, legacy_radius, legacy_radius) :
+        (Float64(axial_radius), Float64(lateral_y_radius), Float64(lateral_z_radius))
+    all(r -> r > 0, ellipsoid_radii) || error("network ellipsoid radii must be positive.")
+    legacy_density_sigma = Float64(density_sigma)
+    density_sigmas = legacy_density_sigma > 0 ?
+        (legacy_density_sigma, legacy_density_sigma, legacy_density_sigma) :
+        (Float64(density_sigma_depth), Float64(density_sigma_y), Float64(density_sigma_z))
+    all(s -> s > 0, density_sigmas) || error("network density sigmas must be positive.")
+    orientation = _normalize_network_orientation(network_orientation)
 
     clusters = EmissionSource3D[]
     all_centerlines = Vector{NTuple{3, Float64}}[]
@@ -720,15 +780,16 @@ function make_network_bubble_sources_3d(
     center_triples = [(Float64(c[1]), Float64(c[2]), Float64(c[3])) for c in centers]
 
     for center in center_triples
-        centerlines = _generate_spherical_network_centerlines_3d(
+        centerlines = _generate_ellipsoid_network_centerlines_3d(
             center;
-            sphere_radius=sphere_radius,
+            ellipsoid_radii=ellipsoid_radii,
             root_count=root_count,
             generations=generations,
             branch_length=branch_length,
             step=branch_step,
             branch_angle=branch_angle,
             tortuosity=tortuosity,
+            network_orientation=orientation,
             depth_bounds=depth_bounds,
             lateral_y_bounds=lateral_y_bounds,
             lateral_z_bounds=lateral_z_bounds,
@@ -739,7 +800,7 @@ function make_network_bubble_sources_3d(
             centerlines;
             center=center,
             source_spacing=source_spacing,
-            density_sigma=density_sigma,
+            density_sigmas=density_sigmas,
             min_separation=min_separation,
             max_sources=max_sources_per_center,
             rng=rng,
@@ -781,15 +842,21 @@ function make_network_bubble_sources_3d(
     meta = Dict{Symbol, Any}(
         :source_model => :network,
         :centers => center_triples,
-        :sphere_radius => Float64(sphere_radius),
+        :sphere_radius => legacy_radius > 0 ? legacy_radius : nothing,
+        :ellipsoid_radii => ellipsoid_radii,
+        :axial_radius => ellipsoid_radii[1],
+        :lateral_y_radius => ellipsoid_radii[2],
+        :lateral_z_radius => ellipsoid_radii[3],
         :root_count => Int(root_count),
         :generations => Int(generations),
         :branch_length => Float64(branch_length),
         :branch_step => Float64(branch_step),
         :branch_angle => Float64(branch_angle),
         :tortuosity => Float64(tortuosity),
+        :network_orientation => orientation,
         :source_spacing => Float64(source_spacing),
-        :density_sigma => Float64(density_sigma),
+        :density_sigma => legacy_density_sigma > 0 ? legacy_density_sigma : nothing,
+        :density_sigmas => density_sigmas,
         :min_separation => Float64(min_separation),
         :max_sources_per_center => isnothing(max_sources_per_center) ? nothing : Int(max_sources_per_center),
         :centerlines => all_centerlines,

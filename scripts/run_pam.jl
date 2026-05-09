@@ -90,14 +90,21 @@ function parse_cli(args)
         "vascular-min-separation-mm" => "0.25",
         "vascular-max-sources-per-anchor" => "0",
         "vascular-radius-mm" => "1.0",
-        "network-radius-mm" => "5.0",
-        "network-root-count" => "5",
+        "network-radius-mm" => "0",
+        "network-axial-radius-mm" => "10.0",
+        "network-lateral-y-radius-mm" => "1.5",
+        "network-lateral-z-radius-mm" => "1.5",
+        "network-root-count" => "12",
         "network-generations" => "3",
-        "network-branch-length-mm" => "2.5",
+        "network-branch-length-mm" => "5.0",
         "network-branch-step-mm" => "0.4",
         "network-branch-angle-deg" => "36",
         "network-tortuosity" => "0.18",
-        "network-density-sigma-mm" => "2.0",
+        "network-orientation" => "isotropic",
+        "network-density-sigma-mm" => "0",
+        "network-density-axial-sigma-mm" => "10.0",
+        "network-density-lateral-y-sigma-mm" => "1.5",
+        "network-density-lateral-z-sigma-mm" => "1.5",
         "network-max-sources-per-center" => "80",
         "analysis-mode" => "auto",
         "detection-threshold-ratio" => "0.2",
@@ -572,6 +579,20 @@ function parse_network_sources_3d(opts, cfg::PAMConfig3D)
     max_sources_raw = parse(Int, opts["network-max-sources-per-center"])
     max_sources = max_sources_raw <= 0 ? nothing : max_sources_raw
     phase_mode = Symbol(replace(lowercase(strip(opts["phase-mode"])), "-" => "_"))
+    network_radius_m = parse(Float64, opts["network-radius-mm"]) * 1e-3
+    axial_radius_m = parse(Float64, opts["network-axial-radius-mm"]) * 1e-3
+    lateral_y_radius_m = parse(Float64, opts["network-lateral-y-radius-mm"]) * 1e-3
+    lateral_z_radius_m = parse(Float64, opts["network-lateral-z-radius-mm"]) * 1e-3
+    ellipsoid_radii_m = network_radius_m > 0 ?
+        [network_radius_m, network_radius_m, network_radius_m] :
+        [axial_radius_m, lateral_y_radius_m, lateral_z_radius_m]
+    density_sigma_m = parse(Float64, opts["network-density-sigma-mm"]) * 1e-3
+    density_axial_sigma_m = parse(Float64, opts["network-density-axial-sigma-mm"]) * 1e-3
+    density_lateral_y_sigma_m = parse(Float64, opts["network-density-lateral-y-sigma-mm"]) * 1e-3
+    density_lateral_z_sigma_m = parse(Float64, opts["network-density-lateral-z-sigma-mm"]) * 1e-3
+    density_sigmas_m = density_sigma_m > 0 ?
+        [density_sigma_m, density_sigma_m, density_sigma_m] :
+        [density_axial_sigma_m, density_lateral_y_sigma_m, density_lateral_z_sigma_m]
 
     sources = EmissionSource3D[]
     all_centerlines_m = Any[]
@@ -583,15 +604,22 @@ function parse_network_sources_3d(opts, cfg::PAMConfig3D)
     for (idx, center) in pairs(centers)
         center_sources, network_meta = make_network_bubble_sources_3d(
             [center];
-            sphere_radius = parse(Float64, opts["network-radius-mm"]) * 1e-3,
+            sphere_radius = network_radius_m,
+            axial_radius = axial_radius_m,
+            lateral_y_radius = lateral_y_radius_m,
+            lateral_z_radius = lateral_z_radius_m,
             root_count = parse(Int, opts["network-root-count"]),
             generations = parse(Int, opts["network-generations"]),
             branch_length = parse(Float64, opts["network-branch-length-mm"]) * 1e-3,
             branch_step = parse(Float64, opts["network-branch-step-mm"]) * 1e-3,
             branch_angle = parse(Float64, opts["network-branch-angle-deg"]) * pi / 180,
             tortuosity = parse(Float64, opts["network-tortuosity"]),
+            network_orientation = Symbol(replace(lowercase(strip(opts["network-orientation"])), "-" => "_")),
             source_spacing = parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
-            density_sigma = parse(Float64, opts["network-density-sigma-mm"]) * 1e-3,
+            density_sigma = density_sigma_m,
+            density_sigma_depth = density_axial_sigma_m,
+            density_sigma_y = density_lateral_y_sigma_m,
+            density_sigma_z = density_lateral_z_sigma_m,
             min_separation = parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
             max_sources_per_center = max_sources,
             depth_bounds = (0.0, Inf),
@@ -642,14 +670,20 @@ function parse_network_sources_3d(opts, cfg::PAMConfig3D)
         "n_bubbles_per_cluster" => n_bubbles_per,
         "delays_s" => delays_us .* 1e-6,
         "network" => Dict(
-            "radius_m" => parse(Float64, opts["network-radius-mm"]) * 1e-3,
+            "radius_m" => network_radius_m,
+            "axial_radius_m" => axial_radius_m,
+            "lateral_y_radius_m" => lateral_y_radius_m,
+            "lateral_z_radius_m" => lateral_z_radius_m,
+            "ellipsoid_radii_m" => ellipsoid_radii_m,
             "root_count" => parse(Int, opts["network-root-count"]),
             "generations" => parse(Int, opts["network-generations"]),
             "branch_length_m" => parse(Float64, opts["network-branch-length-mm"]) * 1e-3,
             "branch_step_m" => parse(Float64, opts["network-branch-step-mm"]) * 1e-3,
             "branch_angle_deg" => parse(Float64, opts["network-branch-angle-deg"]),
             "tortuosity" => parse(Float64, opts["network-tortuosity"]),
-            "density_sigma_m" => parse(Float64, opts["network-density-sigma-mm"]) * 1e-3,
+            "orientation" => opts["network-orientation"],
+            "density_sigma_m" => density_sigma_m,
+            "density_sigmas_m" => density_sigmas_m,
             "source_spacing_m" => parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
             "min_separation_m" => parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
             "max_sources_per_center" => max_sources_raw,
@@ -2248,6 +2282,12 @@ else
             "vascular-squiggle-slope", "squiggle-phase-x-deg",
             "vascular-source-spacing-mm", "vascular-position-jitter-mm",
             "vascular-min-separation-mm", "vascular-max-sources-per-anchor",
+            "network-radius-mm", "network-axial-radius-mm", "network-lateral-y-radius-mm",
+            "network-lateral-z-radius-mm", "network-root-count", "network-generations",
+            "network-branch-length-mm", "network-branch-step-mm", "network-branch-angle-deg",
+            "network-tortuosity", "network-orientation", "network-density-sigma-mm", "network-density-axial-sigma-mm",
+            "network-density-lateral-y-sigma-mm", "network-density-lateral-z-sigma-mm",
+            "network-max-sources-per-center",
             "source-phase-mode", "n-realizations", "frequency-jitter-percent",
         ),
     )
