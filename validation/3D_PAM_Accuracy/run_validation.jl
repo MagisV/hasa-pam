@@ -99,6 +99,19 @@ sim_time_s       = fill(NaN, n_ax, n_y, n_z)
 # Progress file: written after every source so a crash loses at most one run.
 const PROGRESS_FILE = joinpath(@__DIR__, "progress.jld2")
 
+# Resume from a previous partial run if the progress file exists.
+if isfile(PROGRESS_FILE)
+    prev = load(PROGRESS_FILE)
+    geo_errors_mm  .= prev["geo_errors_mm"]
+    hasa_errors_mm .= prev["hasa_errors_mm"]
+    geo_recon_ms   .= prev["geo_recon_ms"]
+    hasa_recon_ms  .= prev["hasa_recon_ms"]
+    sim_time_s     .= prev["sim_time_s"]
+    n_done = count(!isnan, geo_errors_mm)
+    println("Resuming from progress.jld2 — $n_done/$(n_ax*n_y*n_z) sources already done.")
+    println()
+end
+
 function save_progress(;total_elapsed_min=NaN)
     jldsave(PROGRESS_FILE;
         geo_errors_mm, hasa_errors_mm,
@@ -117,15 +130,24 @@ end
 
 t_sweep_start = time()
 n_total = n_ax * n_y * n_z
-s_count = 0
+s_count = 0        # index across all sources (including already-done ones)
+n_run   = 0        # sources actually simulated this session (for ETA)
 
 for (ai, ax_mm) in enumerate(AXIAL_MM),
     (yi, ly_mm) in enumerate(LATERAL_Y_MM),
     (zi, lz_mm) in enumerate(LATERAL_Z_MM)
 
     global s_count += 1
+
+    if !isnan(geo_errors_mm[ai, yi, zi])
+        @printf("[%2d/%d] ax=%4.0fmm ly=%+5.1fmm lz=%+5.1fmm  [skipped — already done]\n",
+                s_count, n_total, ax_mm, ly_mm, lz_mm)
+        continue
+    end
+
+    n_remaining = count(isnan, geo_errors_mm)
     elapsed = time() - t_sweep_start
-    eta_s = s_count > 1 ? elapsed / (s_count - 1) * (n_total - s_count + 1) : NaN
+    eta_s = n_run > 0 ? elapsed / n_run * (n_remaining - 1) : NaN
     eta_str = isnan(eta_s) ? "?" : @sprintf("%.0f", eta_s / 60)
     @printf("[%2d/%d] ax=%4.0fmm ly=%+5.1fmm lz=%+5.1fmm  (ETA ~%s min)\n",
             s_count, n_total, ax_mm, ly_mm, lz_mm, eta_str)
@@ -180,8 +202,10 @@ for (ai, ax_mm) in enumerate(AXIAL_MM),
             geo_errors_mm[ai, yi, zi], hasa_errors_mm[ai, yi, zi],
             geo_recon_ms[ai, yi, zi], hasa_recon_ms[ai, yi, zi])
 
+    global n_run += 1
+    n_done = n_total - count(isnan, geo_errors_mm)
     save_progress()
-    @printf("    [progress saved — %d/%d done]\n", s_count, n_total)
+    @printf("    [progress saved — %d/%d done]\n", n_done, n_total)
 end
 
 total_time_min = (time() - t_sweep_start) / 60
