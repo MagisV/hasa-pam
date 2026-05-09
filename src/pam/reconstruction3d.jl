@@ -435,6 +435,142 @@ function _reconstruct_pam_cuda_3d(
     return raws, timing
 end
 
+function _reconstruct_pam_cpu_3d(
+    c_padded::AbstractArray{<:Real, 3},
+    rf::AbstractArray{<:Real, 3},
+    cfg::PAMConfig3D,
+    selected_freqs::AbstractVector{<:Real},
+    selected_bins::AbstractVector{<:Integer},
+    crop_range_y::UnitRange{Int},
+    crop_range_z::UnitRange{Int},
+    padded_ny::Int,
+    padded_nz::Int,
+    rr::Int,
+    row_stop::Int,
+    c0::Float64,
+    effective_axial_step::Float64,
+    axial_substeps::Int,
+    corrected::Bool,
+    t0::Float64,
+    recon_label::AbstractString,
+    show_progress::Bool,
+)
+    t_setup_start = time()
+    nx      = size(c_padded, 1)
+    crop_ny = length(crop_range_y)
+    crop_nz = length(crop_range_z)
+    crop_y0 = first(crop_range_y)
+    crop_z0 = first(crop_range_z)
+    nfreq   = length(selected_freqs)
+
+    # Sound-speed contrast field: (padded_ny, padded_nz, nx), matching GPU eta layout
+    eta_spatial = permutedims(Float64.(1.0 .- (c0 ./ c_padded) .^ 2), (2, 3, 1))
+
+    k_y    = _fft_wavenumbers(padded_ny, cfg.dy)
+    k_z    = _fft_wavenumbers(padded_nz, cfg.dz)
+    k_lat2 = reshape(k_y, :, 1) .^ 2 .+ reshape(k_z, 1, :) .^ 2
+    k_radii = sqrt.(k_lat2)
+
+    # Pre-plan FFTW once for the padded lateral plane; MEASURE finds the optimal kernel
+    dummy     = zeros(ComplexF64, padded_ny, padded_nz)
+    plan_fwd  = plan_fft(dummy,  (1, 2); flags=FFTW.MEASURE)
+    plan_bwd  = plan_ifft(dummy, (1, 2); flags=FFTW.MEASURE)
+
+    rf_fft    = fft(Float64.(rf), 3)  # time FFT: (ny, nz, nt)
+    t_setup_s = time() - t_setup_start
+
+    intensity = zeros(Float64, nx, crop_ny, crop_nz)
+
+    println("[ PAM 3D ] $recon_label: CPU (single-threaded FFTW, MEASURE), $nfreq freq bins")
+    flush(stdout)
+
+    march_wall_start = time()
+
+    for (freq, bin) in zip(selected_freqs, selected_bins)
+        k0    = 2π * freq / c0
+        k0_sq = k0^2
+
+        k_axial    = sqrt.(complex.(k0^2 .- k_lat2, 0.0))
+        propagating = real.(k_axial ./ k0) .> 0.0
+        propagator  = exp.(1im .* k_axial .* effective_axial_step) .* propagating
+
+        k_max_prop  = maximum(k_radii[propagating]; init=0.0)
+        weighting   = _tukey_radial(k_radii, k_max_prop, cfg.tukey_ratio) .* propagating
+
+        correction = zeros(ComplexF64, padded_ny, padded_nz)
+        if corrected
+            for j in eachindex(k_axial)
+                propagating[j] || continue
+                abs(k_axial[j]) > sqrt(eps(Float64)) || continue
+                correction[j] = propagator[j] * effective_axial_step / (2im * k_axial[j])
+            end
+        end
+
+        # Apply ifftshift to match GPU FFT convention
+        prop_shifted   = _ifftshift_2d(propagating .* propagator)
+        weight_shifted = _ifftshift_2d(weighting)
+        prop_n_weight  = _ifftshift_2d(propagating .* propagator .^ axial_substeps .* weighting)
+        prop_w         = corrected ? prop_shifted .* weight_shifted : nothing
+        corr_w         = corrected ? _ifftshift_2d(propagating .* correction) .* weight_shifted : nothing
+
+        # Initial condition: place RF frequency slice into padded array
+        phase = cis(-2π * freq * t0)
+        p0    = zeros(ComplexF64, padded_ny, padded_nz)
+        p0[crop_range_y, crop_range_z] .= rf_fft[:, :, bin] .* phase
+        current  = plan_fwd * p0
+        current .*= weight_shifted
+
+        for row in (rr + 1):row_stop
+            if corrected
+                eta_slice = @view eta_spatial[:, :, row]
+                for _ in 1:(axial_substeps - 1)
+                    p_spatial = plan_bwd * current
+                    lp_fft    = plan_fwd * (k0_sq .* eta_slice .* p_spatial)
+                    current   = current .* prop_w .+ corr_w .* lp_fft
+                end
+                p_spatial = plan_bwd * current
+                lp_fft    = plan_fwd * (k0_sq .* eta_slice .* p_spatial)
+                current   = current .* prop_w .+ corr_w .* lp_fft
+            else
+                current .*= prop_n_weight
+            end
+            p_row = plan_bwd * current
+            for iz in 1:crop_nz, iy in 1:crop_ny
+                v = p_row[crop_y0 + iy - 1, crop_z0 + iz - 1]
+                intensity[row, iy, iz] += real(v)^2 + imag(v)^2
+            end
+        end
+    end
+
+    march_wall_s = time() - march_wall_start
+
+    _pam_progress(
+        show_progress,
+        "PAM 3D $recon_label CPU: march $(round(march_wall_s; digits=1)) s, $nfreq freq bins",
+    )
+
+    timing = Dict{Symbol, Any}(
+        :setup_s          => t_setup_s,
+        :operator_setup_s => t_setup_s,
+        :batch_setup_s    => 0.0,
+        :march_wall_s     => march_wall_s,
+        :march_cpu_s      => march_wall_s,
+        :march_gpu_s      => nothing,
+        :download_s       => 0.0,
+        :bandwidth_GBps   => nothing,
+        :fft_s            => nothing,
+        :elementwise_s    => nothing,
+        :nrows            => row_stop - rr,
+        :nfreq            => nfreq,
+        :nwindows         => 1,
+        :padded_ny        => padded_ny,
+        :padded_nz        => padded_nz,
+        :axial_substeps   => axial_substeps,
+        :bytes_march_est  => nothing,
+    )
+    return [intensity], timing
+end
+
 function reconstruct_pam_3d(
     rf::AbstractArray{<:Real, 3},
     c::AbstractArray{<:Real, 3},
@@ -455,7 +591,6 @@ function reconstruct_pam_3d(
     nx, ny, nz = size(c)
     size(rf, 1) == ny && size(rf, 2) == nz ||
         error("RF data must have size (ny, nz, nt); expected ($ny, $nz, ·), got ($(size(rf,1)), $(size(rf,2)), ·).")
-    nt = size(rf, 3)
     rr = receiver_row(cfg)
     rr <= nx || error("Receiver row lies outside the computational grid.")
 
@@ -482,17 +617,26 @@ function reconstruct_pam_3d(
         "grid=$(nx)×$(ny)×$(nz), padded=($(padded_ny)×$(padded_nz)), substeps=$axial_substeps",
     )
 
-    use_gpu || error("CPU path not implemented for 3D PAM; use use_gpu=true.")
-
-    setup = _pam_cuda_setup_3d(
-        c_padded, cfg, selected_freqs, selected_bins,
-        crop_range_y, crop_range_z,
-        nx, padded_ny, padded_nz, rr, row_stop,
-        c0, effective_axial_step, axial_substeps,
-    )
-    raws, gpu_timing = _reconstruct_pam_cuda_3d(
-        setup, [rf], [t0], corrected, recon_label, show_progress, benchmark,
-    )
+    raws, gpu_timing = if use_gpu
+        setup = _pam_cuda_setup_3d(
+            c_padded, cfg, selected_freqs, selected_bins,
+            crop_range_y, crop_range_z,
+            nx, padded_ny, padded_nz, rr, row_stop,
+            c0, effective_axial_step, axial_substeps,
+        )
+        _reconstruct_pam_cuda_3d(
+            setup, [rf], [t0], corrected, recon_label, show_progress, benchmark,
+        )
+    else
+        _reconstruct_pam_cpu_3d(
+            c_padded, rf, cfg,
+            selected_freqs, selected_bins,
+            crop_range_y, crop_range_z,
+            padded_ny, padded_nz, rr, row_stop,
+            c0, effective_axial_step, axial_substeps,
+            corrected, t0, recon_label, show_progress,
+        )
+    end
     intensity = raws[1]  # (nx, ny, nz)
     _apply_axial_gain_3d!(intensity, cfg)
 
@@ -510,8 +654,8 @@ function reconstruct_pam_3d(
         :axial_substeps_per_cell => axial_substeps,
         :time_origin => t0,
         :use_gpu => use_gpu,
-        :backend => :cuda,
-        :gpu_precision => _PAM_CUDA_PRECISION,
+        :backend => use_gpu ? :cuda : :cpu,
+        :gpu_precision => use_gpu ? _PAM_CUDA_PRECISION : nothing,
         :axial_gain_power => cfg.axial_gain_power,
         :show_progress => show_progress,
         :benchmark => benchmark,
