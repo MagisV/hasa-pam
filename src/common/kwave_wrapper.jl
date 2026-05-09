@@ -135,7 +135,7 @@ function _simulate_kwave(
     )
     exec_opts = mods.execopts.SimulationExecutionOptions(
         is_gpu_simulation=use_gpu,
-        delete_data=false,
+        delete_data=true,
     )
 
     data = mods.kspace.kspaceFirstOrder2D(
@@ -238,7 +238,7 @@ function simulate_point_sources(
     )
     exec_opts = mods.execopts.SimulationExecutionOptions(
         is_gpu_simulation=use_gpu,
-        delete_data=false,
+        delete_data=true,
     )
 
     data = mods.kspace.kspaceFirstOrder2D(
@@ -353,7 +353,7 @@ function simulate_point_sources_3d(
     )
     exec_opts = mods.execopts.SimulationExecutionOptions(
         is_gpu_simulation=use_gpu,
-        delete_data=false,
+        delete_data=true,
     )
 
     data = mods.kspace3d.kspaceFirstOrder3D(

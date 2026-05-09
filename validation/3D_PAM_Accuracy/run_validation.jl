@@ -32,15 +32,15 @@ const SLICE_INDEX = 250       # CT slice (same as 2D validation)
 const APERTURE_MM = 64.0      # mm — fixed square aperture in y and z
 
 # Source grid: 3 × 3 × 3 = 27 sources
-const AXIAL_MM    = [40.0, 55.0, 70.0]
+const AXIAL_MM    = [40.0, 50.0, 60.0]
 const LATERAL_Y_MM = [-10.0, 0.0, 10.0]
 const LATERAL_Z_MM = [-10.0, 0.0, 10.0]
 
-# Transverse domain: aperture + PML on each side (PML ≈ 4 mm at 0.2 mm grid)
-const TRANS_DIM = (APERTURE_MM + 16.0) * 1e-3   # 80 mm
+# Transverse domain equals the aperture; k-Wave adds PML outside (pml_inside=false)
+const TRANS_DIM = APERTURE_MM * 1e-3   # 64 mm
 
-# Axial domain: skull at 20 mm + deepest source at 70 mm + 30 mm margin
-const AXIAL_DIM = 100e-3   # m
+# Axial domain: skull at 20 mm + deepest source at 60 mm + 10 mm margin
+const AXIAL_DIM = 70e-3   # m
 
 # ── Domain and medium ──────────────────────────────────────────────────────────
 
