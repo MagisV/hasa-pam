@@ -427,7 +427,59 @@ julia --project=. scripts/run_pam.jl `
   --recon-progress=true
 ```
 
-For sparse 3D squiggle sources, the threshold summary reports both voxel overlap
+3D synthetic vascular network at the transducer focus:
+
+```bash
+julia --project=. scripts/run_pam.jl `
+  --dimension=3 `
+  --source-model=network `
+  --anchors-mm=42:0:0 `
+  --network-radius-mm=5 `
+  --network-root-count=5 `
+  --network-generations=3 `
+  --network-branch-length-mm=2.5 `
+  --network-branch-step-mm=0.4 `
+  --network-branch-angle-deg=36 `
+  --network-tortuosity=0.18 `
+  --network-density-sigma-mm=2.0 `
+  --network-max-sources-per-center=80 `
+  --vascular-source-spacing-mm=0.5 `
+  --vascular-min-separation-mm=0.25 `
+  --fundamental-mhz=0.5 `
+  --harmonics=2,3,4 `
+  --harmonic-amplitudes=1.0,0.6,0.3 `
+  --aberrator=skull `
+  --skull-transducer-distance-mm=20 `
+  --slice-index=250 `
+  --axial-mm=70 `
+  --transverse-mm=64 `
+  --dx-mm=0.2 `
+  --dy-mm=0.5 `
+  --dz-mm=0.5 `
+  --t-max-us=250 `
+  --receiver-aperture-mm=full `
+  --source-phase-mode=random_phase_per_window `
+  --frequency-jitter-percent=1 `
+  --recon-window-us=40 `
+  --recon-hop-us=20 `
+  --recon-bandwidth-khz=40 `
+  --auto-threshold-search=true `
+  --auto-threshold-min=0.10 `
+  --auto-threshold-max=0.95 `
+  --auto-threshold-step=0.01 `
+  --sim-mode=kwave `
+  --use-gpu=true `
+  --window-batch=2 `
+  --recon-progress=true
+```
+
+`--source-model=network` grows a random branching 3D centerline structure inside
+a sphere around each `--anchors-mm=depth:y:z` center, then samples bubble
+emitters along those branches with a Gaussian radial density. The default
+network radius is `5 mm`, the density sigma is `2 mm`, and the source cap is
+`80` bubbles per center.
+
+For sparse 3D squiggle and network sources, the threshold summary reports both voxel overlap
 metrics and source-aware metrics. `source_f1` combines voxel precision with the
 fraction of simulated bubble centers hit within the source detection radius, and
 is used to select the best 3D threshold. By default, 3D analysis runs a dense
@@ -438,9 +490,10 @@ recall-biased threshold, and a precision-biased threshold.
 The reconstruction bandwidth is an important runtime knob: tighter bandwidths
 select fewer FFT frequency bins for ASA/HASA, reducing reconstruction time
 roughly in proportion to the frequency-bin count. In the focused 3D skull
-sweeps, `400 kHz` preserved the score while reducing HASA frequency bins from
-60 to 49; `300 kHz` was comparable and is a good next check when optimizing
-throughput.
+sweeps, `40 kHz` bandwidth with `1%` frequency jitter was the best runtime
+default: it stayed in the same F1 range as wider bands while reducing the HASA
+march time substantially. `60 kHz` with `2%` jitter recovered a little more F1
+at extra cost and is a useful accuracy check.
 
 3D heterogeneous skull medium (CT-backed):
 

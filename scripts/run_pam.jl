@@ -90,6 +90,15 @@ function parse_cli(args)
         "vascular-min-separation-mm" => "0.25",
         "vascular-max-sources-per-anchor" => "0",
         "vascular-radius-mm" => "1.0",
+        "network-radius-mm" => "5.0",
+        "network-root-count" => "5",
+        "network-generations" => "3",
+        "network-branch-length-mm" => "2.5",
+        "network-branch-step-mm" => "0.4",
+        "network-branch-angle-deg" => "36",
+        "network-tortuosity" => "0.18",
+        "network-density-sigma-mm" => "2.0",
+        "network-max-sources-per-center" => "80",
         "analysis-mode" => "auto",
         "detection-threshold-ratio" => "0.2",
         "boundary-threshold-ratios" => "0.5,0.55,0.6,0.65,0.7,0.75",
@@ -160,7 +169,7 @@ end
 
 function parse_source_model(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
-    value in (:point, :squiggle) || error("--source-model must be point or squiggle, got: $s")
+    value in (:point, :squiggle, :network) || error("--source-model must be point, squiggle, or network, got: $s")
     return value
 end
 
@@ -189,9 +198,10 @@ function apply_model_defaults!(opts, provided_keys::Set{String})
         !("use-gpu" in provided_keys) && (opts["use-gpu"] = "true")
     end
     source_model = parse_source_model(opts["source-model"])
-    if dimension == 3 && source_model == :squiggle
+    if dimension == 3 && source_model in (:squiggle, :network)
         !("vascular-source-spacing-mm" in provided_keys) && (opts["vascular-source-spacing-mm"] = "0.5")
         !("vascular-min-separation-mm" in provided_keys) && (opts["vascular-min-separation-mm"] = "0.25")
+        !("recon-bandwidth-khz" in provided_keys) && (opts["recon-bandwidth-khz"] = "40")
         !("recon-window-us" in provided_keys) && (opts["recon-window-us"] = "40")
         !("recon-hop-us" in provided_keys) && (opts["recon-hop-us"] = "20")
         !("boundary-threshold-ratios" in provided_keys) && (opts["boundary-threshold-ratios"] = "0.5,0.55,0.6,0.65,0.7,0.75")
@@ -253,7 +263,7 @@ end
 
 function parse_analysis_mode(s::AbstractString, source_model::Symbol)
     value = Symbol(lowercase(strip(s)))
-    value == :auto && return source_model == :squiggle ? :detection : :localization
+    value == :auto && return source_model in (:squiggle, :network) ? :detection : :localization
     value in (:localization, :detection) || error("--analysis-mode must be auto, localization, or detection, got: $s")
     return value
 end
@@ -547,6 +557,109 @@ function parse_squiggle_sources_3d(opts, cfg::PAMConfig3D)
     )
 end
 
+function parse_network_sources_3d(opts, cfg::PAMConfig3D)
+    centers = parse_coordinate_triples_mm(opts["anchors-mm"], "anchors-mm")
+    f0 = parse(Float64, opts["fundamental-mhz"]) * 1e6
+    harmonics = parse_int_list(opts["harmonics"])
+    isempty(harmonics) && error("--harmonics must be a non-empty integer list.")
+    harmonic_amplitudes = parse_float_list(opts["harmonic-amplitudes"])
+    length(harmonic_amplitudes) == length(harmonics) ||
+        error("--harmonic-amplitudes must have the same length as --harmonics ($(length(harmonics))).")
+
+    n_centers = length(centers)
+    n_bubbles_per = expand_source_values(parse_float_list(opts["n-bubbles"]), n_centers, 1.0)
+    delays_us = expand_source_values(parse_float_list(opts["delays-us"]), n_centers, 0.0)
+    max_sources_raw = parse(Int, opts["network-max-sources-per-center"])
+    max_sources = max_sources_raw <= 0 ? nothing : max_sources_raw
+    phase_mode = Symbol(replace(lowercase(strip(opts["phase-mode"])), "-" => "_"))
+
+    sources = EmissionSource3D[]
+    all_centerlines_m = Any[]
+    centers_meta = Dict{String, Any}[]
+    rng = Random.MersenneTwister(parse(Int, opts["random-seed"]))
+    half_y = cfg.transverse_dim_y / 2
+    half_z = cfg.transverse_dim_z / 2
+
+    for (idx, center) in pairs(centers)
+        center_sources, network_meta = make_network_bubble_sources_3d(
+            [center];
+            sphere_radius = parse(Float64, opts["network-radius-mm"]) * 1e-3,
+            root_count = parse(Int, opts["network-root-count"]),
+            generations = parse(Int, opts["network-generations"]),
+            branch_length = parse(Float64, opts["network-branch-length-mm"]) * 1e-3,
+            branch_step = parse(Float64, opts["network-branch-step-mm"]) * 1e-3,
+            branch_angle = parse(Float64, opts["network-branch-angle-deg"]) * pi / 180,
+            tortuosity = parse(Float64, opts["network-tortuosity"]),
+            source_spacing = parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
+            density_sigma = parse(Float64, opts["network-density-sigma-mm"]) * 1e-3,
+            min_separation = parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
+            max_sources_per_center = max_sources,
+            depth_bounds = (0.0, Inf),
+            lateral_y_bounds = (-half_y, half_y),
+            lateral_z_bounds = (-half_z, half_z),
+            fundamental = f0,
+            amplitude = parse(Float64, opts["amplitude-pa"]),
+            n_bubbles = n_bubbles_per[idx],
+            harmonics = harmonics,
+            harmonic_amplitudes = harmonic_amplitudes,
+            gate_duration = parse(Float64, opts["gate-us"]) * 1e-6,
+            taper_ratio = parse(Float64, opts["taper-ratio"]),
+            delay = delays_us[idx] * 1e-6,
+            phase_mode = phase_mode,
+            phase_jitter = parse(Float64, opts["phase-jitter-rad"]),
+            transducer_depth = -parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
+            transducer_y = 0.0,
+            transducer_z = 0.0,
+            c0 = cfg.c0,
+            rng = rng,
+        )
+        append!(sources, center_sources)
+        center_cls = centerlines_m_3d(network_meta[:centerlines])
+        append!(all_centerlines_m, center_cls)
+        push!(centers_meta, Dict(
+            "center_m" => collect(center),
+            "source_count" => length(center_sources),
+            "centerline_count" => length(network_meta[:centerlines]),
+            "centerlines_m" => center_cls,
+        ))
+    end
+
+    return sources, Dict{String, Any}(
+        "source_model" => "network3d",
+        "network_centers_m" => [collect(center) for center in centers],
+        "n_network_centers" => length(centers),
+        "n_emission_sources" => length(sources),
+        "physical_source_count" => length(sources),
+        "emission_event_count" => length(sources),
+        "activity_model" => Dict("activity_mode" => "random_phase_per_window"),
+        "phase_mode" => String(phase_mode),
+        "fundamental_hz" => f0,
+        "harmonics" => harmonics,
+        "harmonic_amplitudes" => harmonic_amplitudes,
+        "gate_duration_s" => parse(Float64, opts["gate-us"]) * 1e-6,
+        "phase_jitter_rad" => parse(Float64, opts["phase-jitter-rad"]),
+        "random_seed" => parse(Int, opts["random-seed"]),
+        "n_bubbles_per_cluster" => n_bubbles_per,
+        "delays_s" => delays_us .* 1e-6,
+        "network" => Dict(
+            "radius_m" => parse(Float64, opts["network-radius-mm"]) * 1e-3,
+            "root_count" => parse(Int, opts["network-root-count"]),
+            "generations" => parse(Int, opts["network-generations"]),
+            "branch_length_m" => parse(Float64, opts["network-branch-length-mm"]) * 1e-3,
+            "branch_step_m" => parse(Float64, opts["network-branch-step-mm"]) * 1e-3,
+            "branch_angle_deg" => parse(Float64, opts["network-branch-angle-deg"]),
+            "tortuosity" => parse(Float64, opts["network-tortuosity"]),
+            "density_sigma_m" => parse(Float64, opts["network-density-sigma-mm"]) * 1e-3,
+            "source_spacing_m" => parse(Float64, opts["vascular-source-spacing-mm"]) * 1e-3,
+            "min_separation_m" => parse(Float64, opts["vascular-min-separation-mm"]) * 1e-3,
+            "max_sources_per_center" => max_sources_raw,
+            "truth_radius_m" => parse(Float64, opts["vascular-radius-mm"]) * 1e-3,
+            "centerlines_m" => all_centerlines_m,
+            "centers" => centers_meta,
+        ),
+    )
+end
+
 function parse_squiggle_sources(opts, cfg::PAMConfig)
     anchors = parse_coordinate_pairs_mm(opts["anchors-mm"], "anchors-mm")
     f0 = parse(Float64, opts["fundamental-mhz"]) * 1e6
@@ -644,7 +757,9 @@ end
 
 function parse_sources(opts, cfg::PAMConfig)
     source_model = parse_source_model(opts["source-model"])
-    return source_model == :point ? parse_point_sources(opts) : parse_squiggle_sources(opts, cfg)
+    source_model == :point && return parse_point_sources(opts)
+    source_model == :squiggle && return parse_squiggle_sources(opts, cfg)
+    error("2D PAM CLI supports --source-model=point or --source-model=squiggle.")
 end
 
 function default_output_dir(opts, sources, cfg, emission_meta)
@@ -665,8 +780,10 @@ function default_output_dir(opts, sources, cfg, emission_meta)
         "ax$(slug_value(cfg.axial_dim * 1e3; digits=0))mm",
         lateral_slug,
     ]
-    if source_model == "squiggle"
-        insert!(parts, 5, "$(emission_meta["n_anchor_clusters"])anchors")
+    if occursin("squiggle", source_model) || occursin("network", source_model)
+        count_key = haskey(emission_meta, "n_anchor_clusters") ? "n_anchor_clusters" : "n_network_centers"
+        label = occursin("network", source_model) ? "centers" : "anchors"
+        insert!(parts, 5, "$(emission_meta[count_key])$(label)")
         push!(parts, "f$(slug_value(parse(Float64, opts["fundamental-mhz"]); digits=2))mhz")
         push!(parts, "h$(replace(opts["harmonics"], "," => ""))")
         push!(parts, replace(lowercase(opts["source-phase-mode"]), "_" => ""))
@@ -718,22 +835,29 @@ function default_recon_frequencies(sources)
     return sort(unique(freqs))
 end
 
+function _sample_source_signal(signal::AbstractVector{<:Real}, t::Real, dt::Real)
+    u = Float64(t) / Float64(dt) + 1.0
+    i0 = floor(Int, u)
+    i0 < 1 && return 0.0
+    i0 > length(signal) && return 0.0
+    i0 == length(signal) && return Float64(signal[i0])
+    frac = u - i0
+    return (1.0 - frac) * Float64(signal[i0]) + frac * Float64(signal[i0 + 1])
+end
+
 function analytic_rf_for_point_sources_3d(cfg::PAMConfig3D, sources::AbstractVector{<:EmissionSource3D})
     grid = pam_grid_3d(cfg)
     ny, nz, nt = pam_Ny(cfg), pam_Nz(cfg), pam_Nt(cfg)
     rf = zeros(Float32, ny, nz, nt)
     for src in sources
-        duration = src.num_cycles / src.frequency
+        source_signal = TranscranialFUS._source_signal(nt, cfg.dt, src)
         for iy in 1:ny, iz in 1:nz
             dy_src = grid.y[iy] - src.lateral_y
             dz_src = grid.z[iz] - src.lateral_z
             r = sqrt(src.depth^2 + dy_src^2 + dz_src^2)
-            arrival = src.delay + r / cfg.c0
             for it in 1:nt
-                te = (it - 1) * cfg.dt - arrival
-                if 0 <= te <= duration
-                    rf[iy, iz, it] += Float32(src.amplitude * sin(2pi * src.frequency * te + src.phase))
-                end
+                emission_t = (it - 1) * cfg.dt - r / cfg.c0
+                rf[iy, iz, it] += Float32(_sample_source_signal(source_signal, emission_t, cfg.dt))
             end
         end
     end
@@ -871,6 +995,8 @@ function source_model_from_meta(meta, sources)
     if haskey(meta, "source_model")
         model = Symbol(String(meta["source_model"]))
         model == :vascular && return :squiggle
+        model == :squiggle3d && return :squiggle
+        model == :network3d && return :network
         return model
     end
     if haskey(meta, "cluster_model")
@@ -881,7 +1007,7 @@ function source_model_from_meta(meta, sources)
 end
 
 function centerlines_from_emission_meta(meta)
-    key = haskey(meta, "squiggle") ? "squiggle" : (haskey(meta, "vascular") ? "vascular" : "")
+    key = haskey(meta, "squiggle") ? "squiggle" : (haskey(meta, "network") ? "network" : (haskey(meta, "vascular") ? "vascular" : ""))
     isempty(key) && return nothing
     block = meta[key]
     haskey(block, "centerlines_m") || return nothing
@@ -1786,8 +1912,8 @@ threshold_score_ratios = auto_threshold_search ? parse_threshold_search_ratios(o
 
 if dimension == 3
     isempty(from_run_dir) || error("--from-run-dir is not implemented for 3D PAM yet.")
-    source_model in (:point, :squiggle) ||
-        error("3D PAM CLI supports --source-model=point or --source-model=squiggle.")
+    source_model in (:point, :squiggle, :network) ||
+        error("3D PAM CLI supports --source-model=point, --source-model=squiggle, or --source-model=network.")
     aberrator = parse_aberrator(opts["aberrator"])
     aberrator in (:none, :skull) || error("3D PAM CLI currently supports only --aberrator=none or --aberrator=skull.")
 
@@ -1816,6 +1942,8 @@ if dimension == 3
 
     sources, emission_meta = if source_model == :point
         parse_point_sources_3d(opts)
+    elseif source_model == :network
+        parse_network_sources_3d(opts, cfg_base)
     else
         parse_squiggle_sources_3d(opts, cfg_base)
     end
@@ -1847,7 +1975,7 @@ if dimension == 3
     source_phase_mode = parse_source_phase_mode(opts["source-phase-mode"])
     rng_sim = Random.MersenneTwister(parse(Int, opts["random-seed"]) + 1)
     source_variability = parse_source_variability(opts)
-    if source_model == :squiggle
+    if source_model in (:squiggle, :network)
         emission_meta["activity_model"] = Dict(
             "activity_mode" => String(source_phase_mode),
             "frequency_jitter_percent" => source_variability.frequency_jitter_fraction * 100.0,

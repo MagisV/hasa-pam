@@ -457,3 +457,344 @@ function make_squiggle_bubble_sources_3d(
     )
     return clusters, meta
 end
+
+# ── Synthetic 3D vascular network ─────────────────────────────────────────────
+
+function _random_unit_vector_3d(rng::Random.AbstractRNG)
+    v = randn(rng, 3)
+    n = sqrt(v[1]^2 + v[2]^2 + v[3]^2)
+    n > eps(Float64) || return (1.0, 0.0, 0.0)
+    return (v[1] / n, v[2] / n, v[3] / n)
+end
+
+function _normalize3(v::NTuple{3, Float64})
+    n = sqrt(v[1]^2 + v[2]^2 + v[3]^2)
+    n > eps(Float64) || return (1.0, 0.0, 0.0)
+    return (v[1] / n, v[2] / n, v[3] / n)
+end
+
+function _orthogonal_unit3(v::NTuple{3, Float64}, rng::Random.AbstractRNG)
+    ref = _random_unit_vector_3d(rng)
+    cross = (
+        v[2] * ref[3] - v[3] * ref[2],
+        v[3] * ref[1] - v[1] * ref[3],
+        v[1] * ref[2] - v[2] * ref[1],
+    )
+    if sqrt(cross[1]^2 + cross[2]^2 + cross[3]^2) <= eps(Float64)
+        ref = abs(v[1]) < 0.9 ? (1.0, 0.0, 0.0) : (0.0, 1.0, 0.0)
+        cross = (
+            v[2] * ref[3] - v[3] * ref[2],
+            v[3] * ref[1] - v[1] * ref[3],
+            v[1] * ref[2] - v[2] * ref[1],
+        )
+    end
+    return _normalize3((Float64(cross[1]), Float64(cross[2]), Float64(cross[3])))
+end
+
+function _blend_direction3(
+    direction::NTuple{3, Float64},
+    perturbation::NTuple{3, Float64},
+    amount::Real,
+)
+    a = clamp(Float64(amount), 0.0, 1.0)
+    return _normalize3((
+        (1 - a) * direction[1] + a * perturbation[1],
+        (1 - a) * direction[2] + a * perturbation[2],
+        (1 - a) * direction[3] + a * perturbation[3],
+    ))
+end
+
+function _within_network_sphere(point::NTuple{3, Float64}, center::NTuple{3, Float64}, radius::Real)
+    dx = point[1] - center[1]
+    dy = point[2] - center[2]
+    dz = point[3] - center[3]
+    return dx^2 + dy^2 + dz^2 <= Float64(radius)^2
+end
+
+function _network_child_direction(
+    parent_dir::NTuple{3, Float64},
+    angle_rad::Real,
+    sign::Real,
+    rng::Random.AbstractRNG,
+)
+    perp = _orthogonal_unit3(parent_dir, rng)
+    a = Float64(angle_rad) * Float64(sign)
+    return _normalize3((
+        cos(a) * parent_dir[1] + sin(a) * perp[1],
+        cos(a) * parent_dir[2] + sin(a) * perp[2],
+        cos(a) * parent_dir[3] + sin(a) * perp[3],
+    ))
+end
+
+function _grow_network_branch_3d(
+    start::NTuple{3, Float64},
+    direction::NTuple{3, Float64},
+    center::NTuple{3, Float64};
+    sphere_radius::Real,
+    segment_length::Real,
+    step::Real,
+    tortuosity::Real,
+    depth_bounds::Tuple{<:Real, <:Real},
+    lateral_y_bounds::Tuple{<:Real, <:Real},
+    lateral_z_bounds::Tuple{<:Real, <:Real},
+    rng::Random.AbstractRNG,
+)
+    spacing = Float64(step)
+    spacing > 0 || error("network step must be positive.")
+    n_steps = max(1, ceil(Int, Float64(segment_length) / spacing))
+    points = NTuple{3, Float64}[start]
+    current = start
+    dir = _normalize3(direction)
+    for _ in 1:n_steps
+        if tortuosity > 0
+            dir = _blend_direction3(dir, _random_unit_vector_3d(rng), tortuosity)
+        end
+        next_point = (
+            current[1] + spacing * dir[1],
+            current[2] + spacing * dir[2],
+            current[3] + spacing * dir[3],
+        )
+        _within_network_sphere(next_point, center, sphere_radius) || break
+        _within_bounds_3d(next_point, depth_bounds, lateral_y_bounds, lateral_z_bounds) || break
+        push!(points, next_point)
+        current = next_point
+    end
+    return points, dir
+end
+
+function _generate_spherical_network_centerlines_3d(
+    center::NTuple{3, Float64};
+    sphere_radius::Real,
+    root_count::Integer,
+    generations::Integer,
+    branch_length::Real,
+    step::Real,
+    branch_angle::Real,
+    tortuosity::Real,
+    depth_bounds::Tuple{<:Real, <:Real},
+    lateral_y_bounds::Tuple{<:Real, <:Real},
+    lateral_z_bounds::Tuple{<:Real, <:Real},
+    rng::Random.AbstractRNG,
+)
+    root_count > 0 || error("network root count must be positive.")
+    generations > 0 || error("network generations must be positive.")
+    centerlines = Vector{NTuple{3, Float64}}[]
+    tips = [(center, _random_unit_vector_3d(rng))]
+    while length(tips) < Int(root_count)
+        push!(tips, (center, _random_unit_vector_3d(rng)))
+    end
+
+    for gen in 1:Int(generations)
+        next_tips = Tuple{NTuple{3, Float64}, NTuple{3, Float64}}[]
+        length_scale = Float64(branch_length) * (0.72 ^ (gen - 1))
+        for (start, dir) in tips
+            seg_len = length_scale * (0.75 + 0.5 * rand(rng))
+            line, end_dir = _grow_network_branch_3d(
+                start,
+                dir,
+                center;
+                sphere_radius=sphere_radius,
+                segment_length=seg_len,
+                step=step,
+                tortuosity=tortuosity,
+                depth_bounds=depth_bounds,
+                lateral_y_bounds=lateral_y_bounds,
+                lateral_z_bounds=lateral_z_bounds,
+                rng=rng,
+            )
+            length(line) >= 2 || continue
+            push!(centerlines, line)
+            tip = line[end]
+            gen == Int(generations) && continue
+            push!(next_tips, (tip, _network_child_direction(end_dir, branch_angle, 1.0, rng)))
+            push!(next_tips, (tip, _network_child_direction(end_dir, branch_angle, -1.0, rng)))
+        end
+        tips = next_tips
+        isempty(tips) && break
+    end
+    isempty(centerlines) && error("Network generation produced no centerline segments inside bounds.")
+    return centerlines
+end
+
+function _sample_network_sources_3d(
+    centerlines::AbstractVector;
+    center::NTuple{3, Float64},
+    source_spacing::Real,
+    density_sigma::Real,
+    min_separation::Real,
+    max_sources::Union{Nothing, Integer},
+    rng::Random.AbstractRNG,
+)
+    spacing = Float64(source_spacing)
+    spacing > 0 || error("source_spacing must be positive.")
+    sigma = Float64(density_sigma)
+    sigma > 0 || error("network density sigma must be positive.")
+    points = NTuple{3, Float64}[]
+    weights = Float64[]
+
+    for centerline in centerlines
+        length(centerline) >= 2 || continue
+        total_len = 0.0
+        for idx in 1:(length(centerline) - 1)
+            d0, y0, z0 = centerline[idx]
+            d1, y1, z1 = centerline[idx + 1]
+            total_len += sqrt((d1 - d0)^2 + (y1 - y0)^2 + (z1 - z0)^2)
+        end
+        total_len > eps(Float64) || continue
+        n = max(2, ceil(Int, total_len / spacing) + 1)
+        for distance in range(0.0, total_len; length=n)
+            depth, y, z, _, _, _ = _interp_centerline_point_3d(centerline, distance)
+            r2 = (depth - center[1])^2 + (y - center[2])^2 + (z - center[3])^2
+            weight = exp(-r2 / (2 * sigma^2))
+            rand(rng) <= weight || continue
+            point = (depth, y, z)
+            _far_enough_3d(point, points, min_separation) || continue
+            push!(points, point)
+            push!(weights, weight)
+        end
+    end
+
+    if !isnothing(max_sources) && length(points) > Int(max_sources)
+        maxn = Int(max_sources)
+        maxn > 0 || error("max_sources must be positive when provided.")
+        score_order = sortperm(weights; rev=true)
+        keep = sort(score_order[1:maxn])
+        points = points[keep]
+        weights = weights[keep]
+    end
+    isempty(points) && error("Network bubble sampling produced no sources; increase density sigma or lower spacing/min separation.")
+    return points, weights
+end
+
+"""
+    make_network_bubble_sources_3d(centers; kwargs...)
+
+Generate a synthetic branching vascular network inside a sphere around each
+`(depth, lateral_y, lateral_z)` center. Bubble emitters are sampled along the
+network centerlines with Gaussian density around the center, so the source
+population is highest at the geometric focus and tapers toward the sphere edge.
+"""
+function make_network_bubble_sources_3d(
+    centers::AbstractVector;
+    sphere_radius::Real = 5e-3,
+    root_count::Integer = 5,
+    generations::Integer = 3,
+    branch_length::Real = 2.5e-3,
+    branch_step::Real = 0.4e-3,
+    branch_angle::Real = pi / 5,
+    tortuosity::Real = 0.18,
+    source_spacing::Real = 0.4e-3,
+    density_sigma::Real = 2.0e-3,
+    min_separation::Real = 0.25e-3,
+    max_sources_per_center::Union{Nothing, Integer} = 80,
+    depth_bounds::Tuple{<:Real, <:Real} = (0.0, Inf),
+    lateral_y_bounds::Tuple{<:Real, <:Real} = (-Inf, Inf),
+    lateral_z_bounds::Tuple{<:Real, <:Real} = (-Inf, Inf),
+    fundamental::Real = 5e5,
+    amplitude::Real = 1.0,
+    n_bubbles::Real = 1.0,
+    harmonics::AbstractVector{<:Integer} = [2, 3, 4],
+    harmonic_amplitudes::AbstractVector{<:Real} = [1.0, 0.6, 0.3],
+    gate_duration::Real = 50e-6,
+    taper_ratio::Real = 0.25,
+    delay::Real = 0.0,
+    phase_mode = :geometric,
+    phase_jitter::Real = 0.2,
+    transducer_depth::Real = -30e-3,
+    transducer_y::Real = 0.0,
+    transducer_z::Real = 0.0,
+    c0::Real = 1500.0,
+    rng::Random.AbstractRNG = Random.default_rng(),
+)
+    isempty(centers) && error("At least one network center is required.")
+    harmonics_i = Int.(harmonics)
+    isempty(harmonics_i) && error("harmonics must be non-empty.")
+    harmonic_amplitudes_f = Float64.(harmonic_amplitudes)
+    length(harmonic_amplitudes_f) == length(harmonics_i) ||
+        error("harmonic_amplitudes must have the same length as harmonics.")
+    mode = _normalize_cluster_phase_mode(phase_mode)
+
+    clusters = EmissionSource3D[]
+    all_centerlines = Vector{NTuple{3, Float64}}[]
+    center_meta = Dict{Symbol, Any}[]
+    center_triples = [(Float64(c[1]), Float64(c[2]), Float64(c[3])) for c in centers]
+
+    for center in center_triples
+        centerlines = _generate_spherical_network_centerlines_3d(
+            center;
+            sphere_radius=sphere_radius,
+            root_count=root_count,
+            generations=generations,
+            branch_length=branch_length,
+            step=branch_step,
+            branch_angle=branch_angle,
+            tortuosity=tortuosity,
+            depth_bounds=depth_bounds,
+            lateral_y_bounds=lateral_y_bounds,
+            lateral_z_bounds=lateral_z_bounds,
+            rng=rng,
+        )
+        append!(all_centerlines, centerlines)
+        points, weights = _sample_network_sources_3d(
+            centerlines;
+            center=center,
+            source_spacing=source_spacing,
+            density_sigma=density_sigma,
+            min_separation=min_separation,
+            max_sources=max_sources_per_center,
+            rng=rng,
+        )
+        source_start = length(clusters) + 1
+        for (depth, y, z) in points
+            phases = _cluster_harmonic_phases_3d(
+                depth, y, z,
+                harmonics_i, fundamental, c0,
+                mode,
+                transducer_depth, transducer_y, transducer_z,
+                phase_jitter, rng,
+            )
+            push!(clusters, BubbleCluster3D(
+                depth=depth,
+                lateral_y=y,
+                lateral_z=z,
+                fundamental=Float64(fundamental),
+                amplitude=Float64(amplitude),
+                n_bubbles=Float64(n_bubbles),
+                harmonics=copy(harmonics_i),
+                harmonic_amplitudes=copy(harmonic_amplitudes_f),
+                harmonic_phases=phases,
+                gate_duration=Float64(gate_duration),
+                taper_ratio=Float64(taper_ratio),
+                delay=Float64(delay),
+            ))
+        end
+        push!(center_meta, Dict{Symbol, Any}(
+            :center => center,
+            :centerline_count => length(centerlines),
+            :source_count => length(points),
+            :source_range => (source_start, length(clusters)),
+            :density_weights => weights,
+        ))
+    end
+
+    isempty(clusters) && error("Network source generation produced no sources.")
+    meta = Dict{Symbol, Any}(
+        :source_model => :network,
+        :centers => center_triples,
+        :sphere_radius => Float64(sphere_radius),
+        :root_count => Int(root_count),
+        :generations => Int(generations),
+        :branch_length => Float64(branch_length),
+        :branch_step => Float64(branch_step),
+        :branch_angle => Float64(branch_angle),
+        :tortuosity => Float64(tortuosity),
+        :source_spacing => Float64(source_spacing),
+        :density_sigma => Float64(density_sigma),
+        :min_separation => Float64(min_separation),
+        :max_sources_per_center => isnothing(max_sources_per_center) ? nothing : Int(max_sources_per_center),
+        :centerlines => all_centerlines,
+        :centers_meta => center_meta,
+        :phase_mode => mode,
+    )
+    return clusters, meta
+end
