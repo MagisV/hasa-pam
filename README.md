@@ -712,6 +712,27 @@ For skull sweeps, requested targets are filtered so that only points inside the 
 - `result.jld2`
 - `cases/`: one figure per retained target, each showing uncorrected vs corrected reconstruction
 
+## Validation
+
+### 2D PAM localization accuracy (Schoen & Arvanitis 2020, Table II / Fig. 7)
+
+`validation/2D_PAM_Accuracy/run_validation.jl` reproduces the point-source localization sweep from the reference paper.
+A rectangular grid of 1 MHz sources (axial 30–80 mm, lateral ±20 mm) is simulated through a human skull with k-Wave and reconstructed with both the homogeneous ASA and the heterogeneous ASA (HASA, Eq. 6).
+Errors are reported for three receiver apertures (50, 75, 100 mm), matching Table II of the paper.
+
+**k-Wave simulation always runs on GPU.**
+PAM reconstruction runs on CPU by default; pass `--recon-use-gpu` to use the GPU for reconstruction as well.
+
+```bash
+# k-Wave GPU, reconstruction CPU
+julia --project=. validation/2D_PAM_Accuracy/run_validation.jl
+
+# k-Wave GPU, reconstruction GPU
+julia --project=. validation/2D_PAM_Accuracy/run_validation.jl --recon-use-gpu
+```
+
+Results are saved as `validation/2D_PAM_Accuracy/results_<timestamp>.jld2` and a comparison table is printed to stdout.
+
 ## Tests
 
 Run the standard test suite:

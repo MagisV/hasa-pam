@@ -168,6 +168,7 @@ function run_pam_sweep(
     frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
     example_targets_mm::Union{Nothing, AbstractVector{<:Tuple{<:Real, <:Real}}}=nothing,
     use_gpu::Bool=false,
+    kwave_use_gpu::Bool=false,
     runner::Function=run_pam_case,
     case_callback::Union{Nothing, Function}=nothing,
 )
@@ -196,6 +197,7 @@ function run_pam_sweep(
             cfg;
             frequencies=frequencies,
             use_gpu=use_gpu,
+            kwave_use_gpu=kwave_use_gpu,
         )
         stats_geo = results[:stats_geo]
         stats_hasa = results[:stats_hasa]

@@ -27,7 +27,7 @@ function _run_pam_per_window(
     sources::AbstractVector{<:EmissionSource2D},
     cfg::PAMConfig;
     source_phase_mode::Symbol,
-    use_gpu::Bool,
+    kwave_use_gpu::Bool,
     rng::Random.AbstractRNG,
     recon_kwargs::NamedTuple,
     variability::SourceVariabilityConfig=SourceVariabilityConfig(),
@@ -46,7 +46,7 @@ function _run_pam_per_window(
         accumulation=win_cfg.accumulation,
     )
     eff_recon_kwargs = merge(recon_kwargs, (reconstruction_mode=:windowed, window_config=eff_window_config))
-    rf, kgrid, sim_info = simulate_point_sources(c, rho, expanded, cfg; use_gpu=use_gpu)
+    rf, kgrid, sim_info = simulate_point_sources(c, rho, expanded, cfg; use_gpu=kwave_use_gpu)
     results = reconstruct_pam_case(
         rf,
         c,
@@ -70,7 +70,7 @@ function _run_pam_multirealization(
     cfg::PAMConfig;
     n_realizations::Int,
     source_phase_mode::Symbol,
-    use_gpu::Bool,
+    kwave_use_gpu::Bool,
     rng::Random.AbstractRNG,
     recon_kwargs::NamedTuple,
 )
@@ -81,7 +81,7 @@ function _run_pam_multirealization(
 
     for _ in 1:n_realizations
         resampled = _resample_source_phases(sources, rng)
-        rf, kgrid, sim_info = simulate_point_sources(c, rho, resampled, cfg; use_gpu=use_gpu)
+        rf, kgrid, sim_info = simulate_point_sources(c, rho, resampled, cfg; use_gpu=kwave_use_gpu)
         results = reconstruct_pam_case(rf, c, resampled, cfg; simulation_info=sim_info, recon_kwargs...)
         if isnothing(geo_acc)
             geo_acc = Float64.(results[:pam_geo])
@@ -110,6 +110,7 @@ function run_pam_case(
     frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
     bandwidth::Real=0.0,
     use_gpu::Bool=false,
+    kwave_use_gpu::Bool=false,
     analysis_mode::Symbol=:localization,
     peak_method::Symbol=:argmax,
     clean_loop_gain::Real=0.1,
@@ -161,7 +162,7 @@ function run_pam_case(
             c, rho, effective_sources, cfg;
             n_realizations=n_realizations,
             source_phase_mode=phase_mode,
-            use_gpu=use_gpu,
+            kwave_use_gpu=kwave_use_gpu,
             rng=rng,
             recon_kwargs=recon_kwargs,
         )
@@ -169,13 +170,13 @@ function run_pam_case(
         return _run_pam_per_window(
             c, rho, effective_sources, cfg;
             source_phase_mode=phase_mode,
-            use_gpu=use_gpu,
+            kwave_use_gpu=kwave_use_gpu,
             rng=rng,
             recon_kwargs=recon_kwargs,
             variability=source_variability,
         )
     end
-    rf, kgrid, sim_info = simulate_point_sources(c, rho, effective_sources, cfg; use_gpu=use_gpu)
+    rf, kgrid, sim_info = simulate_point_sources(c, rho, effective_sources, cfg; use_gpu=kwave_use_gpu)
     results = reconstruct_pam_case(rf, c, effective_sources, cfg; simulation_info=sim_info, recon_kwargs...)
     results[:kgrid] = kgrid
     results[:source_phase_mode] = phase_mode

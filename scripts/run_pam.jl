@@ -60,7 +60,8 @@ function parse_cli(args)
         "lens-lateral-radius-mm" => "12",
         "aberrator-c" => "1700",
         "aberrator-rho" => "1150",
-        "use-gpu" => "false",
+        "kwave-use-gpu" => "true",
+        "recon-use-gpu" => "true",
         "recon-bandwidth-khz" => "500",
         "recon-step-um" => "50",
         "recon-mode" => "auto",
@@ -202,7 +203,6 @@ function apply_model_defaults!(opts, provided_keys::Set{String})
         !("num-cycles" in provided_keys) && (opts["num-cycles"] = "5")
         !("phase-mode" in provided_keys) && (opts["phase-mode"] = "coherent")
         !("recon-step-um" in provided_keys) && (opts["recon-step-um"] = "50")
-        !("use-gpu" in provided_keys) && (opts["use-gpu"] = "true")
     end
     source_model = parse_source_model(opts["source-model"])
     if dimension == 3 && source_model in (:squiggle, :network)
@@ -910,7 +910,8 @@ function run_pam_case_3d(
     cfg::PAMConfig3D;
     frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
     bandwidth::Real=0.0,
-    use_gpu::Bool=false,
+    kwave_use_gpu::Bool=true,
+    recon_use_gpu::Bool=true,
     reconstruction_axial_step::Union{Nothing, Real}=nothing,
     reconstruction_mode::Symbol=:full,
     window_config::PAMWindowConfig=PAMWindowConfig(),
@@ -922,7 +923,7 @@ function run_pam_case_3d(
     rng::Random.AbstractRNG=Random.default_rng(),
     source_variability::SourceVariabilityConfig=SourceVariabilityConfig(),
 )
-    use_gpu || error("3D PAM reconstruction currently requires --use-gpu=true.")
+    recon_use_gpu || error("3D PAM reconstruction currently requires --recon-use-gpu=true.")
     recon_freqs = isnothing(frequencies) ? default_recon_frequencies(sources) : Float64.(frequencies)
     phase_mode = TranscranialFUS._normalize_source_phase_mode(source_phase_mode)
     recon_mode = phase_mode == :random_phase_per_window ?
@@ -953,7 +954,7 @@ function run_pam_case_3d(
         error("3D PAM does not implement --source-phase-mode=random_phase_per_realization yet.")
     end
     rf, grid, sim_info = if sim_mode == :kwave
-        simulate_point_sources_3d(c, rho, sim_sources, cfg; use_gpu=use_gpu)
+        simulate_point_sources_3d(c, rho, sim_sources, cfg; use_gpu=kwave_use_gpu)
     else
         analytic_rf_for_point_sources_3d(cfg, sim_sources)
     end
@@ -962,7 +963,7 @@ function run_pam_case_3d(
         bandwidth=bandwidth,
         reference_sound_speed=TranscranialFUS._pam_reference_sound_speed(c, cfg, sources),
         axial_step=reconstruction_axial_step,
-        use_gpu=use_gpu,
+        use_gpu=recon_use_gpu,
         show_progress=show_progress,
         benchmark=benchmark,
         window_batch=window_batch,
@@ -1010,7 +1011,8 @@ function run_pam_case_3d(
         :source_phase_mode => phase_mode,
         :n_frames => n_frames,
         :window_config => TranscranialFUS._window_config_info(effective_window_config),
-        :use_gpu => use_gpu,
+        :kwave_use_gpu => kwave_use_gpu,
+        :recon_use_gpu => recon_use_gpu,
         :show_progress => show_progress,
     )
 end
@@ -2025,7 +2027,8 @@ if dimension == 3
         cfg;
         frequencies=recon_frequencies,
         bandwidth=recon_bandwidth_hz,
-        use_gpu=parse_bool(opts["use-gpu"]),
+        kwave_use_gpu=parse_bool(opts["kwave-use-gpu"]),
+        recon_use_gpu=parse_bool(opts["recon-use-gpu"]),
         reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
         reconstruction_mode=reconstruction_mode,
         window_config=window_config,
@@ -2243,7 +2246,8 @@ if isempty(from_run_dir)
         cfg;
         frequencies=recon_frequencies,
         bandwidth=recon_bandwidth_hz,
-        use_gpu=parse_bool(opts["use-gpu"]),
+        use_gpu=parse_bool(opts["recon-use-gpu"]),
+        kwave_use_gpu=parse_bool(opts["kwave-use-gpu"]),
         reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
         analysis_mode=analysis_mode,
         peak_method=peak_method,
@@ -2343,7 +2347,7 @@ else
         simulation_info=simulation_info,
         frequencies=recon_frequencies,
         bandwidth=recon_bandwidth_hz,
-        use_gpu=parse_bool(opts["use-gpu"]),
+        use_gpu=parse_bool(opts["recon-use-gpu"]),
         reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
         analysis_mode=analysis_mode,
         peak_method=peak_method,

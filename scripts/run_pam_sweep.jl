@@ -38,7 +38,8 @@ function parse_cli(args)
         "lens-lateral-radius-mm" => "12",
         "aberrator-c" => "1700",
         "aberrator-rho" => "1150",
-        "use-gpu" => "false",
+        "kwave-use-gpu" => "true",
+        "recon-use-gpu" => "true",
     )
 
     for arg in args
@@ -447,7 +448,8 @@ sweep_results = run_pam_sweep(
     cfg;
     frequencies=[parse(Float64, opts["frequency-mhz"]) * 1e6],
     example_targets_mm=example_targets_mm,
-    use_gpu=parse_bool(opts["use-gpu"]),
+    use_gpu=parse_bool(opts["recon-use-gpu"]),
+    kwave_use_gpu=parse_bool(opts["kwave-use-gpu"]),
     case_callback=case_callback,
 )
 
