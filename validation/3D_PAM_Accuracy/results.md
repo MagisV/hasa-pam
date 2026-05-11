@@ -19,4 +19,4 @@
 |  50 mm | 1.82 ± 0.90 mm | 0.47 ± 0.13 mm |
 |  60 mm | 1.98 ± 0.84 mm | 0.30 ± 0.17 mm |
 
-*Figure: results_20260509_184401_accuracy3d.png*
+*Figure: results_20260509_184401_accuracy_slices.png*

@@ -41,7 +41,7 @@ const SLICE_INDEX = 250
 
 # ── Sweep parameters ──────────────────────────────────────────────────────────
 
-const APERTURES_MM = [50.0, 75.0, 100.0]   # receiver aperture (y and z)
+const APERTURES_MM = [25, 50.0, 75.0]   # receiver aperture (y and z); 100 mm OOMs on RTX 3080
 const DEPTHS_MM    = [20.0, 40.0, 60.0, 80.0, 100.0]   # depth below skull surface
 
 let apts = round.(Int, APERTURES_MM .* 1e-3 ./ DX)
@@ -54,51 +54,35 @@ let steps = round.(Int, DEPTHS_MM .* 1e-3 ./ AXIAL_STEP)
 end
 println()
 
-# ── k-Wave simulation (64 mm aperture — same as speed benchmark) ──────────────
+# ── Scalability sweep ─────────────────────────────────────────────────────────
 
-const KW_APERTURE  = 64e-3
-const KW_AXIAL_DIM = 70e-3
+n_depths    = length(DEPTHS_MM)
+n_apertures = length(APERTURES_MM)
 
-kw_cfg = PAMConfig3D(
-    dx               = DX,
-    dy               = DX,
-    dz               = DX,
-    axial_dim        = KW_AXIAL_DIM,
-    transverse_dim_y = KW_APERTURE,
-    transverse_dim_z = KW_APERTURE,
-    dt               = DT,
-    t_max            = T_MAX,
-    receiver_aperture_y = KW_APERTURE,
-    receiver_aperture_z = KW_APERTURE,
-)
+timing_wall_s  = fill(NaN, n_depths, n_apertures)
+timing_march_s = fill(NaN, n_depths, n_apertures)
 
-println("k-Wave grid : $(pam_Nx(kw_cfg))×$(pam_Ny(kw_cfg))×$(pam_Nz(kw_cfg)), Nt=$(pam_Nt(kw_cfg))")
-println()
+# Progress file: written after every point so a crash loses at most one run.
+const PROGRESS_FILE = joinpath(@__DIR__, "progress.jld2")
 
-println("Building skull medium for k-Wave…")
-c_kw, rho_kw, _ = make_pam_medium_3d(
-    kw_cfg;
-    aberrator           = :skull,
-    skull_to_transducer = SKULL_DIST,
-    slice_index_z       = SLICE_INDEX,
-)
-
-src = PointSource3D(
-    depth      = 50e-3,
-    lateral_y  = 0.0,
-    lateral_z  = 0.0,
-    frequency  = FREQ,
-    num_cycles = NUM_CYCLES,
-)
-
-println("Running k-Wave (GPU)…")
-t_sim = @elapsed begin
-    rf_base, _, _ = simulate_point_sources_3d(c_kw, rho_kw, [src], kw_cfg; use_gpu=true)
+if isfile(PROGRESS_FILE)
+    prev      = load(PROGRESS_FILE)
+    prev_apts = prev["APERTURES_MM"]
+    prev_deps = prev["DEPTHS_MM"]
+    ai_map = [findfirst(==(a), prev_apts) for a in APERTURES_MM]
+    di_map = [findfirst(==(d), prev_deps) for d in DEPTHS_MM]
+    for (di_new, di_old) in enumerate(di_map)
+        di_old === nothing && continue
+        for (ai_new, ai_old) in enumerate(ai_map)
+            ai_old === nothing && continue
+            timing_wall_s[di_new,  ai_new] = prev["timing_wall_s"][di_old,  ai_old]
+            timing_march_s[di_new, ai_new] = prev["timing_march_s"][di_old, ai_old]
+        end
+    end
+    n_done = count(!isnan, timing_wall_s)
+    println("Resuming from progress.jld2 — $n_done/$(n_depths*n_apertures) points already done.")
+    println()
 end
-@printf("  k-Wave wall-clock: %.1f s\n\n", t_sim)
-
-const Ny_base = pam_Ny(kw_cfg)   # 320 (64 mm / 0.2 mm)
-const Nz_base = pam_Nz(kw_cfg)   # 320
 
 # ── RF resize helper (centre crop or zero-pad) ────────────────────────────────
 
@@ -130,47 +114,81 @@ function resize_rf(rf::AbstractArray, Ny_target::Int, Nz_target::Int)
     return rf_out
 end
 
-# ── GPU warm-up ───────────────────────────────────────────────────────────────
+# ── k-Wave simulation (only if there are points left to run) ──────────────────
 
-print("GPU warm-up (small domain) … ")
-flush(stdout)
-let
-    cfg_w = PAMConfig3D(
-        dx = DX, dy = DX, dz = DX,
-        axial_dim        = 30e-3,
-        transverse_dim_y = 50e-3,
-        transverse_dim_z = 50e-3,
-        dt = DT, t_max = T_MAX,
-        receiver_aperture_y = 50e-3,
-        receiver_aperture_z = 50e-3,
+const KW_APERTURE  = 64e-3
+const KW_AXIAL_DIM = 70e-3
+
+rf_base = nothing
+
+if any(isnan, timing_wall_s)
+
+    kw_cfg = PAMConfig3D(
+        dx               = DX,
+        dy               = DX,
+        dz               = DX,
+        axial_dim        = KW_AXIAL_DIM,
+        transverse_dim_y = KW_APERTURE,
+        transverse_dim_z = KW_APERTURE,
+        dt               = DT,
+        t_max            = T_MAX,
+        receiver_aperture_y = KW_APERTURE,
+        receiver_aperture_z = KW_APERTURE,
     )
-    c_w, _, _ = make_pam_medium_3d(cfg_w;
-        aberrator=:skull, skull_to_transducer=SKULL_DIST, slice_index_z=SLICE_INDEX)
-    rf_w = zeros(Float32, pam_Ny(cfg_w), pam_Nz(cfg_w), pam_Nt(cfg_w))
-    reconstruct_pam_3d(rf_w, c_w, cfg_w;
-        frequencies=[FREQ], bandwidth=BANDWIDTH, corrected=true,
-        axial_step=AXIAL_STEP, use_gpu=true, show_progress=false)
-end
-println("done.\n")
 
-# ── Scalability sweep ─────────────────────────────────────────────────────────
-
-n_depths    = length(DEPTHS_MM)
-n_apertures = length(APERTURES_MM)
-
-timing_wall_s  = fill(NaN, n_depths, n_apertures)
-timing_march_s = fill(NaN, n_depths, n_apertures)
-
-# Progress file: written after every point so a crash loses at most one run.
-const PROGRESS_FILE = joinpath(@__DIR__, "progress.jld2")
-
-if isfile(PROGRESS_FILE)
-    prev = load(PROGRESS_FILE)
-    timing_wall_s  .= prev["timing_wall_s"]
-    timing_march_s .= prev["timing_march_s"]
-    n_done = count(!isnan, timing_wall_s)
-    println("Resuming from progress.jld2 — $n_done/$(n_depths*n_apertures) points already done.")
+    println("k-Wave grid : $(pam_Nx(kw_cfg))×$(pam_Ny(kw_cfg))×$(pam_Nz(kw_cfg)), Nt=$(pam_Nt(kw_cfg))")
     println()
+
+    println("Building skull medium for k-Wave…")
+    c_kw, rho_kw, _ = make_pam_medium_3d(
+        kw_cfg;
+        aberrator           = :skull,
+        skull_to_transducer = SKULL_DIST,
+        slice_index_z       = SLICE_INDEX,
+    )
+
+    src = PointSource3D(
+        depth      = 50e-3,
+        lateral_y  = 0.0,
+        lateral_z  = 0.0,
+        frequency  = FREQ,
+        num_cycles = NUM_CYCLES,
+    )
+
+    println("Running k-Wave (GPU)…")
+    kwave_tmp = mktempdir()
+    t_sim = @elapsed begin
+        rf_base, _, _ = simulate_point_sources_3d(c_kw, rho_kw, [src], kw_cfg;
+            use_gpu=true, kwave_data_path=kwave_tmp)
+    end
+    @printf("  k-Wave wall-clock: %.1f s\n\n", t_sim)
+    GC.gc(true)
+    rm(kwave_tmp; recursive=true, force=true)
+
+    # GPU warm-up
+    print("GPU warm-up (small domain) … ")
+    flush(stdout)
+    let
+        cfg_w = PAMConfig3D(
+            dx = DX, dy = DX, dz = DX,
+            axial_dim        = 30e-3,
+            transverse_dim_y = 50e-3,
+            transverse_dim_z = 50e-3,
+            dt = DT, t_max = T_MAX,
+            receiver_aperture_y = 50e-3,
+            receiver_aperture_z = 50e-3,
+        )
+        c_w, _, _ = make_pam_medium_3d(cfg_w;
+            aberrator=:skull, skull_to_transducer=SKULL_DIST, slice_index_z=SLICE_INDEX)
+        rf_w = zeros(Float32, pam_Ny(cfg_w), pam_Nz(cfg_w), pam_Nt(cfg_w))
+        reconstruct_pam_3d(rf_w, c_w, cfg_w;
+            frequencies=[FREQ], bandwidth=BANDWIDTH, corrected=true,
+            axial_step=AXIAL_STEP, use_gpu=true, show_progress=false)
+    end
+    println("done.\n")
+
+else
+    println("All points already complete — skipping k-Wave and warm-up.\n")
 end
 
 function save_progress()
@@ -217,6 +235,7 @@ for (di, depth_mm) in enumerate(DEPTHS_MM)
                     s_count, n_total, depth_mm, apt_mm)
             continue
         end
+
 
         n_remaining = count(isnan, timing_wall_s)
         elapsed = time() - t_sweep_start

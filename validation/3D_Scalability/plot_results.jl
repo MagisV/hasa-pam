@@ -70,7 +70,7 @@ println()
 update_theme!(fontsize = 9)
 
 DEPTH_COLORS  = [:steelblue, :coral, :forestgreen, :darkorchid, :darkorange]
-APT_MARKERS   = [:circle, :diamond, :rect]
+APT_MARKERS   = [:circle, :diamond, :rect, :utriangle]
 
 fig = Figure(size = (820, 370))
 
