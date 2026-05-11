@@ -24,7 +24,7 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
 using TranscranialFUS
-using JLD2, Printf, Dates, CUDA
+using JLD2, Printf, Dates, CUDA, Statistics
 
 # ── Fixed parameters (consistent with 3D_PAM_Accuracy / 3D_Speed_Benchmark) ──
 
@@ -35,6 +35,7 @@ const DT         = 40e-9
 const T_MAX      = 120e-6
 const AXIAL_STEP = 50e-6
 const BANDWIDTH  = 0.0
+const N_RUNS     = 3     # timed repetitions per (depth, aperture) point; median is stored
 
 const SKULL_DIST  = 20e-3
 const SLICE_INDEX = 250
@@ -165,27 +166,32 @@ if any(isnan, timing_wall_s)
     GC.gc(true)
     rm(kwave_tmp; recursive=true, force=true)
 
-    # GPU warm-up
-    print("GPU warm-up (small domain) … ")
-    flush(stdout)
-    let
-        cfg_w = PAMConfig3D(
-            dx = DX, dy = DX, dz = DX,
-            axial_dim        = 30e-3,
-            transverse_dim_y = 50e-3,
-            transverse_dim_z = 50e-3,
-            dt = DT, t_max = T_MAX,
-            receiver_aperture_y = 50e-3,
-            receiver_aperture_z = 50e-3,
-        )
-        c_w, _, _ = make_pam_medium_3d(cfg_w;
-            aberrator=:skull, skull_to_transducer=SKULL_DIST, slice_index_z=SLICE_INDEX)
-        rf_w = zeros(Float32, pam_Ny(cfg_w), pam_Nz(cfg_w), pam_Nt(cfg_w))
-        reconstruct_pam_3d(rf_w, c_w, cfg_w;
-            frequencies=[FREQ], bandwidth=BANDWIDTH, corrected=true,
-            axial_step=AXIAL_STEP, use_gpu=true, show_progress=false)
+    # GPU warm-up — one reconstruction per aperture size so JIT compilation for
+    # each (Ny, Nz) grid is not included in the sweep timing.
+    println("GPU warm-up (one call per aperture size)…")
+    for apt_mm in APERTURES_MM
+        print("  aperture = $(round(Int, apt_mm)) mm … ")
+        flush(stdout)
+        let
+            cfg_w = PAMConfig3D(
+                dx = DX, dy = DX, dz = DX,
+                axial_dim           = 25e-3,
+                transverse_dim_y    = apt_mm * 1e-3,
+                transverse_dim_z    = apt_mm * 1e-3,
+                dt = DT, t_max = T_MAX,
+                receiver_aperture_y = apt_mm * 1e-3,
+                receiver_aperture_z = apt_mm * 1e-3,
+            )
+            c_w, _, _ = make_pam_medium_3d(cfg_w;
+                aberrator=:skull, skull_to_transducer=SKULL_DIST, slice_index_z=SLICE_INDEX)
+            rf_w = zeros(Float32, pam_Ny(cfg_w), pam_Nz(cfg_w), pam_Nt(cfg_w))
+            reconstruct_pam_3d(rf_w, c_w, cfg_w;
+                frequencies=[FREQ], bandwidth=BANDWIDTH, corrected=true,
+                axial_step=AXIAL_STEP, use_gpu=true, show_progress=false)
+        end
+        println("done.")
     end
-    println("done.\n")
+    println()
 
 else
     println("All points already complete — skipping k-Wave and warm-up.\n")
@@ -243,7 +249,7 @@ for (di, depth_mm) in enumerate(DEPTHS_MM)
         eta_str = isnan(eta_s) ? "?" : @sprintf("%.0f", eta_s / 60)
 
         Ny_tgt = round(Int, apt_mm * 1e-3 / DX)
-        @printf("[%2d/%d] depth=%3.0f mm, aperture=%3.0f mm (Ny=Nz=%d, %d march rows, ETA ~%s min) … ",
+        @printf("[%2d/%d] depth=%3.0f mm, aperture=%3.0f mm (Ny=Nz=%d, %d march rows, ETA ~%s min)\n",
                 s_count, n_total, depth_mm, apt_mm, Ny_tgt,
                 round(Int, depth_mm * 1e-3 / AXIAL_STEP), eta_str)
         flush(stdout)
@@ -270,22 +276,30 @@ for (di, depth_mm) in enumerate(DEPTHS_MM)
         # RF resized to match aperture (crop or zero-pad from 64 mm base)
         rf_apt = resize_rf(rf_base, Ny_tgt, Ny_tgt)
 
-        # GPU HASA reconstruction
-        t_wall = @elapsed begin
-            _, _, info = reconstruct_pam_3d(
-                rf_apt, c_recon, cfg_recon;
-                frequencies   = [FREQ],
-                bandwidth     = BANDWIDTH,
-                corrected     = true,
-                axial_step    = AXIAL_STEP,
-                use_gpu       = true,
-                show_progress = false,
-            )
-            timing_march_s[di, ai] = get(get(info, :gpu_timing, Dict()), :march_wall_s, NaN)
+        # GPU HASA reconstruction — N_RUNS timed repetitions, store median.
+        run_wall_s  = Vector{Float64}(undef, N_RUNS)
+        run_march_s = Vector{Float64}(undef, N_RUNS)
+        for r in 1:N_RUNS
+            @printf("  run %d/%d … ", r, N_RUNS)
+            flush(stdout)
+            t = @elapsed begin
+                _, _, info = reconstruct_pam_3d(
+                    rf_apt, c_recon, cfg_recon;
+                    frequencies   = [FREQ],
+                    bandwidth     = BANDWIDTH,
+                    corrected     = true,
+                    axial_step    = AXIAL_STEP,
+                    use_gpu       = true,
+                    show_progress = false,
+                )
+            end
+            run_wall_s[r]  = t
+            run_march_s[r] = get(get(info, :gpu_timing, Dict()), :march_wall_s, NaN)
+            @printf("%.2f s  (march %.2f s)\n", t, run_march_s[r])
         end
-
-        timing_wall_s[di, ai] = t_wall
-        @printf("%.2f s  (march %.2f s)\n", t_wall, timing_march_s[di, ai])
+        timing_wall_s[di, ai]  = median(run_wall_s)
+        timing_march_s[di, ai] = median(run_march_s)
+        @printf("  → median: %.2f s  (march %.2f s)\n", timing_wall_s[di, ai], timing_march_s[di, ai])
 
         # Free CPU temporaries and flush GPU memory pool before the next (larger) run.
         rf_apt  = nothing
