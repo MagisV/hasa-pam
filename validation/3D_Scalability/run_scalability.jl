@@ -24,7 +24,7 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
 using TranscranialFUS
-using JLD2, Printf, Dates
+using JLD2, Printf, Dates, CUDA
 
 # ── Fixed parameters (consistent with 3D_PAM_Accuracy / 3D_Speed_Benchmark) ──
 
@@ -161,9 +161,31 @@ n_apertures = length(APERTURES_MM)
 timing_wall_s  = fill(NaN, n_depths, n_apertures)
 timing_march_s = fill(NaN, n_depths, n_apertures)
 
+# Progress file: written after every point so a crash loses at most one run.
+const PROGRESS_FILE = joinpath(@__DIR__, "progress.jld2")
+
+if isfile(PROGRESS_FILE)
+    prev = load(PROGRESS_FILE)
+    timing_wall_s  .= prev["timing_wall_s"]
+    timing_march_s .= prev["timing_march_s"]
+    n_done = count(!isnan, timing_wall_s)
+    println("Resuming from progress.jld2 — $n_done/$(n_depths*n_apertures) points already done.")
+    println()
+end
+
+function save_progress()
+    jldsave(PROGRESS_FILE;
+        timing_wall_s, timing_march_s,
+        APERTURES_MM, DEPTHS_MM,
+        FREQ, NUM_CYCLES, DX, DT, T_MAX, AXIAL_STEP, BANDWIDTH,
+        SKULL_DIST, SLICE_INDEX,
+    )
+end
+
 t_sweep_start = time()
 n_total = n_depths * n_apertures
 s_count = 0
+n_run   = 0
 
 for (di, depth_mm) in enumerate(DEPTHS_MM)
 
@@ -189,10 +211,22 @@ for (di, depth_mm) in enumerate(DEPTHS_MM)
     for (ai, apt_mm) in enumerate(APERTURES_MM)
 
         global s_count += 1
+
+        if !isnan(timing_wall_s[di, ai])
+            @printf("[%2d/%d] depth=%3.0f mm, aperture=%3.0f mm  [skipped — already done]\n",
+                    s_count, n_total, depth_mm, apt_mm)
+            continue
+        end
+
+        n_remaining = count(isnan, timing_wall_s)
+        elapsed = time() - t_sweep_start
+        eta_s = n_run > 0 ? elapsed / n_run * (n_remaining - 1) : NaN
+        eta_str = isnan(eta_s) ? "?" : @sprintf("%.0f", eta_s / 60)
+
         Ny_tgt = round(Int, apt_mm * 1e-3 / DX)
-        @printf("[%2d/%d] depth=%3.0f mm, aperture=%3.0f mm (Ny=Nz=%d, %d march rows) … ",
+        @printf("[%2d/%d] depth=%3.0f mm, aperture=%3.0f mm (Ny=Nz=%d, %d march rows, ETA ~%s min) … ",
                 s_count, n_total, depth_mm, apt_mm, Ny_tgt,
-                round(Int, depth_mm * 1e-3 / AXIAL_STEP))
+                round(Int, depth_mm * 1e-3 / AXIAL_STEP), eta_str)
         flush(stdout)
 
         # Reconstruction config for this (depth, aperture)
@@ -232,8 +266,18 @@ for (di, depth_mm) in enumerate(DEPTHS_MM)
         end
 
         timing_wall_s[di, ai] = t_wall
-
         @printf("%.2f s  (march %.2f s)\n", t_wall, timing_march_s[di, ai])
+
+        # Free CPU temporaries and flush GPU memory pool before the next (larger) run.
+        rf_apt  = nothing
+        c_recon = nothing
+        GC.gc(true)
+        CUDA.reclaim()
+
+        global n_run += 1
+        n_done = count(!isnan, timing_wall_s)
+        save_progress()
+        @printf("    [progress saved — %d/%d done]\n", n_done, n_total)
     end
 end
 
@@ -264,13 +308,6 @@ outdir  = @__DIR__
 ts      = Dates.format(now(), "yyyymmdd_HHMMSS")
 outfile = joinpath(outdir, "results_$(ts).jld2")
 
-jldsave(outfile;
-    timing_wall_s,
-    timing_march_s,
-    APERTURES_MM,
-    DEPTHS_MM,
-    FREQ, NUM_CYCLES, DX, DT, T_MAX, AXIAL_STEP, BANDWIDTH,
-    SKULL_DIST, SLICE_INDEX,
-    sim_time_s = t_sim,
-)
+save_progress()
+mv(PROGRESS_FILE, outfile; force=true)
 println("Results saved → $outfile")

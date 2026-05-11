@@ -1,11 +1,17 @@
 """
 Plot 3D PAM localization accuracy from saved validation results.
 
-Produces a two-panel Axis3 figure: left = geometric ASA, right = HASA.
-Each of the 27 sources is shown as a scatter point at its true 3D position.
-Dot colour and size encode the radial localization error.
-The skull cross-section (y-z plane at x = SKULL_DIST) is overlaid as a
-semi-transparent heatmap slice for spatial context.
+Layout matches Fig. 2 in the paper:
+  • Receiver aperture outline at the TOP  (depth = 0)
+  • Source error bubbles below, sized by radial localisation error
+  • Dashed stem lines from each source up to skull depth as reference
+
+Coordinate mapping:
+  Plot X = lateral Y (simulation),  Plot Y = lateral Z (simulation),
+  Plot Z = –depth  →  receiver at Z = 0 (top), deep sources at Z ≈ –60 (bottom).
+  Z tick labels are shown as positive depth values in mm.
+
+Saved as PNG (not PDF) to avoid 800+ MB vector output.
 
 Usage:
     julia --project=. validation/3D_PAM_Accuracy/plot_results.jl [results_file.jld2]
@@ -14,7 +20,7 @@ Usage:
 using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
-using CairoMakie, JLD2, TranscranialFUS, Statistics, Printf
+using CairoMakie, JLD2, Statistics, Printf
 
 # ── Load results ──────────────────────────────────────────────────────────────
 
@@ -44,7 +50,7 @@ TRANS_DIM      = d["TRANS_DIM"]
 SKULL_DIST     = d["SKULL_DIST"]
 SLICE_INDEX    = d["SLICE_INDEX"]
 
-# ── Print summary table ───────────────────────────────────────────────────────
+# ── Print summary ─────────────────────────────────────────────────────────────
 
 geo_all  = filter(!isnan, geo_errors_mm)
 hasa_all = filter(!isnan, hasa_errors_mm)
@@ -55,117 +61,96 @@ println("  ──────────────┼────────
 @printf("  HASA          │ %.2f ± %.2f mm (n=%d)\n", mean(hasa_all), std(hasa_all), length(hasa_all))
 println()
 
-# ── Rebuild skull medium for background slice ─────────────────────────────────
+# ── Coordinate mapping ────────────────────────────────────────────────────────
+#
+#  Plot axis → simulation quantity
+#  X  =  lateral Y   (horizontal left–right)
+#  Y  =  lateral Z   (horizontal front–back)
+#  Z  = –depth       (vertical: 0 = receiver plane at top, negative = deeper)
+#
+#  This puts the receiver plate on top, sources below — matching Fig. 2 geometry.
 
-sim_cfg = PAMConfig3D(
-    dx               = DX,
-    dy               = DX,
-    dz               = DX,
-    axial_dim        = AXIAL_DIM,
-    transverse_dim_y = TRANS_DIM,
-    transverse_dim_z = TRANS_DIM,
-    dt               = DT,
-    t_max            = T_MAX,
-    receiver_aperture_y = APERTURE_MM * 1e-3,
-    receiver_aperture_z = APERTURE_MM * 1e-3,
-)
-println("Rebuilding skull medium for background slice…")
-c, _, _ = make_pam_medium_3d(
-    sim_cfg;
-    aberrator           = :skull,
-    skull_to_transducer = SKULL_DIST,
-    slice_index_z       = SLICE_INDEX,
-)
-
-# ── Coordinate arrays ─────────────────────────────────────────────────────────
-
-rr        = receiver_row(sim_cfg)
-dx_mm     = DX * 1e3
-Ny        = pam_Ny(sim_cfg)
-Nz        = pam_Nz(sim_cfg)
-ax_coords = [(i - rr) * dx_mm for i in 1:pam_Nx(sim_cfg)]
-y_coords  = [(j - (Ny ÷ 2 + 1)) * dx_mm for j in 1:Ny]
-z_coords  = [(k - (Nz ÷ 2 + 1)) * dx_mm for k in 1:Nz]
-
-# Skull cross-section at the outer skull face depth
-skull_depth_mm = SKULL_DIST * 1e3
-skull_row_idx  = argmin(abs.(ax_coords .- skull_depth_mm))
-skull_slice_c  = c[skull_row_idx, :, :]   # (Ny, Nz) sound-speed map
+skull_plot_z = -SKULL_DIST * 1e3   # e.g. –20 mm (used as stem reference)
 
 # ── Error → visual encoding ───────────────────────────────────────────────────
 
-MAX_ERR = 6.0
-MIN_MS  = 6.0
-MAX_MS  = 24.0
-errcmap = :plasma
+MAX_ERR  = 6.0
+MIN_MS   = 8.0
+MAX_MS   = 30.0
+errcmap  = :plasma
 
 err_to_ms(e) = MIN_MS + (MAX_MS - MIN_MS) * clamp(e, 0.0, MAX_ERR) / MAX_ERR
 
+# Z axis ticks: actual values are negative, labels shown as positive depth
+max_depth     = maximum(AXIAL_MM)
+tick_depths   = 0.0:10.0:max_depth              # positive depth values
+ztick_vals    = collect(-tick_depths)            # e.g. [0, -10, -20, ..., -60]
+ztick_labels  = [string(Int(d)) for d in tick_depths]
+
 # ── Figure ────────────────────────────────────────────────────────────────────
 
-update_theme!(fontsize = 9)
+update_theme!(fontsize = 10)
+fig = Figure(size = (1000, 520))
 
-fig = Figure(size = (900, 440))
-
-panels = [
-    ("Geometric ASA", geo_errors_mm),
-    ("HASA",          hasa_errors_mm),
-]
+panels = [("Geometric ASA", geo_errors_mm), ("HASA", hasa_errors_mm)]
 
 for (panel_col, (panel_label, errors)) in enumerate(panels)
     ax = Axis3(fig[1, panel_col];
-        xlabel          = "Depth [mm]",
-        ylabel          = "Lateral Y [mm]",
-        zlabel          = "Lateral Z [mm]",
+        xlabel          = "Lateral Y [mm]",
+        ylabel          = "Lateral Z [mm]",
+        zlabel          = "Depth [mm]",
         title           = panel_label,
         aspect          = :data,
-        perspectiveness = 0.3,
-        azimuth         = 5π / 8,
-        elevation       = π / 10,
+        perspectiveness = 0.35,
+        azimuth         = 5π / 4,   # standard isometric-ish: both lateral axes visible
+        elevation       = π / 5,    # ~36° top-down so depth separation is clear
+        zticks          = (ztick_vals, ztick_labels),
+        xlabeloffset    = 40,
+        ylabeloffset    = 40,
+        zlabeloffset    = 55,
     )
 
-    # Semi-transparent skull slice at the skull depth
-    surface!(ax,
-        fill(skull_depth_mm, Ny, Nz),
-        repeat(y_coords,              1, Nz),
-        repeat(reshape(z_coords, 1, Nz), Ny, 1);
-        color      = Float32.(skull_slice_c),
-        colormap   = :grays,
-        colorrange = (1400.0f0, 2100.0f0),
-        alpha      = 0.35,
-        shading    = NoShading,
-    )
+    # Receiver aperture outline at top (Z = 0)
+    half = APERTURE_MM / 2.0
+    apy  = [-half,  half, half, -half, -half]
+    apz  = [-half, -half, half,  half, -half]
+    lines!(ax, apy, apz, fill(0.0, 5); color = :black, linewidth = 1.4)
 
-    # Source scatter: collect all 27 points
-    xs = Float64[]; ys = Float64[]; zs = Float64[]
-    cs = Float64[]; ms = Float64[]
+    # Collect sources in plot coordinates
+    xs_plot = Float64[]   # lateral Y
+    ys_plot = Float64[]   # lateral Z
+    zs_plot = Float64[]   # -depth
+    cs      = Float64[]
+    ms      = Float64[]
     for (ai, ax_mm) in enumerate(AXIAL_MM),
         (yi, ly_mm) in enumerate(LATERAL_Y_MM),
         (zi, lz_mm) in enumerate(LATERAL_Z_MM)
         e = errors[ai, yi, zi]
         isnan(e) && continue
-        push!(xs, Float64(ax_mm))
-        push!(ys, Float64(ly_mm))
-        push!(zs, Float64(lz_mm))
+        push!(xs_plot, Float64(ly_mm))
+        push!(ys_plot, Float64(lz_mm))
+        push!(zs_plot, -Float64(ax_mm))
         push!(cs, clamp(e, 0.0, MAX_ERR))
         push!(ms, err_to_ms(e))
     end
 
-    scatter!(ax, xs, ys, zs;
-        color       = cs,
-        colorrange  = (0.0, MAX_ERR),
-        colormap    = errcmap,
-        markersize  = ms,
-        strokewidth = 0.5,
-        strokecolor = :black,
-    )
+    # Dashed stem lines from each source UP to the skull plane
+    for (xp, yp, zp) in zip(xs_plot, ys_plot, zs_plot)
+        lines!(ax, [xp, xp], [yp, yp], [skull_plot_z, zp];
+               color = :gray55, linewidth = 0.9, linestyle = :dash)
+    end
+    # Cross markers at skull level to anchor the stems
+    scatter!(ax, xs_plot, ys_plot, fill(skull_plot_z, length(xs_plot));
+             marker = :cross, markersize = 7, color = :gray45, strokewidth = 0)
 
-    # Receiver aperture outline at depth = 0
-    half = APERTURE_MM / 2.0
-    apts = [(-half, -half), (half, -half), (half, half), (-half, half), (-half, -half)]
-    apt_ys = [p[1] for p in apts]
-    apt_zs = [p[2] for p in apts]
-    lines!(ax, fill(0.0, 5), apt_ys, apt_zs; color = :gray50, linewidth = 0.8)
+    # Error bubbles (on top of stems)
+    scatter!(ax, xs_plot, ys_plot, zs_plot;
+             color       = cs,
+             colorrange  = (0.0, MAX_ERR),
+             colormap    = errcmap,
+             markersize  = ms,
+             strokewidth = 0.8,
+             strokecolor = :black)
 end
 
 # Shared error colorbar
@@ -174,17 +159,34 @@ Colorbar(fig[1, 3];
     colorrange    = (0.0, MAX_ERR),
     label         = "Radial Error [mm]",
     width         = 14,
-    ticklabelsize = 8,
-    labelsize     = 9,
+    ticklabelsize = 9,
+    labelsize     = 10,
     ticks         = 0:1:Int(MAX_ERR),
 )
 
-colgap!(fig.layout, 8)
+# Bubble size legend
+leg_ax = Axis(fig[2, 1:2]; height = 44, aspect = nothing,
+              xautolimitmargin = (0,0), yautolimitmargin = (0,0))
+hidedecorations!(leg_ax); hidespines!(leg_ax)
+for (i, e) in enumerate([0.0, 2.0, 4.0, 6.0])
+    scatter!(leg_ax, [i * 70.0], [22.0];
+             color = :gray80, markersize = err_to_ms(e),
+             strokewidth = 0.8, strokecolor = :black)
+    text!(leg_ax, i * 70.0, 3.0; text = "$(Int(e)) mm",
+          align = (:center, :bottom), fontsize = 8)
+end
+text!(leg_ax, 8.0, 22.0; text = "Bubble size = error:",
+      align = (:left, :center), fontsize = 8)
+xlims!(leg_ax, 0, 330); ylims!(leg_ax, 0, 44)
 
-# ── Save figure ───────────────────────────────────────────────────────────────
+rowsize!(fig.layout, 2, Fixed(44))
+colgap!(fig.layout, 6)
+rowgap!(fig.layout, 4)
 
-figfile = replace(results_file, r"\.jld2$" => "_accuracy3d.pdf")
-save(figfile, fig)
+# ── Save as PNG ───────────────────────────────────────────────────────────────
+
+figfile = replace(results_file, r"\.jld2$" => "_accuracy3d.png")
+save(figfile, fig; px_per_unit = 2)
 println("Saved → $figfile")
 
 # ── Write results.md ──────────────────────────────────────────────────────────
