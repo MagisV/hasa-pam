@@ -119,7 +119,6 @@ function _default_psf_widths(
 
     freqs = isnothing(frequencies) || isempty(frequencies) ? nothing : Float64.(frequencies)
     if isnothing(freqs)
-        # Fallback: assume one wavelength worth of structure
         lambda = cfg.c0 / 5e5
         lateral = lambda * depth / aperture
         axial = 2 * lambda * (depth / aperture)^2
@@ -138,93 +137,6 @@ function _default_psf_widths(
         2 * lambda_min * (depth / aperture)^2
     end
     return max(axial, 2 * cfg.dx), max(lateral, 2 * cfg.dz)
-end
-
-"""
-    find_pam_peaks_clean(intensity, kgrid, cfg; n_peaks, frequencies=nothing,
-                         psf_axial_fwhm=nothing, psf_lateral_fwhm=nothing,
-                         loop_gain=0.1, max_iter=500, threshold_ratio=1e-2,
-                         suppression_radius=nothing)
-
-Iterative CLEAN (Högbom) peak detector for PAM intensity maps. Each iteration
-finds the brightest residual pixel, adds `loop_gain * peak` to the accumulator,
-and subtracts a scaled Gaussian PSF from the residual. The `n_peaks` brightest
-maxima in the accumulator are returned. If `suppression_radius` is not given,
-it defaults to the lateral PSF FWHM, which lets sources as close as one PSF
-width apart be resolved distinctly.
-"""
-function find_pam_peaks_clean(
-    intensity::AbstractMatrix{<:Real},
-    kgrid::KGrid2D,
-    cfg::PAMConfig;
-    n_peaks::Integer,
-    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
-    psf_axial_fwhm::Union{Nothing, Real}=nothing,
-    psf_lateral_fwhm::Union{Nothing, Real}=nothing,
-    loop_gain::Real=0.1,
-    max_iter::Integer=500,
-    threshold_ratio::Real=1e-2,
-    suppression_radius::Union{Nothing, Real}=nothing,
-)
-    0 < loop_gain <= 1 || error("loop_gain must lie in (0, 1].")
-    n_peaks > 0 || error("n_peaks must be positive.")
-
-    residual = copy(Float64.(intensity))
-    row_start = receiver_row(cfg) + 1
-    row_stop = size(residual, 1)
-    row_start <= row_stop || error("No valid reconstruction rows remain.")
-    residual[1:(row_start - 1), :] .= -Inf
-    if row_stop < size(residual, 1)
-        residual[(row_stop + 1):end, :] .= -Inf
-    end
-
-    ax_fwhm, lat_fwhm = if isnothing(psf_axial_fwhm) || isnothing(psf_lateral_fwhm)
-        _default_psf_widths(cfg, kgrid, frequencies)
-    else
-        Float64(psf_axial_fwhm), Float64(psf_lateral_fwhm)
-    end
-    ax_fwhm = something(psf_axial_fwhm, ax_fwhm)
-    lat_fwhm = something(psf_lateral_fwhm, lat_fwhm)
-
-    σ_ax_cells = max(1.0, Float64(ax_fwhm) / (cfg.dx * 2.3548))
-    σ_lat_cells = max(1.0, Float64(lat_fwhm) / (cfg.dz * 2.3548))
-    half_ax = max(1, ceil(Int, 3 * σ_ax_cells))
-    half_lat = max(1, ceil(Int, 3 * σ_lat_cells))
-
-    finite_mask = isfinite.(residual)
-    any(finite_mask) || return Tuple{Int, Int}[]
-    peak_init = maximum(residual[finite_mask])
-    peak_init > 0 || return Tuple{Int, Int}[]
-    threshold = peak_init * Float64(threshold_ratio)
-
-    accum = zeros(Float64, size(residual))
-    nx, ny = size(residual)
-
-    for _ in 1:Int(max_iter)
-        idx = Tuple(argmax(residual))
-        pv = residual[idx...]
-        (!isfinite(pv) || pv < threshold) && break
-
-        scale = Float64(loop_gain) * pv
-        r0, c0 = idx
-        accum[r0, c0] += scale
-
-        r1 = max(1, r0 - half_ax)
-        r2 = min(nx, r0 + half_ax)
-        c1 = max(1, c0 - half_lat)
-        c2 = min(ny, c0 + half_lat)
-        @inbounds for r in r1:r2
-            dr = (r - r0) / σ_ax_cells
-            for c in c1:c2
-                dc = (c - c0) / σ_lat_cells
-                weight = exp(-0.5 * (dr^2 + dc^2))
-                residual[r, c] -= scale * weight
-            end
-        end
-    end
-
-    sup_radius = isnothing(suppression_radius) ? Float64(lat_fwhm) : Float64(suppression_radius)
-    return find_pam_peaks(accum, kgrid, cfg; n_peaks=n_peaks, suppression_radius=sup_radius)
 end
 
 function pam_truth_mask(
@@ -324,7 +236,7 @@ function pam_centerline_truth_mask(
 end
 
 _source_activity_weight(src::PointSource2D) = abs(src.amplitude)
-_source_activity_weight(src::BubbleCluster2D) = abs(src.amplitude * src.n_bubbles)
+_source_activity_weight(src::BubbleCluster2D) = abs(src.amplitude)
 
 """
     pam_source_map(sources, kgrid, cfg; weights=:amplitude)
@@ -802,34 +714,11 @@ function analyse_pam_2d(
     n_peaks::Union{Nothing, Integer}=nothing,
     success_tolerance::Real=cfg.success_tolerance,
     suppression_radius::Real=cfg.peak_suppression_radius,
-    peak_method::Symbol=:argmax,
-    frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
-    clean_loop_gain::Real=0.1,
-    clean_max_iter::Integer=500,
-    clean_threshold_ratio::Real=1e-2,
-    clean_psf_axial_fwhm::Union{Nothing, Real}=nothing,
-    clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
 )
     n_truth = length(sources)
     n_truth > 0 || error("At least one emission source is required for PAM analysis.")
     n_find = isnothing(n_peaks) ? n_truth : Int(n_peaks)
-    peaks = if peak_method == :clean
-        find_pam_peaks_clean(
-            intensity, kgrid, cfg;
-            n_peaks=n_find,
-            frequencies=frequencies,
-            psf_axial_fwhm=clean_psf_axial_fwhm,
-            psf_lateral_fwhm=clean_psf_lateral_fwhm,
-            loop_gain=clean_loop_gain,
-            max_iter=clean_max_iter,
-            threshold_ratio=clean_threshold_ratio,
-            suppression_radius=nothing,
-        )
-    elseif peak_method == :argmax
-        find_pam_peaks(intensity, kgrid, cfg; n_peaks=n_find, suppression_radius=suppression_radius)
-    else
-        error("Unknown peak_method: $peak_method (expected :argmax or :clean).")
-    end
+    peaks = find_pam_peaks(intensity, kgrid, cfg; n_peaks=n_find, suppression_radius=suppression_radius)
     length(peaks) == n_truth || error("Expected to recover $n_truth peaks, found $(length(peaks)).")
 
     depth = depth_coordinates(kgrid, cfg)

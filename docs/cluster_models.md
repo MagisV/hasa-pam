@@ -23,7 +23,7 @@ $$s(t) = A \;\cdot\; w_\text{Tukey}(t;\, T_\text{gate},\, r) \;\cdot\; \sum_{n \
 | $t$ | Time, measured from source onset (after subtracting `delay`) |
 | $f_0$ | Fundamental emission frequency. Harmonics are integer multiples $n f_0$ |
 | $n$ | Harmonic order. Bubbles driven at $f_\text{drive}$ emit at $n f_\text{drive}$ |
-| $A$ | Per-bubble pressure amplitude (linear scale) |
+| $A$ | Cluster pressure amplitude (linear scale) |
 | $\alpha_n$ | Relative amplitude of harmonic $n$, normalised so $\alpha_2 = 1$ by convention |
 | $\phi_n$ | Phase of harmonic $n$. Set by `phase_mode`: zero (coherent), geometric travel-time delay, or random |
 | $T_\text{gate}$ | Total emission duration. Signal is zero outside $[0, T_\text{gate}]$ |

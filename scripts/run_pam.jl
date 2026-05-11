@@ -13,7 +13,7 @@ using JSON3
 using TranscranialFUS
 import TranscranialFUS: parse_cli, slug_value, parse_bool, parse_dimension, parse_float_list, parse_int_list,
     parse_threshold_ratios, parse_threshold_search_ratios, parse_source_model, parse_aberrator,
-    parse_sim_mode, parse_source_phase_mode, parse_source_variability,
+    parse_simulation_backend, parse_source_phase_mode, parse_source_variability,
     source_variability_from_summary, parse_analysis_mode, resolve_reconstruction_mode,
     make_window_config, parse_receiver_aperture_mm, parse_transducer_mm, parse_point_sources,
     parse_point_sources_3d, parse_squiggle_sources_3d, parse_network_sources_3d,
@@ -85,7 +85,7 @@ function run_pam_case_3d(
     show_progress::Bool=false,
     benchmark::Bool=false,
     window_batch::Int=1,
-    sim_mode::Symbol=:analytic,
+    simulation_backend::Symbol=:analytic,
     source_phase_mode::Symbol=:coherent,
     rng::Random.AbstractRNG=Random.default_rng(),
     source_variability::SourceVariabilityConfig=SourceVariabilityConfig(),
@@ -117,10 +117,8 @@ function run_pam_case_3d(
             rng;
             variability=source_variability,
         )
-    elseif phase_mode == :random_phase_per_realization
-        error("3D PAM does not implement --source-phase-mode=random_phase_per_realization yet.")
     end
-    rf, grid, sim_info = if sim_mode == :kwave
+    rf, grid, sim_info = if simulation_backend == :kwave
         simulate_point_sources_3d(c, rho, sim_sources, cfg; use_gpu=kwave_use_gpu)
     else
         analytic_rf_for_point_sources_3d(cfg, sim_sources)
@@ -904,7 +902,6 @@ function source_summary(src::BubbleCluster2D)
         "lateral_m" => src.lateral,
         "fundamental_hz" => src.fundamental,
         "amplitude_pa" => src.amplitude,
-        "n_bubbles" => src.n_bubbles,
         "harmonics" => src.harmonics,
         "harmonic_amplitudes" => src.harmonic_amplitudes,
         "harmonic_phases_rad" => src.harmonic_phases,
@@ -935,7 +932,6 @@ function source_summary(src::BubbleCluster3D)
         "lateral_z_m" => src.lateral_z,
         "fundamental_hz" => src.fundamental,
         "amplitude_pa" => src.amplitude,
-        "n_bubbles" => src.n_bubbles,
         "harmonics" => src.harmonics,
         "harmonic_amplitudes" => src.harmonic_amplitudes,
         "harmonic_phases_rad" => src.harmonic_phases,
@@ -948,8 +944,6 @@ opts, provided_keys = parse_cli(ARGS)
 dimension = parse_dimension(opts["dimension"])
 source_model = parse_source_model(opts["source-model"])
 from_run_dir = strip(opts["from-run-dir"])
-peak_method = Symbol(lowercase(strip(opts["peak-method"])))
-peak_method in (:argmax, :clean) || error("--peak-method must be argmax or clean, got: $(opts["peak-method"])")
 detection_truth_radius_m = parse(Float64, opts["vascular-radius-mm"]) * 1e-3
 detection_threshold_ratio = parse(Float64, opts["detection-threshold-ratio"])
 boundary_threshold_ratios = parse_threshold_ratios(opts["boundary-threshold-ratios"])
@@ -1028,8 +1022,9 @@ if dimension == 3
         )
     end
 
-    sim_mode = parse_sim_mode(opts["sim-mode"])
-    sim_mode == :analytic && aberrator == :skull && error("--sim-mode=analytic is not compatible with --aberrator=skull; use --sim-mode=kwave.")
+    simulation_backend = parse_simulation_backend(opts["simulation-backend"])
+    simulation_backend == :analytic && aberrator == :skull &&
+        error("--simulation-backend=analytic is not compatible with --aberrator=skull; use --simulation-backend=kwave.")
     results = run_pam_case_3d(
         c,
         rho,
@@ -1045,7 +1040,7 @@ if dimension == 3
         show_progress=parse_bool(opts["recon-progress"]),
         benchmark=parse_bool(opts["benchmark"]),
         window_batch=parse(Int, opts["window-batch"]),
-        sim_mode=sim_mode,
+        simulation_backend=simulation_backend,
         source_phase_mode=source_phase_mode,
         rng=rng_sim,
         source_variability=source_variability,
@@ -1085,7 +1080,8 @@ if dimension == 3
     summary = Dict(
         "out_dir" => out_dir,
         "dimension" => 3,
-        "reconstruction_source" => Dict("mode" => aberrator == :none ? "analytic_3d_water" : "heterogeneous_3d"),
+        "reconstruction_source" => Dict("mode" => String(simulation_backend)),
+        "simulation_backend" => String(simulation_backend),
         "activity_boundary_figure" => activity_boundary_path,
         "activity_boundary_metrics" => activity_boundary_metrics,
         "best_threshold_3d_figure" => best_volume_path,
@@ -1214,12 +1210,6 @@ if isempty(from_run_dir)
     c, rho, medium_info = make_pam_medium(
         cfg;
         aberrator=aberrator,
-        lens_center_depth=parse(Float64, opts["lens-depth-mm"]) * 1e-3,
-        lens_center_lateral=parse(Float64, opts["lens-lateral-mm"]) * 1e-3,
-        lens_axial_radius=parse(Float64, opts["lens-axial-radius-mm"]) * 1e-3,
-        lens_lateral_radius=parse(Float64, opts["lens-lateral-radius-mm"]) * 1e-3,
-        c_aberrator=parse(Float64, opts["aberrator-c"]),
-        rho_aberrator=parse(Float64, opts["aberrator-rho"]),
         ct_path=opts["ct-path"],
         slice_index=parse(Int, opts["slice-index"]),
         skull_to_transducer=parse(Float64, opts["skull-transducer-distance-mm"]) * 1e-3,
@@ -1239,7 +1229,6 @@ if isempty(from_run_dir)
     detection_truth_mask = detection_truth_mask_from_meta(emission_meta, pam_grid(cfg), cfg, detection_truth_radius_m)
 
     source_phase_mode = parse_source_phase_mode(opts["source-phase-mode"])
-    n_realizations = parse(Int, opts["n-realizations"])
     rng_sim = Random.MersenneTwister(parse(Int, opts["random-seed"]) + 1)
     source_variability = parse_source_variability(opts)
     if source_model == :squiggle
@@ -1260,17 +1249,12 @@ if isempty(from_run_dir)
         kwave_use_gpu=parse_bool(opts["kwave-use-gpu"]),
         reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
         analysis_mode=analysis_mode,
-        peak_method=peak_method,
-        clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
-        clean_max_iter=parse(Int, opts["clean-max-iter"]),
-        clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
         detection_truth_radius=detection_truth_radius_m,
         detection_threshold_ratio=detection_threshold_ratio,
         detection_truth_mask=detection_truth_mask,
         reconstruction_mode=reconstruction_mode,
         window_config=window_config,
         source_phase_mode=source_phase_mode,
-        n_realizations=n_realizations,
         rng=rng_sim,
         source_variability=source_variability,
         show_progress=parse_bool(opts["recon-progress"]),
@@ -1284,25 +1268,24 @@ else
         (
             "source-model", "sources-mm", "anchors-mm", "frequency-mhz", "fundamental-mhz",
             "amplitude-pa", "source-amplitudes-pa", "source-frequencies-mhz", "phases-deg",
-            "n-bubbles", "num-cycles", "harmonics", "harmonic-amplitudes",
+            "num-cycles", "harmonics", "harmonic-amplitudes",
             "gate-us", "taper-ratio", "axial-mm", "transverse-mm", "dx-mm", "dz-mm",
             "receiver-aperture-mm", "t-max-us", "dt-ns", "zero-pad-factor",
             "peak-suppression-radius-mm", "success-tolerance-mm", "aberrator", "ct-path",
             "slice-index", "skull-transducer-distance-mm", "bottom-margin-mm", "hu-bone-thr",
-            "lens-depth-mm", "lens-lateral-mm", "lens-axial-radius-mm", "lens-lateral-radius-mm",
-            "aberrator-c", "aberrator-rho", "phase-mode", "phase-jitter-rad", "random-seed",
+            "simulation-backend", "phase-mode", "phase-jitter-rad", "random-seed",
             "transducer-mm", "delays-us", "vascular-length-mm", "vascular-squiggle-amplitude-mm",
             "vascular-squiggle-amplitude-x-mm", "vascular-squiggle-wavelength-mm",
             "vascular-squiggle-slope", "squiggle-phase-x-deg",
             "vascular-source-spacing-mm", "vascular-position-jitter-mm",
             "vascular-min-separation-mm", "vascular-max-sources-per-anchor",
-            "network-radius-mm", "network-axial-radius-mm", "network-lateral-y-radius-mm",
+            "network-axial-radius-mm", "network-lateral-y-radius-mm",
             "network-lateral-z-radius-mm", "network-root-count", "network-generations",
             "network-branch-length-mm", "network-branch-step-mm", "network-branch-angle-deg",
             "network-tortuosity", "network-orientation", "network-density-sigma-mm", "network-density-axial-sigma-mm",
             "network-density-lateral-y-sigma-mm", "network-density-lateral-z-sigma-mm",
             "network-max-sources-per-center",
-            "source-phase-mode", "n-realizations", "frequency-jitter-percent",
+            "source-phase-mode", "frequency-jitter-percent",
         ),
     )
     cached_path = joinpath(from_run_dir, "result.jld2")
@@ -1360,10 +1343,6 @@ else
         use_gpu=parse_bool(opts["recon-use-gpu"]),
         reconstruction_axial_step=parse(Float64, opts["recon-step-um"]) * 1e-6,
         analysis_mode=analysis_mode,
-        peak_method=peak_method,
-        clean_loop_gain=parse(Float64, opts["clean-loop-gain"]),
-        clean_max_iter=parse(Int, opts["clean-max-iter"]),
-        clean_threshold_ratio=parse(Float64, opts["clean-threshold-ratio"]),
         detection_truth_radius=detection_truth_radius_m,
         detection_threshold_ratio=detection_threshold_ratio,
         detection_truth_mask=detection_truth_mask,
@@ -1437,7 +1416,6 @@ summary = Dict(
     "reconstruction_mode" => String(results[:reconstruction_mode]),
     "reconstruction_progress" => parse_bool(opts["recon-progress"]),
     "source_phase_mode" => String(get(results, :source_phase_mode, :coherent)),
-    "n_realizations" => Int(get(results, :n_realizations, 1)),
     "source_variability" => Dict(
         "frequency_jitter_percent" => source_variability.frequency_jitter_fraction * 100.0,
     ),
@@ -1461,10 +1439,6 @@ summary = Dict(
     "detection_truth_mode" => isnothing(detection_truth_mask) ? "source_disks" : "centerline_tube",
     "detection_threshold_ratio" => detection_threshold_ratio,
     "boundary_threshold_ratios" => boundary_threshold_ratios,
-    "peak_method" => String(peak_method),
-    "clean_loop_gain" => parse(Float64, opts["clean-loop-gain"]),
-    "clean_max_iter" => parse(Int, opts["clean-max-iter"]),
-    "clean_threshold_ratio" => parse(Float64, opts["clean-threshold-ratio"]),
     "simulation" => Dict(
         "receiver_row" => results[:simulation][:receiver_row],
         "receiver_cols" => [first(results[:simulation][:receiver_cols]), last(results[:simulation][:receiver_cols])],

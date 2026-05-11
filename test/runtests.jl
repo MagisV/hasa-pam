@@ -551,7 +551,6 @@ end
         lateral=0.0,
         fundamental=0.5e6,
         amplitude=1.0,
-        n_bubbles=1.0,
         harmonics=[2],
         harmonic_amplitudes=[1.0],
         harmonic_phases=[0.0],
@@ -577,8 +576,6 @@ end
     @test TranscranialFUS._normalize_source_phase_mode(:coherent) == :coherent
     @test TranscranialFUS._normalize_source_phase_mode(:random_static_phase) == :random_static_phase
     @test TranscranialFUS._normalize_source_phase_mode(:random_phase_per_window) == :random_phase_per_window
-    @test TranscranialFUS._normalize_source_phase_mode(:random_phase_per_realization) == :random_phase_per_realization
-    @test TranscranialFUS._normalize_source_phase_mode("random-phase-per-realization") == :random_phase_per_realization
     @test_throws ErrorException TranscranialFUS._normalize_source_phase_mode(:unknown_mode)
 
     @test TranscranialFUS._normalize_cluster_phase_mode(:random_static_phase) == :random
@@ -734,51 +731,6 @@ end
     )
     @test size(blurred_truth) == size(intensity)
     @test sum(blurred_truth) ≈ sum(source_map) atol=1e-8
-end
-
-@testset "CLEAN peak detection" begin
-    # Two sources whose focal shoulders overlap: argmax with a suppression
-    # radius smaller than the focus picks sidelobes of one source instead of
-    # the second source. CLEAN should find both.
-    cfg = PAMConfig(
-        dx=0.5e-3,
-        dz=0.5e-3,
-        axial_dim=0.05,
-        transverse_dim=0.04,
-        receiver_aperture=40e-3,
-        PML_GUARD=5,
-        peak_suppression_radius=1e-3,   # smaller than focus FWHM
-        success_tolerance=2e-3,
-    )
-    kgrid = pam_grid(cfg)
-    depth = depth_coordinates(kgrid, cfg)
-    lateral = kgrid.y_vec
-    truths = [
-        PointSource2D(depth=0.02, lateral=-0.003, frequency=0.4e6),
-        PointSource2D(depth=0.02, lateral=0.003, frequency=0.4e6),
-    ]
-    intensity = zeros(Float64, kgrid.Nx, kgrid.Ny)
-    σd = 3e-3  # broad axial focus to break argmax
-    σl = 2e-3
-    # unequal amplitudes to mimic a real coherent-interference scene
-    amps = (1.0, 0.7)
-    for (src, amp) in zip(truths, amps)
-        for i in 1:kgrid.Nx, j in 1:kgrid.Ny
-            intensity[i, j] += amp * exp(-((depth[i] - src.depth)^2 / (2σd^2) + (lateral[j] - src.lateral)^2 / (2σl^2)))
-        end
-    end
-
-    stats_argmax = analyse_pam_2d(intensity, kgrid, cfg, truths; peak_method=:argmax)
-    stats_clean = analyse_pam_2d(
-        intensity, kgrid, cfg, truths;
-        peak_method=:clean,
-        frequencies=[0.4e6],
-        clean_psf_axial_fwhm=2.355 * σd,
-        clean_psf_lateral_fwhm=2.355 * σl,
-    )
-
-    @test stats_clean[:mean_radial_error_mm] < stats_argmax[:mean_radial_error_mm]
-    @test stats_clean[:num_success] == 2
 end
 
 @testset "PAM sweep target presets" begin

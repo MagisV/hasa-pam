@@ -232,7 +232,6 @@ Key helpers:
 Supported aberrators:
 
 - `--aberrator=none`: homogeneous water control. Corrected and uncorrected PAM should match because there is no heterogeneous phase error to correct.
-- `--aberrator=lens`: simple elliptical speed perturbation
 - `--aberrator=skull`: CT-derived skull inserted into the PAM domain
 
 For `--aberrator=skull`:
@@ -276,7 +275,7 @@ julia --project=. scripts/run_pam.jl \
   --sources-mm=25:-6,32:0,40:8 \
   --phases-deg=0,90,180 \
   --delays-us=0,2,4 \
-  --aberrator=lens
+  --aberrator=none
 ```
 
 Squiggle activity uses `--anchors-mm=depth:lateral,...`; each anchor expands into harmonic bubble emitters sampled along one squiggly centerline. In `--recon-mode=auto`, `--source-model=squiggle` selects windowed incoherent reconstruction:
@@ -376,7 +375,7 @@ julia --project=. scripts/run_pam.jl `
   --dy-mm=0.5 `
   --dz-mm=0.5 `
   --t-max-us=250 `
-  --sim-mode=kwave `
+  --simulation-backend=kwave `
   --use-gpu=true `
   --recon-progress=true
 ```
@@ -418,7 +417,7 @@ julia --project=. scripts/run_pam.jl `
   --auto-threshold-min=0.10 `
   --auto-threshold-max=0.95 `
   --auto-threshold-step=0.01 `
-  --sim-mode=kwave `
+  --simulation-backend=kwave `
   --use-gpu=true `
   --window-batch=2 `
   --recon-progress=true
@@ -469,7 +468,7 @@ julia --project=. scripts/run_pam.jl `
   --auto-threshold-min=0.10 `
   --auto-threshold-max=0.95 `
   --auto-threshold-step=0.01 `
-  --sim-mode=kwave `
+  --simulation-backend=kwave `
   --use-gpu=true `
   --window-batch=2 `
   --recon-progress=true
@@ -482,8 +481,7 @@ default 500 kHz focal-volume support is roughly `20 mm` axial length by `3 mm`
 lateral width (`10 mm` axial radius and `1.5 mm` Y/Z radii). The default density
 sigmas match those radii, and the source cap is `80` bubbles per center.
 `--network-orientation=horizontal` and `--network-orientation=axial` are
-available for controlled priors, and `--network-radius-mm` remains available as
-a spherical shorthand.
+available for controlled priors.
 
 For sparse 3D squiggle and network sources, the threshold summary reports both voxel overlap
 metrics and source-aware metrics. `source_f1` combines voxel precision with the
@@ -539,7 +537,7 @@ julia --project=. scripts/run_pam.jl \
   --recon-bandwidth-khz=20
 ```
 
-`--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, and time step are rejected in this mode; reconstruction and analysis options such as `--use-gpu`, `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, `--peak-method`, and detection thresholds remain adjustable.
+`--from-run-dir` loads the previous `result.jld2`, reuses its RF data, medium, grid, and sources, and writes a fresh `outputs/<timestamp>_reconstruct_<old-folder>/` directory. Simulation-specific options such as source locations, medium/skull settings, grid size, and time step are rejected in this mode; reconstruction and analysis options such as `--use-gpu`, `--recon-bandwidth-khz`, `--recon-step-um`, `--recon-frequencies-mhz`, and detection thresholds remain adjustable.
 
 ### CUDA PAM Reconstruction
 
@@ -568,7 +566,6 @@ julia --project=. scripts/run_pam.jl `
 | `coherent` | All sources share the same phase relation. Contributions add constructively/destructively by geometry. |
 | `random_static_phase` | Each source draws a random phase once at setup and keeps it for the full simulation. |
 | `random_phase_per_window` | Each source emits once per reconstruction window with fresh random phases. A **single** k-Wave simulation spans all windows; windowed reconstruction is forced automatically. |
-| `random_phase_per_realization` | Each of `--n-realizations` k-Wave runs draws fresh random phases; intensity maps are averaged across runs. |
 
 **Coherent baseline** — sources lock in phase, single simulation:
 
@@ -590,19 +587,6 @@ julia --project=. scripts/run_pam.jl \
   --vascular-length-mm=12 \
   --source-phase-mode=random_static_phase \
   --phase-mode=random \
-  --random-seed=42 \
-  --aberrator=none
-```
-
-**Incoherent averaging over realizations** — 20 independent phase draws:
-
-```bash
-julia --project=. scripts/run_pam.jl \
-  --source-model=squiggle \
-  --anchors-mm=30:0 \
-  --vascular-length-mm=12 \
-  --source-phase-mode=random_phase_per_realization \
-  --n-realizations=20 \
   --random-seed=42 \
   --aberrator=none
 ```
@@ -637,7 +621,7 @@ julia --project=. scripts/run_pam.jl \
   --aberrator=none
 ```
 
-Supported amplitude distributions are `fixed`, `uniform`, `lognormal`, and `gaussian`. For `uniform`, `--amplitude-sigma` is the relative half-width around each source amplitude. For `lognormal`, it is the log-space standard deviation. For `gaussian`, it is the relative standard deviation and sampled amplitudes are clipped at zero. `--frequency-jitter-percent` applies a multiplicative jitter to each source fundamental frequency, so harmonic frequencies shift with it. The selected settings are written to `summary.json` under `source_variability`.
+`--frequency-jitter-percent` applies a multiplicative jitter to each source fundamental frequency, so harmonic frequencies shift with it. The selected setting is written to `summary.json` under `source_variability`.
 
 **Stochastic broadband** — each source emits independent noise centred on its harmonic frequencies:
 

@@ -17,7 +17,6 @@ Base.@kwdef struct BubbleCluster3D <: EmissionSource3D
     lateral_z::Float64 = 0.0
     fundamental::Float64 = 5e5
     amplitude::Float64 = 1.0
-    n_bubbles::Float64 = 1.0
     harmonics::Vector{Int} = [2, 3, 4]
     harmonic_amplitudes::Vector{Float64} = [1.0, 0.6, 0.3]
     harmonic_phases::Vector{Float64} = [0.0, 0.0, 0.0]
@@ -54,13 +53,12 @@ function _source_signal(nt::Int, dt::Real, src::BubbleCluster3D)
     active = findall((t .>= 0.0) .& (t .<= src.gate_duration))
     isempty(active) && return signal
     envelope = _tukey_window(length(active), src.taper_ratio)
-    total_amp = src.amplitude * src.n_bubbles
     t_active = t[active]
     accumulator = zeros(Float64, length(active))
     @inbounds for i in eachindex(src.harmonics)
         accumulator .+= src.harmonic_amplitudes[i] .* cos.(2pi .* src.harmonics[i] .* src.fundamental .* t_active .+ src.harmonic_phases[i])
     end
-    signal[active] .= total_amp .* envelope .* accumulator
+    signal[active] .= src.amplitude .* envelope .* accumulator
     return signal
 end
 
@@ -263,7 +261,7 @@ function _resample_source_phases_3d(
             BubbleCluster3D(
                 depth=src.depth, lateral_y=src.lateral_y, lateral_z=src.lateral_z,
                 fundamental=src.fundamental, amplitude=src.amplitude,
-                n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                harmonics=copy(src.harmonics),
                 harmonic_amplitudes=copy(src.harmonic_amplitudes),
                 harmonic_phases=2pi .* rand(rng, length(src.harmonics)),
                 gate_duration=src.gate_duration, taper_ratio=src.taper_ratio,
@@ -306,7 +304,7 @@ function _expand_sources_per_window(
                 BubbleCluster3D(
                     depth=src.depth, lateral_y=src.lateral_y, lateral_z=src.lateral_z,
                     fundamental=src.fundamental * fscale, amplitude=src.amplitude,
-                    n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                    harmonics=copy(src.harmonics),
                     harmonic_amplitudes=copy(src.harmonic_amplitudes),
                     harmonic_phases=2pi .* rand(rng, length(src.harmonics)),
                     gate_duration=min(src.gate_duration, frame_dur), taper_ratio=src.taper_ratio,
@@ -358,7 +356,6 @@ function make_squiggle_bubble_sources_3d(
     lateral_z_bounds::Tuple{<:Real, <:Real} = (-Inf, Inf),
     fundamental::Real = 5e5,
     amplitude::Real = 1.0,
-    n_bubbles::Real = 1.0,
     harmonics::AbstractVector{<:Integer} = [2, 3, 4],
     harmonic_amplitudes::AbstractVector{<:Real} = [1.0, 0.6, 0.3],
     gate_duration::Real = 50e-6,
@@ -425,7 +422,6 @@ function make_squiggle_bubble_sources_3d(
                 lateral_z = z,
                 fundamental = Float64(fundamental),
                 amplitude = Float64(amplitude),
-                n_bubbles = Float64(n_bubbles),
                 harmonics = copy(harmonics_i),
                 harmonic_amplitudes = copy(harmonic_amplitudes_f),
                 harmonic_phases = phases,
@@ -718,7 +714,6 @@ volume edge.
 """
 function make_network_bubble_sources_3d(
     centers::AbstractVector;
-    sphere_radius::Real = 0.0,
     axial_radius::Real = 10e-3,
     lateral_y_radius::Real = 1.5e-3,
     lateral_z_radius::Real = 1.5e-3,
@@ -741,7 +736,6 @@ function make_network_bubble_sources_3d(
     lateral_z_bounds::Tuple{<:Real, <:Real} = (-Inf, Inf),
     fundamental::Real = 5e5,
     amplitude::Real = 1.0,
-    n_bubbles::Real = 1.0,
     harmonics::AbstractVector{<:Integer} = [2, 3, 4],
     harmonic_amplitudes::AbstractVector{<:Real} = [1.0, 0.6, 0.3],
     gate_duration::Real = 50e-6,
@@ -762,10 +756,7 @@ function make_network_bubble_sources_3d(
     length(harmonic_amplitudes_f) == length(harmonics_i) ||
         error("harmonic_amplitudes must have the same length as harmonics.")
     mode = _normalize_cluster_phase_mode(phase_mode)
-    legacy_radius = Float64(sphere_radius)
-    ellipsoid_radii = legacy_radius > 0 ?
-        (legacy_radius, legacy_radius, legacy_radius) :
-        (Float64(axial_radius), Float64(lateral_y_radius), Float64(lateral_z_radius))
+    ellipsoid_radii = (Float64(axial_radius), Float64(lateral_y_radius), Float64(lateral_z_radius))
     all(r -> r > 0, ellipsoid_radii) || error("network ellipsoid radii must be positive.")
     legacy_density_sigma = Float64(density_sigma)
     density_sigmas = legacy_density_sigma > 0 ?
@@ -820,7 +811,6 @@ function make_network_bubble_sources_3d(
                 lateral_z=z,
                 fundamental=Float64(fundamental),
                 amplitude=Float64(amplitude),
-                n_bubbles=Float64(n_bubbles),
                 harmonics=copy(harmonics_i),
                 harmonic_amplitudes=copy(harmonic_amplitudes_f),
                 harmonic_phases=phases,
@@ -842,7 +832,6 @@ function make_network_bubble_sources_3d(
     meta = Dict{Symbol, Any}(
         :source_model => :network,
         :centers => center_triples,
-        :sphere_radius => legacy_radius > 0 ? legacy_radius : nothing,
         :ellipsoid_radii => ellipsoid_radii,
         :axial_radius => ellipsoid_radii[1],
         :lateral_y_radius => ellipsoid_radii[2],

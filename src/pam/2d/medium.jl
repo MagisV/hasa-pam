@@ -37,12 +37,6 @@ end
 function make_pam_medium(
     cfg::PAMConfig;
     aberrator::Symbol=:none,
-    lens_center_depth::Real=20e-3,
-    lens_center_lateral::Real=0.0,
-    lens_axial_radius::Real=4e-3,
-    lens_lateral_radius::Real=12e-3,
-    c_aberrator::Real=1700.0,
-    rho_aberrator::Real=1150.0,
     hu_vol::Union{Nothing, AbstractArray{<:Real, 3}}=nothing,
     spacing_m::Union{Nothing, NTuple{3, <:Real}}=nothing,
     ct_path::AbstractString=DEFAULT_CT_PATH,
@@ -133,32 +127,8 @@ function make_pam_medium(
             :hu_bone_thr => Int(hu_bone_thr),
             :ct_path => ct_path,
         )
-    elseif aberrator != :lens
-        error("Unknown PAM medium aberrator: $aberrator")
     end
 
-    depth = depth_coordinates(kgrid, cfg)
-    lateral = kgrid.y_vec
-    mask = falses(kgrid.Nx, kgrid.Ny)
-    @inbounds for i in 1:kgrid.Nx, j in 1:kgrid.Ny
-        value = ((depth[i] - lens_center_depth) / lens_axial_radius)^2 +
-                ((lateral[j] - lens_center_lateral) / lens_lateral_radius)^2
-        if value <= 1.0
-            mask[i, j] = true
-            c[i, j] = Float32(c_aberrator)
-            rho[i, j] = Float32(rho_aberrator)
-        end
-    end
-
-    return c, rho, Dict{Symbol, Any}(
-        :aberrator => :lens,
-        :mask => mask,
-        :lens_center_depth => Float64(lens_center_depth),
-        :lens_center_lateral => Float64(lens_center_lateral),
-        :lens_axial_radius => Float64(lens_axial_radius),
-        :lens_lateral_radius => Float64(lens_lateral_radius),
-        :c_aberrator => Float64(c_aberrator),
-        :rho_aberrator => Float64(rho_aberrator),
-    )
+    error("Unknown PAM medium aberrator: $aberrator")
 end
 

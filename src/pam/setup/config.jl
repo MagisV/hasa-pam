@@ -12,7 +12,6 @@ function parse_cli(args)
         "source-amplitudes-pa" => "",
         "source-frequencies-mhz" => "",
         "phases-deg" => "",
-        "n-bubbles" => "10",
         "num-cycles" => "4",
         "harmonics" => "2,3,4",
         "harmonic-amplitudes" => "1.0,0.6,0.3",
@@ -35,18 +34,12 @@ function parse_cli(args)
         "peak-suppression-radius-mm" => "8.0",
         "success-tolerance-mm" => "1.5",
         "aberrator" => "none",
-        "sim-mode" => "auto",
+        "simulation-backend" => "kwave",
         "ct-path" => DEFAULT_CT_PATH,
         "slice-index" => "250",
         "skull-transducer-distance-mm" => "30",
         "bottom-margin-mm" => "10",
         "hu-bone-thr" => "200",
-        "lens-depth-mm" => "12",
-        "lens-lateral-mm" => "0",
-        "lens-axial-radius-mm" => "3",
-        "lens-lateral-radius-mm" => "12",
-        "aberrator-c" => "1700",
-        "aberrator-rho" => "1150",
         "kwave-use-gpu" => "true",
         "recon-use-gpu" => "true",
         "recon-bandwidth-khz" => "500",
@@ -63,7 +56,6 @@ function parse_cli(args)
         "phase-jitter-rad" => "0.2",
         "random-seed" => "42",
         "source-phase-mode" => "random_phase_per_window",
-        "n-realizations" => "1",
         "frequency-jitter-percent" => "1",
         "transducer-mm" => "-30:0",
         "delays-us" => "0",
@@ -78,7 +70,6 @@ function parse_cli(args)
         "vascular-min-separation-mm" => "0.25",
         "vascular-max-sources-per-anchor" => "0",
         "vascular-radius-mm" => "1.0",
-        "network-radius-mm" => "0",
         "network-axial-radius-mm" => "10.0",
         "network-lateral-y-radius-mm" => "1.5",
         "network-lateral-z-radius-mm" => "1.5",
@@ -101,10 +92,6 @@ function parse_cli(args)
         "auto-threshold-min" => "0.10",
         "auto-threshold-max" => "0.95",
         "auto-threshold-step" => "0.01",
-        "peak-method" => "argmax",
-        "clean-loop-gain" => "0.1",
-        "clean-max-iter" => "500",
-        "clean-threshold-ratio" => "0.01",
         "from-run-dir" => "",
     )
 
@@ -215,21 +202,20 @@ end
 
 function parse_aberrator(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
-    value in (:none, :water, :lens, :skull) || error("Unknown aberrator: $s")
+    value in (:none, :water, :skull) || error("Unknown aberrator: $s")
     return value
 end
 
-function parse_sim_mode(s::AbstractString)
+function parse_simulation_backend(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
-    value in (:auto, :analytic, :kwave) || error("Unknown --sim-mode: $s (must be auto, analytic, or kwave)")
-    value == :auto && return :kwave
+    value in (:analytic, :kwave) || error("Unknown --simulation-backend: $s (must be analytic or kwave)")
     return value
 end
 
 function parse_source_phase_mode(s::AbstractString)
     value = Symbol(replace(lowercase(strip(s)), "-" => "_"))
-    value in (:coherent, :random_static_phase, :random_phase_per_window, :random_phase_per_realization) ||
-        error("--source-phase-mode must be coherent, random_static_phase, random_phase_per_window, or random_phase_per_realization, got: $s")
+    value in (:coherent, :random_static_phase, :random_phase_per_window) ||
+        error("--source-phase-mode must be coherent, random_static_phase, or random_phase_per_window, got: $s")
     return value
 end
 

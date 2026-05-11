@@ -165,7 +165,6 @@ function parse_squiggle_sources_3d(opts, cfg::PAMConfig3D)
         error("--harmonic-amplitudes must have the same length as --harmonics ($(length(harmonics))).")
 
     n_anchors = length(anchors)
-    n_bubbles_per = expand_source_values(parse_float_list(opts["n-bubbles"]), n_anchors, 10.0)
     delays_us = expand_source_values(parse_float_list(opts["delays-us"]), n_anchors, 0.0)
     max_sources_raw = parse(Int, opts["vascular-max-sources-per-anchor"])
     max_sources = max_sources_raw <= 0 ? nothing : max_sources_raw
@@ -197,7 +196,6 @@ function parse_squiggle_sources_3d(opts, cfg::PAMConfig3D)
             lateral_z_bounds = (-half_z, half_z),
             fundamental = f0,
             amplitude = parse(Float64, opts["amplitude-pa"]),
-            n_bubbles = n_bubbles_per[idx],
             harmonics = harmonics,
             harmonic_amplitudes = harmonic_amplitudes,
             gate_duration = parse(Float64, opts["gate-us"]) * 1e-6,
@@ -236,7 +234,6 @@ function parse_squiggle_sources_3d(opts, cfg::PAMConfig3D)
         "gate_duration_s" => parse(Float64, opts["gate-us"]) * 1e-6,
         "phase_jitter_rad" => parse(Float64, opts["phase-jitter-rad"]),
         "random_seed" => parse(Int, opts["random-seed"]),
-        "n_bubbles_per_cluster" => n_bubbles_per,
         "delays_s" => delays_us .* 1e-6,
         "squiggle" => Dict(
             "length_m" => parse(Float64, opts["vascular-length-mm"]) * 1e-3,
@@ -266,18 +263,14 @@ function parse_network_sources_3d(opts, cfg::PAMConfig3D)
         error("--harmonic-amplitudes must have the same length as --harmonics ($(length(harmonics))).")
 
     n_centers = length(centers)
-    n_bubbles_per = expand_source_values(parse_float_list(opts["n-bubbles"]), n_centers, 1.0)
     delays_us = expand_source_values(parse_float_list(opts["delays-us"]), n_centers, 0.0)
     max_sources_raw = parse(Int, opts["network-max-sources-per-center"])
     max_sources = max_sources_raw <= 0 ? nothing : max_sources_raw
     phase_mode = Symbol(replace(lowercase(strip(opts["phase-mode"])), "-" => "_"))
-    network_radius_m = parse(Float64, opts["network-radius-mm"]) * 1e-3
     axial_radius_m = parse(Float64, opts["network-axial-radius-mm"]) * 1e-3
     lateral_y_radius_m = parse(Float64, opts["network-lateral-y-radius-mm"]) * 1e-3
     lateral_z_radius_m = parse(Float64, opts["network-lateral-z-radius-mm"]) * 1e-3
-    ellipsoid_radii_m = network_radius_m > 0 ?
-        [network_radius_m, network_radius_m, network_radius_m] :
-        [axial_radius_m, lateral_y_radius_m, lateral_z_radius_m]
+    ellipsoid_radii_m = [axial_radius_m, lateral_y_radius_m, lateral_z_radius_m]
     density_sigma_m = parse(Float64, opts["network-density-sigma-mm"]) * 1e-3
     density_axial_sigma_m = parse(Float64, opts["network-density-axial-sigma-mm"]) * 1e-3
     density_lateral_y_sigma_m = parse(Float64, opts["network-density-lateral-y-sigma-mm"]) * 1e-3
@@ -296,7 +289,6 @@ function parse_network_sources_3d(opts, cfg::PAMConfig3D)
     for (idx, center) in pairs(centers)
         center_sources, network_meta = make_network_bubble_sources_3d(
             [center];
-            sphere_radius = network_radius_m,
             axial_radius = axial_radius_m,
             lateral_y_radius = lateral_y_radius_m,
             lateral_z_radius = lateral_z_radius_m,
@@ -319,7 +311,6 @@ function parse_network_sources_3d(opts, cfg::PAMConfig3D)
             lateral_z_bounds = (-half_z, half_z),
             fundamental = f0,
             amplitude = parse(Float64, opts["amplitude-pa"]),
-            n_bubbles = n_bubbles_per[idx],
             harmonics = harmonics,
             harmonic_amplitudes = harmonic_amplitudes,
             gate_duration = parse(Float64, opts["gate-us"]) * 1e-6,
@@ -359,10 +350,8 @@ function parse_network_sources_3d(opts, cfg::PAMConfig3D)
         "gate_duration_s" => parse(Float64, opts["gate-us"]) * 1e-6,
         "phase_jitter_rad" => parse(Float64, opts["phase-jitter-rad"]),
         "random_seed" => parse(Int, opts["random-seed"]),
-        "n_bubbles_per_cluster" => n_bubbles_per,
         "delays_s" => delays_us .* 1e-6,
         "network" => Dict(
-            "radius_m" => network_radius_m,
             "axial_radius_m" => axial_radius_m,
             "lateral_y_radius_m" => lateral_y_radius_m,
             "lateral_z_radius_m" => lateral_z_radius_m,
@@ -396,7 +385,6 @@ function parse_squiggle_sources(opts, cfg::PAMConfig)
         error("--harmonic-amplitudes must have the same length as --harmonics ($(length(harmonics))).")
 
     n_anchors = length(anchors)
-    n_bubbles_per = expand_source_values(parse_float_list(opts["n-bubbles"]), n_anchors, 10.0)
     delays_us = expand_source_values(parse_float_list(opts["delays-us"]), n_anchors, 0.0)
     tx_depth, tx_lateral = parse_transducer_mm(opts["transducer-mm"])
     max_sources_raw = parse(Int, opts["vascular-max-sources-per-anchor"])
@@ -422,7 +410,6 @@ function parse_squiggle_sources(opts, cfg::PAMConfig)
             lateral_bounds=(-cfg.transverse_dim / 2, cfg.transverse_dim / 2),
             fundamental=f0,
             amplitude=parse(Float64, opts["amplitude-pa"]),
-            n_bubbles=n_bubbles_per[idx],
             harmonics=harmonics,
             harmonic_amplitudes=harmonic_amplitudes,
             gate_duration=parse(Float64, opts["gate-us"]) * 1e-6,
@@ -461,7 +448,6 @@ function parse_squiggle_sources(opts, cfg::PAMConfig)
         "transducer_m" => [tx_depth, tx_lateral],
         "phase_jitter_rad" => parse(Float64, opts["phase-jitter-rad"]),
         "random_seed" => parse(Int, opts["random-seed"]),
-        "n_bubbles_per_cluster" => n_bubbles_per,
         "delays_s" => delays_us .* 1e-6,
         "squiggle" => Dict(
             "length_m" => parse(Float64, opts["vascular-length-mm"]) * 1e-3,

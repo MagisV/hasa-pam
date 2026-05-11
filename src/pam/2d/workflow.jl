@@ -58,48 +58,8 @@ function _run_pam_per_window(
     )
     results[:kgrid] = kgrid
     results[:source_phase_mode] = source_phase_mode
-    results[:n_realizations] = 1
     results[:n_frames] = n_frames
     return results
-end
-
-function _run_pam_multirealization(
-    c::AbstractMatrix{<:Real},
-    rho::AbstractMatrix{<:Real},
-    sources::AbstractVector{<:EmissionSource2D},
-    cfg::PAMConfig;
-    n_realizations::Int,
-    source_phase_mode::Symbol,
-    kwave_use_gpu::Bool,
-    rng::Random.AbstractRNG,
-    recon_kwargs::NamedTuple,
-)
-    geo_acc = nothing
-    hasa_acc = nothing
-    last_kgrid = nothing
-    last_results = nothing
-
-    for _ in 1:n_realizations
-        resampled = _resample_source_phases(sources, rng)
-        rf, kgrid, sim_info = simulate_point_sources(c, rho, resampled, cfg; use_gpu=kwave_use_gpu)
-        results = reconstruct_pam_case(rf, c, resampled, cfg; simulation_info=sim_info, recon_kwargs...)
-        if isnothing(geo_acc)
-            geo_acc = Float64.(results[:pam_geo])
-            hasa_acc = Float64.(results[:pam_hasa])
-        else
-            geo_acc .+= results[:pam_geo]
-            hasa_acc .+= results[:pam_hasa]
-        end
-        last_kgrid = kgrid
-        last_results = results
-    end
-
-    last_results[:pam_geo] = geo_acc ./ n_realizations
-    last_results[:pam_hasa] = hasa_acc ./ n_realizations
-    last_results[:kgrid] = last_kgrid
-    last_results[:source_phase_mode] = source_phase_mode
-    last_results[:n_realizations] = n_realizations
-    return last_results
 end
 
 function run_pam_case(
@@ -112,12 +72,6 @@ function run_pam_case(
     use_gpu::Bool=false,
     kwave_use_gpu::Bool=false,
     analysis_mode::Symbol=:localization,
-    peak_method::Symbol=:argmax,
-    clean_loop_gain::Real=0.1,
-    clean_max_iter::Integer=500,
-    clean_threshold_ratio::Real=1e-2,
-    clean_psf_axial_fwhm::Union{Nothing, Real}=nothing,
-    clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
     detection_truth_radius::Real=cfg.success_tolerance,
     detection_threshold_ratio::Real=0.2,
     detection_truth_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
@@ -125,7 +79,6 @@ function run_pam_case(
     reconstruction_mode::Symbol=:full,
     window_config::PAMWindowConfig=PAMWindowConfig(),
     source_phase_mode::Symbol=:coherent,
-    n_realizations::Int=1,
     rng::Random.AbstractRNG=Random.default_rng(),
     source_variability::SourceVariabilityConfig=SourceVariabilityConfig(),
     show_progress::Bool=false,
@@ -139,12 +92,6 @@ function run_pam_case(
         frequencies=recon_freqs,
         bandwidth=bandwidth,
         analysis_mode=analysis_mode,
-        peak_method=peak_method,
-        clean_loop_gain=clean_loop_gain,
-        clean_max_iter=clean_max_iter,
-        clean_threshold_ratio=clean_threshold_ratio,
-        clean_psf_axial_fwhm=clean_psf_axial_fwhm,
-        clean_psf_lateral_fwhm=clean_psf_lateral_fwhm,
         detection_truth_radius=detection_truth_radius,
         detection_threshold_ratio=detection_threshold_ratio,
         detection_truth_mask=detection_truth_mask,
@@ -156,17 +103,7 @@ function run_pam_case(
         benchmark=benchmark,
         window_batch=window_batch,
     )
-    if phase_mode == :random_phase_per_realization
-        n_realizations >= 1 || error("n_realizations must be >= 1.")
-        return _run_pam_multirealization(
-            c, rho, effective_sources, cfg;
-            n_realizations=n_realizations,
-            source_phase_mode=phase_mode,
-            kwave_use_gpu=kwave_use_gpu,
-            rng=rng,
-            recon_kwargs=recon_kwargs,
-        )
-    elseif phase_mode == :random_phase_per_window
+    if phase_mode == :random_phase_per_window
         return _run_pam_per_window(
             c, rho, effective_sources, cfg;
             source_phase_mode=phase_mode,
@@ -180,7 +117,6 @@ function run_pam_case(
     results = reconstruct_pam_case(rf, c, effective_sources, cfg; simulation_info=sim_info, recon_kwargs...)
     results[:kgrid] = kgrid
     results[:source_phase_mode] = phase_mode
-    results[:n_realizations] = 1
     return results
 end
 
@@ -197,12 +133,6 @@ function reconstruct_pam_case(
     frequencies::Union{Nothing, AbstractVector{<:Real}}=nothing,
     bandwidth::Real=0.0,
     analysis_mode::Symbol=:localization,
-    peak_method::Symbol=:argmax,
-    clean_loop_gain::Real=0.1,
-    clean_max_iter::Integer=500,
-    clean_threshold_ratio::Real=1e-2,
-    clean_psf_axial_fwhm::Union{Nothing, Real}=nothing,
-    clean_psf_lateral_fwhm::Union{Nothing, Real}=nothing,
     detection_truth_radius::Real=cfg.success_tolerance,
     detection_threshold_ratio::Real=0.2,
     detection_truth_mask::Union{Nothing, AbstractMatrix{Bool}}=nothing,
@@ -270,18 +200,9 @@ function reconstruct_pam_case(
     isempty(truth_sources) && error("At least one analysis source is required.")
 
     stats_geo, stats_hasa = if analysis_mode == :localization
-        analyse_kwargs = (
-            peak_method=peak_method,
-            frequencies=recon_freqs,
-            clean_loop_gain=clean_loop_gain,
-            clean_max_iter=clean_max_iter,
-            clean_threshold_ratio=clean_threshold_ratio,
-            clean_psf_axial_fwhm=clean_psf_axial_fwhm,
-            clean_psf_lateral_fwhm=clean_psf_lateral_fwhm,
-        )
         (
-            analyse_pam_2d(pam_geo, kgrid, cfg, truth_sources; analyse_kwargs...),
-            analyse_pam_2d(pam_hasa, kgrid, cfg, truth_sources; analyse_kwargs...),
+            analyse_pam_2d(pam_geo, kgrid, cfg, truth_sources),
+            analyse_pam_2d(pam_hasa, kgrid, cfg, truth_sources),
         )
     elseif analysis_mode == :detection
         analyse_kwargs = (
@@ -289,8 +210,6 @@ function reconstruct_pam_case(
             threshold_ratio=detection_threshold_ratio,
             truth_mask=detection_truth_mask,
             frequencies=recon_freqs,
-            psf_axial_fwhm=clean_psf_axial_fwhm,
-            psf_lateral_fwhm=clean_psf_lateral_fwhm,
         )
         (
             analyse_pam_detection_2d(pam_geo, kgrid, cfg, truth_sources; analyse_kwargs...),

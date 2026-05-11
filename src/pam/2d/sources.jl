@@ -15,7 +15,6 @@ Base.@kwdef struct BubbleCluster2D <: EmissionSource2D
     lateral::Float64
     fundamental::Float64 = 5e5
     amplitude::Float64 = 1.0
-    n_bubbles::Float64 = 1.0
     harmonics::Vector{Int} = [2, 3]
     harmonic_amplitudes::Vector{Float64} = [1.0, 0.6]
     harmonic_phases::Vector{Float64} = [0.0, 0.0]
@@ -43,10 +42,10 @@ end
 
 function _normalize_source_phase_mode(source_phase_mode)
     mode = Symbol(replace(lowercase(string(source_phase_mode)), "-" => "_"))
-    mode in (:coherent, :random_static_phase, :random_phase_per_window, :random_phase_per_realization) ||
+    mode in (:coherent, :random_static_phase, :random_phase_per_window) ||
         error(
             "Unknown source_phase_mode: $source_phase_mode. " *
-            "Expected: coherent, random_static_phase, random_phase_per_window, or random_phase_per_realization.",
+            "Expected: coherent, random_static_phase, or random_phase_per_window.",
         )
     return mode
 end
@@ -227,7 +226,6 @@ function make_squiggle_bubble_sources(
     lateral_bounds::Tuple{<:Real, <:Real}=(-Inf, Inf),
     fundamental::Real=5e5,
     amplitude::Real=1.0,
-    n_bubbles::Real=1.0,
     harmonics::AbstractVector{<:Integer}=[2, 3, 4],
     harmonic_amplitudes::AbstractVector{<:Real}=[1.0, 0.6, 0.3],
     gate_duration::Real=50e-6,
@@ -294,7 +292,6 @@ function make_squiggle_bubble_sources(
                 lateral=lateral,
                 fundamental=Float64(fundamental),
                 amplitude=Float64(amplitude),
-                n_bubbles=Float64(n_bubbles),
                 harmonics=copy(harmonics_i),
                 harmonic_amplitudes=copy(harmonic_amplitudes_f),
                 harmonic_phases=phases,
@@ -379,7 +376,6 @@ function _cluster_emission_signal(nt::Int, dt::Real, src::BubbleCluster2D)
     isempty(active) && return signal
 
     envelope = _tukey_window(length(active), src.taper_ratio)
-    total_amp = src.amplitude * src.n_bubbles
     t_active = t[active]
 
     accumulator = zeros(Float64, length(active))
@@ -389,7 +385,7 @@ function _cluster_emission_signal(nt::Int, dt::Real, src::BubbleCluster2D)
         phi_n = src.harmonic_phases[i]
         accumulator .+= alpha_n .* cos.(2pi .* n .* src.fundamental .* t_active .+ phi_n)
     end
-    signal[active] .= total_amp .* envelope .* accumulator
+    signal[active] .= src.amplitude .* envelope .* accumulator
     return signal
 end
 
@@ -405,7 +401,7 @@ function _resample_source_phases(
             BubbleCluster2D(
                 depth=src.depth, lateral=src.lateral,
                 fundamental=src.fundamental, amplitude=src.amplitude,
-                n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                harmonics=copy(src.harmonics),
                 harmonic_amplitudes=copy(src.harmonic_amplitudes),
                 harmonic_phases=2pi .* rand(rng, length(src.harmonics)),
                 gate_duration=src.gate_duration, taper_ratio=src.taper_ratio,
@@ -448,7 +444,7 @@ function _expand_sources_per_window(
                 BubbleCluster2D(
                     depth=src.depth, lateral=src.lateral,
                     fundamental=src.fundamental * fscale, amplitude=src.amplitude,
-                    n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
+                    harmonics=copy(src.harmonics),
                     harmonic_amplitudes=copy(src.harmonic_amplitudes),
                     harmonic_phases=2pi .* rand(rng, length(src.harmonics)),
                     gate_duration=min(src.gate_duration, frame_dur), taper_ratio=src.taper_ratio,

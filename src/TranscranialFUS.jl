@@ -28,7 +28,7 @@ export make_medium_fixed_distance_from_skull, make_medium_fixed_transducer, make
 export plot_hasa_results, focus, analyse_focus_2d, run_focus_case, kwave_available
 export EmissionSource2D, PointSource2D, BubbleCluster2D, PAMConfig, PAMWindowConfig, SourceVariabilityConfig, fit_pam_config, pam_Nx, pam_Ny, pam_Nt, pam_grid, receiver_row, receiver_col_range, depth_coordinates
 export emission_frequencies
-export make_squiggle_bubble_sources, make_pam_medium, source_grid_index, simulate_point_sources, simulate_point_sources_3d, reconstruct_pam, reconstruct_pam_windowed, find_pam_peaks, find_pam_peaks_clean
+export make_squiggle_bubble_sources, make_pam_medium, source_grid_index, simulate_point_sources, simulate_point_sources_3d, reconstruct_pam, reconstruct_pam_windowed, find_pam_peaks
 export pam_truth_mask, pam_centerline_truth_mask, pam_source_map, pam_psf_blur, pam_psf_blurred_truth_map, threshold_pam_map, pam_intensity_metrics, analyse_pam_2d, analyse_pam_detection_2d, reconstruct_pam_case, run_pam_case, run_pam_sweep
 export EmissionSource3D, PointSource3D, BubbleCluster3D, make_squiggle_bubble_sources_3d, make_network_bubble_sources_3d
 export PAMConfig3D, pam_Nz, pam_grid_3d, receiver_col_range_y, receiver_col_range_z, depth_coordinates_3d, fit_pam_config_3d, source_grid_index_3d
