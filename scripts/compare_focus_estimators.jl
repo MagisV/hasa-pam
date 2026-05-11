@@ -37,7 +37,7 @@ function default_output_dir(opts, placement_mode, focus_depth)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     parts = String[
         timestamp,
-        "compare_estimators",
+        "compare_focus_estimators",
         lowercase(opts["medium"]),
         String(placement_mode),
         "f$(slug_value(parse(Float64, opts["frequency-mhz"]); digits=2))mhz",

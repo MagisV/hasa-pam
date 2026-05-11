@@ -13,7 +13,7 @@ using JSON3
 using TranscranialFUS
 import TranscranialFUS: parse_cli, slug_value, parse_bool, parse_dimension, parse_float_list, parse_int_list,
     parse_threshold_ratios, parse_threshold_search_ratios, parse_source_model, parse_aberrator,
-    parse_sim_mode, parse_cavitation_model, parse_source_phase_mode, parse_source_variability,
+    parse_sim_mode, parse_source_phase_mode, parse_source_variability,
     source_variability_from_summary, parse_analysis_mode, resolve_reconstruction_mode,
     make_window_config, parse_receiver_aperture_mm, parse_transducer_mm, parse_point_sources,
     parse_point_sources_3d, parse_squiggle_sources_3d, parse_network_sources_3d,
@@ -206,7 +206,7 @@ function source_model_from_meta(meta, sources)
         old = Symbol(String(meta["cluster_model"]))
         return old == :vascular ? :squiggle : old
     end
-    return any(src -> src isa Union{BubbleCluster2D, GaussianPulseCluster2D}, sources) ? :squiggle : :point
+    return any(src -> src isa BubbleCluster2D, sources) ? :squiggle : :point
 end
 
 function centerlines_from_emission_meta(meta)
@@ -897,9 +897,9 @@ function source_summary(src::PointSource2D)
     )
 end
 
-function source_summary(src::Union{BubbleCluster2D, GaussianPulseCluster2D})
+function source_summary(src::BubbleCluster2D)
     return Dict(
-        "kind" => String(cavitation_model(src)),
+        "kind" => "bubble_cluster",
         "depth_m" => src.depth,
         "lateral_m" => src.lateral,
         "fundamental_hz" => src.fundamental,
@@ -908,7 +908,6 @@ function source_summary(src::Union{BubbleCluster2D, GaussianPulseCluster2D})
         "harmonics" => src.harmonics,
         "harmonic_amplitudes" => src.harmonic_amplitudes,
         "harmonic_phases_rad" => src.harmonic_phases,
-        "cavitation_model" => String(cavitation_model(src)),
         "gate_duration_s" => src.gate_duration,
         "delay_s" => src.delay,
     )
@@ -1285,7 +1284,7 @@ else
         (
             "source-model", "sources-mm", "anchors-mm", "frequency-mhz", "fundamental-mhz",
             "amplitude-pa", "source-amplitudes-pa", "source-frequencies-mhz", "phases-deg",
-            "n-bubbles", "num-cycles", "harmonics", "harmonic-amplitudes", "cavitation-model",
+            "n-bubbles", "num-cycles", "harmonics", "harmonic-amplitudes",
             "gate-us", "taper-ratio", "axial-mm", "transverse-mm", "dx-mm", "dz-mm",
             "receiver-aperture-mm", "t-max-us", "dt-ns", "zero-pad-factor",
             "peak-suppression-radius-mm", "success-tolerance-mm", "aberrator", "ct-path",

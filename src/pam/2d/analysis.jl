@@ -325,7 +325,6 @@ end
 
 _source_activity_weight(src::PointSource2D) = abs(src.amplitude)
 _source_activity_weight(src::BubbleCluster2D) = abs(src.amplitude * src.n_bubbles)
-_source_activity_weight(src::GaussianPulseCluster2D) = abs(src.amplitude * src.n_bubbles)
 
 """
     pam_source_map(sources, kgrid, cfg; weights=:amplitude)

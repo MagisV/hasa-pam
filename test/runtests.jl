@@ -543,10 +543,10 @@ end
     @test isfinite(metrics[:centroid_lateral_mm])
 end
 
-@testset "Gaussian pulse cluster emissions" begin
+@testset "Bubble cluster emissions" begin
     dt = 20e-9
     nt = 1000
-    src = GaussianPulseCluster2D(
+    src = BubbleCluster2D(
         depth=0.03,
         lateral=0.0,
         fundamental=0.5e6,
@@ -565,27 +565,12 @@ end
     @test abs(signal[first(active)]) < 0.05 * maximum(abs, signal)
     @test abs(signal[last(active)]) < 0.05 * maximum(abs, signal)
     @test emission_frequencies(src) == [1.0e6]
-    @test cavitation_model(src) == :gaussian_pulse
 
     spectrum = abs.(fft(signal))
     freq_axis = collect(0:(nt - 1)) ./ (nt * dt)
     pos_bins = 2:(fld(nt, 2) + 1)
     peak_bin = pos_bins[argmax(spectrum[pos_bins])]
     @test abs(freq_axis[peak_bin] - 1.0e6) <= 1 / (nt * dt)
-
-    harmonic = BubbleCluster2D(
-        depth=0.03,
-        lateral=0.0,
-        fundamental=0.5e6,
-        harmonics=[2],
-        harmonic_amplitudes=[1.0],
-        harmonic_phases=[0.0],
-        gate_duration=10e-6,
-    )
-    @test cavitation_model(harmonic) == :harmonic_cos
-    @test TranscranialFUS._normalize_cavitation_model("harmonic-cos") == :harmonic_cos
-    @test TranscranialFUS._normalize_cavitation_model("gaussian-pulse") == :gaussian_pulse
-    @test_throws ErrorException TranscranialFUS._normalize_cavitation_model("haromnic-cos")
 end
 
 @testset "Source phase modes" begin
@@ -606,9 +591,6 @@ end
             harmonics=[2, 3], harmonic_amplitudes=[1.0, 0.6],
             harmonic_phases=[0.1, 0.2], gate_duration=10e-6),
         PointSource2D(depth=0.02, lateral=0.005, frequency=1.0e6, phase=0.5),
-        GaussianPulseCluster2D(depth=0.04, lateral=-0.005, fundamental=0.5e6,
-            harmonics=[2], harmonic_amplitudes=[1.0], harmonic_phases=[0.3],
-            gate_duration=10e-6),
     ]
     resampled = TranscranialFUS._resample_source_phases(sources_orig, rng_r)
 
@@ -616,7 +598,6 @@ end
     @test resampled[1].lateral == sources_orig[1].lateral
     @test resampled[1].harmonic_phases != sources_orig[1].harmonic_phases
     @test resampled[2].phase != sources_orig[2].phase
-    @test resampled[3].harmonic_phases != sources_orig[3].harmonic_phases
 
 end
 
@@ -654,28 +635,10 @@ end
     )
 
     @test squiggle_meta[:source_model] == :squiggle
-    @test squiggle_meta[:cavitation_model] == :harmonic_cos
     @test all(src -> src isa BubbleCluster2D, squiggle_clusters)
     @test length(squiggle_meta[:centerlines]) == 1
     @test maximum(src.lateral for src in squiggle_clusters) - minimum(src.lateral for src in squiggle_clusters) > 10e-3
     @test maximum(src.depth for src in squiggle_clusters) - minimum(src.depth for src in squiggle_clusters) > 2e-3
-
-    pulse_clusters, pulse_meta = make_squiggle_bubble_sources(
-        [(0.03, 0.0)];
-        cavitation_model=:gaussian_pulse,
-        root_length=12e-3,
-        squiggle_amplitude=1.5e-3,
-        squiggle_wavelength=6e-3,
-        source_spacing=1e-3,
-        position_jitter=0.0,
-        min_separation=0.0,
-        lateral_bounds=(-0.02, 0.02),
-        rng=Random.MersenneTwister(41),
-    )
-
-    @test pulse_meta[:cavitation_model] == :gaussian_pulse
-    @test all(src -> src isa GaussianPulseCluster2D, pulse_clusters)
-    @test length(pulse_clusters) == length(squiggle_clusters)
 
     multi_clusters, multi_meta = make_squiggle_bubble_sources(
         [(0.03, -0.004), (0.035, 0.004)];

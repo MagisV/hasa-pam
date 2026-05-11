@@ -1,6 +1,6 @@
 # Cluster Emission Models
 
-Sources: [`src/pam/sources.jl`](../src/pam/sources.jl), [`src/pam/sources3d.jl`](../src/pam/sources3d.jl)
+Sources: [`src/pam/2d/sources.jl`](../src/pam/2d/sources.jl), [`src/pam/3d/sources3d.jl`](../src/pam/3d/sources3d.jl)
 
 ## BubbleCluster (2D and 3D)
 

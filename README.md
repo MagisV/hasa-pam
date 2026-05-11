@@ -49,10 +49,9 @@ The PAM workflow uses the complementary problem. Here the sources are real emitt
 - `src/pam/sweep.jl`: PAM sweep helpers and aggregation
 - `src/kwave_wrapper.jl`: Julia-to-`k-wave-python` bridge
 - `src/analysis.jl`: focusing analysis helpers and `run_focus_case`
-- `scripts/run_focus_case.jl`: run one focusing case
-- `scripts/compare_estimators.jl`: compare geometric and HASA focusing
+- `scripts/run_focus.jl`: run one focusing case
+- `scripts/compare_focus_estimators.jl`: compare geometric and HASA focusing
 - `scripts/run_pam.jl`: unified PAM runner for coordinate-placed point sources and squiggle activity
-- `scripts/run_pam_sweep.jl`: run a single-source localization sweep and summarize corrected vs uncorrected error
 - `test/runtests.jl`: unit tests, smoke tests, and optional integration tests
 
 ## Setup
@@ -129,7 +128,7 @@ The focusing scripts support the two placement mechanisms from the original pipe
 Default skull example:
 
 ```bash
-julia --project=. scripts/run_focus_case.jl \
+julia --project=. scripts/run_focus.jl \
   --estimator=hasa \
   --medium=skull_in_water \
   --slice-index=250
@@ -138,7 +137,7 @@ julia --project=. scripts/run_focus_case.jl \
 Centered target at `60 mm` below the transducer:
 
 ```bash
-julia --project=. scripts/run_focus_case.jl \
+julia --project=. scripts/run_focus.jl \
   --estimator=hasa \
   --medium=skull_in_water \
   --placement=fixed_transducer \
@@ -150,7 +149,7 @@ julia --project=. scripts/run_focus_case.jl \
 Target shifted `10 mm` to the right:
 
 ```bash
-julia --project=. scripts/run_focus_case.jl \
+julia --project=. scripts/run_focus.jl \
   --estimator=hasa \
   --medium=skull_in_water \
   --placement=fixed_transducer \
@@ -162,7 +161,7 @@ julia --project=. scripts/run_focus_case.jl \
 Target `30 mm` below the inner skull:
 
 ```bash
-julia --project=. scripts/run_focus_case.jl \
+julia --project=. scripts/run_focus.jl \
   --estimator=hasa \
   --medium=skull_in_water \
   --placement=fixed_focus_depth \
@@ -175,20 +174,20 @@ julia --project=. scripts/run_focus_case.jl \
 ### Compare Geometric vs HASA Focusing
 
 ```bash
-julia --project=. scripts/compare_estimators.jl \
+julia --project=. scripts/compare_focus_estimators.jl \
   --medium=skull_in_water \
   --slice-index=250
 ```
 
 ### Focusing Outputs
 
-`run_focus_case.jl` writes:
+`run_focus.jl` writes:
 
 - `summary.json`
 - `result.jld2`
 - `pressure.png`
 
-`compare_estimators.jl` writes:
+`compare_focus_estimators.jl` writes:
 
 - `summary.json`
 - `comparison.png`
@@ -209,7 +208,6 @@ Core types:
 
 - `PointSource2D`
 - `BubbleCluster2D`
-- `GaussianPulseCluster2D`
 - `PAMConfig`
 - `PAMWindowConfig`
 - `SourceVariabilityConfig`
@@ -295,7 +293,6 @@ julia --project=. scripts/run_pam.jl `
   --anchors-mm=45:0 `
   --aberrator=skull `
   --boundary-threshold-ratios=0.6,0.65,0.7 `
-  --cavitation-model=harmonic-cos `
   --frequency-jitter-percent=1 `
   --harmonic-amplitudes=1.0,0.6,0.3 `
   --harmonics=2,3,4 `
@@ -653,64 +650,6 @@ julia --project=. scripts/run_pam.jl \
   --random-seed=42 \
   --aberrator=none
 ```
-
-### Run a PAM Sweep
-
-The sweep script runs **single-source** reconstructions over a target grid and compares uncorrected vs corrected localization.
-
-Default paper-style sweep:
-
-```bash
-julia --project=. scripts/run_pam_sweep.jl
-```
-
-This defaults to:
-
-- `--aberrator=skull`
-- `--frequency-mhz=1.0`
-- `--receiver-aperture-mm=50`
-- axial targets `30,40,50,60,70,80 mm`
-- lateral targets `-20,-10,0,10,20 mm`
-- `--slice-index=250`
-- `--skull-transducer-distance-mm=30`
-
-Quick sweep for fast figure generation:
-
-```bash
-julia --project=. scripts/run_pam_sweep.jl --sweep-preset=quick
-```
-
-The quick preset uses:
-
-- axial targets `40,60,80 mm`
-- lateral targets `-10,0,10 mm`
-
-Custom sweep:
-
-```bash
-julia --project=. scripts/run_pam_sweep.jl \
-  --sweep-preset=custom \
-  --axial-targets-mm=40,50,60 \
-  --lateral-targets-mm=-10,0,10 \
-  --aberrator=skull
-```
-
-Custom example cases for the overview panel:
-
-```bash
-julia --project=. scripts/run_pam_sweep.jl \
-  --sweep-preset=quick \
-  --example-targets-mm=40:0,60:0,80:10
-```
-
-For skull sweeps, requested targets are filtered so that only points inside the cranial cavity are retained. The margin from the inner skull can be adjusted with `--skull-cavity-margin-mm`.
-
-`run_pam_sweep.jl` writes:
-
-- `overview.png`
-- `summary.json`
-- `result.jld2`
-- `cases/`: one figure per retained target, each showing uncorrected vs corrected reconstruction
 
 ## Validation
 

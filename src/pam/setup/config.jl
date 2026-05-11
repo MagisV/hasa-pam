@@ -16,7 +16,6 @@ function parse_cli(args)
         "num-cycles" => "4",
         "harmonics" => "2,3,4",
         "harmonic-amplitudes" => "1.0,0.6,0.3",
-        "cavitation-model" => "harmonic-cos",
         "gate-us" => "50",
         "taper-ratio" => "0.25",
         "axial-mm" => "80",
@@ -224,13 +223,6 @@ function parse_sim_mode(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
     value in (:auto, :analytic, :kwave) || error("Unknown --sim-mode: $s (must be auto, analytic, or kwave)")
     value == :auto && return :kwave
-    return value
-end
-
-function parse_cavitation_model(s::AbstractString)
-    value = Symbol(replace(lowercase(strip(s)), "-" => "_"))
-    value in (:harmonic_cos, :gaussian_pulse) ||
-        error("--cavitation-model must be harmonic-cos or gaussian-pulse, got: $s")
     return value
 end
 

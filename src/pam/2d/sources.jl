@@ -24,38 +24,14 @@ Base.@kwdef struct BubbleCluster2D <: EmissionSource2D
     delay::Float64 = 0.0
 end
 
-Base.@kwdef struct GaussianPulseCluster2D <: EmissionSource2D
-    depth::Float64
-    lateral::Float64
-    fundamental::Float64 = 5e5
-    amplitude::Float64 = 1.0
-    n_bubbles::Float64 = 1.0
-    harmonics::Vector{Int} = [2, 3]
-    harmonic_amplitudes::Vector{Float64} = [1.0, 0.6]
-    harmonic_phases::Vector{Float64} = [0.0, 0.0]
-    gate_duration::Float64 = 10e-6
-    taper_ratio::Float64 = 0.25
-    delay::Float64 = 0.0
-end
-
 Base.@kwdef struct SourceVariabilityConfig
     frequency_jitter_fraction::Float64 = 0.0
 end
 
 _emission_frequencies(src::PointSource2D) = Float64[src.frequency]
 _emission_frequencies(src::BubbleCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
-_emission_frequencies(src::GaussianPulseCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
 
 emission_frequencies(src::EmissionSource2D) = _emission_frequencies(src)
-cavitation_model(::BubbleCluster2D) = :harmonic_cos
-cavitation_model(::GaussianPulseCluster2D) = :gaussian_pulse
-
-function _normalize_cavitation_model(cavitation_model)
-    model = Symbol(replace(lowercase(string(cavitation_model)), "-" => "_"))
-    model in (:harmonic_cos, :gaussian_pulse) ||
-        error("Unknown cavitation_model: $cavitation_model (expected harmonic-cos or gaussian-pulse).")
-    return model
-end
 
 function _normalize_cluster_phase_mode(phase_mode)
     mode = Symbol(replace(lowercase(string(phase_mode)), "-" => "_"))
@@ -254,7 +230,6 @@ function make_squiggle_bubble_sources(
     n_bubbles::Real=1.0,
     harmonics::AbstractVector{<:Integer}=[2, 3, 4],
     harmonic_amplitudes::AbstractVector{<:Real}=[1.0, 0.6, 0.3],
-    cavitation_model=:harmonic_cos,
     gate_duration::Real=50e-6,
     taper_ratio::Real=0.25,
     delay::Real=0.0,
@@ -272,7 +247,6 @@ function make_squiggle_bubble_sources(
     length(harmonic_amplitudes_f) == length(harmonics_i) ||
         error("harmonic_amplitudes must have the same length as harmonics.")
     mode = _normalize_cluster_phase_mode(phase_mode)
-    source_model = _normalize_cavitation_model(cavitation_model)
 
     clusters = EmissionSource2D[]
     all_centerlines = Vector{Tuple{Float64, Float64}}[]
@@ -328,7 +302,7 @@ function make_squiggle_bubble_sources(
                 taper_ratio=Float64(taper_ratio),
                 delay=Float64(delay),
             )
-            push!(clusters, source_model == :gaussian_pulse ? GaussianPulseCluster2D(; kwargs...) : BubbleCluster2D(; kwargs...))
+            push!(clusters, BubbleCluster2D(; kwargs...))
         end
     end
 
@@ -347,14 +321,12 @@ function make_squiggle_bubble_sources(
         :source_count_by_anchor => source_count_by_anchor,
         :centerlines => all_centerlines,
         :phase_mode => mode,
-        :cavitation_model => source_model,
     )
     return clusters, meta
 end
 
 _source_duration(src::PointSource2D) = src.num_cycles / src.frequency
 _source_duration(src::BubbleCluster2D) = src.gate_duration
-_source_duration(src::GaussianPulseCluster2D) = src.gate_duration
 
 function _tukey_window(n::Int, ratio::Real)
     n <= 0 && return Float64[]
@@ -421,40 +393,8 @@ function _cluster_emission_signal(nt::Int, dt::Real, src::BubbleCluster2D)
     return signal
 end
 
-function _cluster_emission_signal(nt::Int, dt::Real, src::GaussianPulseCluster2D)
-    length(src.harmonics) == length(src.harmonic_amplitudes) ||
-        error("GaussianPulseCluster2D: harmonics and harmonic_amplitudes must have equal length.")
-    length(src.harmonics) == length(src.harmonic_phases) ||
-        error("GaussianPulseCluster2D: harmonics and harmonic_phases must have equal length.")
-
-    signal = zeros(Float64, nt)
-    samples = collect(0:(nt - 1))
-    t = samples .* Float64(dt) .- src.delay
-    active = findall((t .>= 0.0) .& (t .<= src.gate_duration))
-    isempty(active) && return signal
-
-    duration = Float64(src.gate_duration)
-    duration > 0 || return signal
-    center = duration / 2
-    sigma = duration / 6
-    t_active = t[active]
-    envelope = exp.(-0.5 .* ((t_active .- center) ./ sigma) .^ 2)
-    total_amp = src.amplitude * src.n_bubbles
-
-    accumulator = zeros(Float64, length(active))
-    @inbounds for i in eachindex(src.harmonics)
-        n = src.harmonics[i]
-        alpha_n = src.harmonic_amplitudes[i]
-        phi_n = src.harmonic_phases[i]
-        accumulator .+= alpha_n .* cos.(2pi .* n .* src.fundamental .* (t_active .- center) .+ phi_n)
-    end
-    signal[active] .= total_amp .* envelope .* accumulator
-    return signal
-end
-
 _source_signal(nt::Int, dt::Real, src::PointSource2D) = _tone_burst_signal(nt, dt, src)
 _source_signal(nt::Int, dt::Real, src::BubbleCluster2D) = _cluster_emission_signal(nt, dt, src)
-_source_signal(nt::Int, dt::Real, src::GaussianPulseCluster2D) = _cluster_emission_signal(nt, dt, src)
 
 function _resample_source_phases(
     sources::AbstractVector{<:EmissionSource2D},
@@ -463,16 +403,6 @@ function _resample_source_phases(
     return map(sources) do src
         if src isa BubbleCluster2D
             BubbleCluster2D(
-                depth=src.depth, lateral=src.lateral,
-                fundamental=src.fundamental, amplitude=src.amplitude,
-                n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
-                harmonic_amplitudes=copy(src.harmonic_amplitudes),
-                harmonic_phases=2pi .* rand(rng, length(src.harmonics)),
-                gate_duration=src.gate_duration, taper_ratio=src.taper_ratio,
-                delay=src.delay,
-            )
-        elseif src isa GaussianPulseCluster2D
-            GaussianPulseCluster2D(
                 depth=src.depth, lateral=src.lateral,
                 fundamental=src.fundamental, amplitude=src.amplitude,
                 n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
@@ -516,16 +446,6 @@ function _expand_sources_per_window(
             fscale = fjitter > 0.0 ? max(0.01, 1.0 + fjitter * randn(rng)) : 1.0
             evt = if src isa BubbleCluster2D
                 BubbleCluster2D(
-                    depth=src.depth, lateral=src.lateral,
-                    fundamental=src.fundamental * fscale, amplitude=src.amplitude,
-                    n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
-                    harmonic_amplitudes=copy(src.harmonic_amplitudes),
-                    harmonic_phases=2pi .* rand(rng, length(src.harmonics)),
-                    gate_duration=min(src.gate_duration, frame_dur), taper_ratio=src.taper_ratio,
-                    delay=d,
-                )
-            elseif src isa GaussianPulseCluster2D
-                GaussianPulseCluster2D(
                     depth=src.depth, lateral=src.lateral,
                     fundamental=src.fundamental * fscale, amplitude=src.amplitude,
                     n_bubbles=src.n_bubbles, harmonics=copy(src.harmonics),
