@@ -706,6 +706,25 @@ function analyse_pam_detection_2d(
     )
 end
 
+function threshold_detection_stats(intensity, kgrid, cfg, sources; threshold_ratios, truth_radius, truth_mask, frequencies)
+    return [
+        merge(
+            Dict(:threshold_ratio => ratio),
+            analyse_pam_detection_2d(
+                intensity,
+                kgrid,
+                cfg,
+                sources;
+                truth_radius=truth_radius,
+                threshold_ratio=ratio,
+                truth_mask=truth_mask,
+                frequencies=frequencies,
+            ),
+        )
+        for ratio in threshold_ratios
+    ]
+end
+
 function analyse_pam_2d(
     intensity::AbstractMatrix{<:Real},
     kgrid::KGrid2D,

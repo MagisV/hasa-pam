@@ -54,30 +54,6 @@ function parse_aberrator(value::AbstractString)
     return sym == :water ? :none : sym
 end
 
-function source_summary_3d(src)
-    if src isa BubbleCluster3D
-        return Dict(
-            "type" => "BubbleCluster3D",
-            "depth_m" => src.depth,
-            "lateral_y_m" => src.lateral_y,
-            "lateral_z_m" => src.lateral_z,
-            "fundamental_hz" => src.fundamental,
-            "harmonics" => src.harmonics,
-            "amplitude" => src.amplitude,
-        )
-    elseif src isa PointSource3D
-        return Dict(
-            "type" => "PointSource3D",
-            "depth_m" => src.depth,
-            "lateral_y_m" => src.lateral_y,
-            "lateral_z_m" => src.lateral_z,
-            "frequency_hz" => src.frequency,
-            "amplitude" => src.amplitude,
-        )
-    end
-    return Dict("type" => string(typeof(src)))
-end
-
 function make_demo_config(opts)
     dy = parse(Float64, opts["dy-mm"]) * 1e-3
     dz = parse(Float64, opts["dz-mm"]) * 1e-3
@@ -836,7 +812,7 @@ function main()
         ),
         "medium" => Dict(String(k) => v for (k, v) in medium_info),
         "simulation" => Dict(String(k) => v for (k, v) in simulation_info),
-        "sources" => [source_summary_3d(src) for src in sources],
+        "sources" => [source_summary(src) for src in sources],
         "metrics_by_frame" => metrics_by_frame,
     )
 

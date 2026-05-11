@@ -273,3 +273,51 @@ function parse_transducer_mm(s::AbstractString)
     length(parts) == 2 || error("--transducer-mm must be depth_mm:lateral_mm, got: $s")
     return parse(Float64, strip(parts[1])) * 1e-3, parse(Float64, strip(parts[2])) * 1e-3
 end
+
+function default_output_dir(opts, sources, cfg, emission_meta)
+    timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
+    source_model = lowercase(String(emission_meta["source_model"]))
+    lateral_slug = if cfg isa PAMConfig3D
+        "laty$(slug_value(cfg.transverse_dim_y * 1e3; digits=0))mm_latz$(slug_value(cfg.transverse_dim_z * 1e3; digits=0))mm"
+    else
+        "lat$(slug_value(cfg.transverse_dim * 1e3; digits=0))mm"
+    end
+    parts = String[
+        timestamp,
+        "run_pam",
+        cfg isa PAMConfig3D ? "3d" : "2d",
+        lowercase(opts["aberrator"]),
+        source_model,
+        "$(length(sources))src",
+        "ax$(slug_value(cfg.axial_dim * 1e3; digits=0))mm",
+        lateral_slug,
+    ]
+    if occursin("squiggle", source_model) || occursin("network", source_model)
+        count_key = haskey(emission_meta, "n_anchor_clusters") ? "n_anchor_clusters" : "n_network_centers"
+        label = occursin("network", source_model) ? "centers" : "anchors"
+        insert!(parts, 5, "$(emission_meta[count_key])$(label)")
+        push!(parts, "f$(slug_value(parse(Float64, opts["fundamental-mhz"]); digits=2))mhz")
+        push!(parts, "h$(replace(opts["harmonics"], "," => ""))")
+        push!(parts, replace(lowercase(opts["source-phase-mode"]), "_" => ""))
+    else
+        push!(parts, "f$(slug_value(parse(Float64, opts["frequency-mhz"]); digits=2))mhz")
+    end
+    if lowercase(opts["aberrator"]) == "skull"
+        insert!(parts, length(parts), "slice" * opts["slice-index"])
+        insert!(parts, length(parts), "st$(slug_value(parse(Float64, opts["skull-transducer-distance-mm"]); digits=1))mm")
+    end
+    return joinpath(pwd(), "outputs", join(parts, "_"))
+end
+
+function default_reconstruction_output_dir(source_dir::AbstractString)
+    timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
+    source_name = basename(normpath(source_dir))
+    return joinpath(pwd(), "outputs", "$(timestamp)_reconstruct_$(source_name)")
+end
+
+function reject_cached_simulation_options!(provided_keys::Set{String}, blocked_keys)
+    illegal = sort(collect(intersect(provided_keys, Set(blocked_keys))))
+    isempty(illegal) && return nothing
+    formatted = join(["--$key" for key in illegal], ", ")
+    error("--from-run-dir reuses the previous RF simulation, medium, sources, and grid. Remove simulation-specific option(s): $formatted")
+end

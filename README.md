@@ -225,7 +225,6 @@ Key helpers:
 - `analyse_pam_2d`
 - `analyse_pam_detection_2d`
 - `run_pam_case`
-- `run_pam_sweep`
 
 ### PAM Medium Options
 
