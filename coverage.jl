@@ -15,7 +15,11 @@ using Coverage
 
 mkpath(COVERAGE_DIR)
 
-coverage = process_folder(joinpath(ROOT, "src"))
+coverage = Coverage.FileCoverage[]
+append!(coverage, process_folder(joinpath(ROOT, "src", "pam")))
+append!(coverage, process_folder(joinpath(ROOT, "src", "common")))
+push!(coverage, process_file(joinpath(ROOT, "scripts", "run_pam.jl")))
+
 covered_lines, total_lines = get_summary(coverage)
 coverage_percent = total_lines == 0 ? 100.0 : 100.0 * covered_lines / total_lines
 
