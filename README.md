@@ -33,7 +33,7 @@ Instantiate the Julia environment:
 ```bash
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
-
+`
 Python-side dependencies for k-Wave are managed through `CondaPkg.toml`. The first k-Wave run may resolve Python packages and k-Wave resources.
 
 ## Data
