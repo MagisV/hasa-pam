@@ -30,29 +30,12 @@ function kwave_available()
     end
 end
 
-function _normalize_record(record::Union{Symbol, AbstractString})
-    symbol = record isa Symbol ? record : Symbol(record)
-    symbol in (:p_rms, :p) || error("Unsupported record mode: $record")
-    return symbol
-end
-
 function _py_bool_matrix(np, rows::Int, cols::Int)
     return np.zeros((rows, cols), dtype=PythonCall.pybuiltins.bool)
 end
 
 function _py_float_matrix(np, rows::Int, cols::Int)
     return np.zeros((rows, cols), dtype=np.float64)
-end
-
-function _as_sensor_matrix(array, expected_rows::Int, expected_cols::Int)
-    mat = Float64.(array)
-    ndims(mat) == 1 && return reshape(mat, :, 1)
-    if size(mat, 1) == expected_rows && size(mat, 2) == expected_cols
-        return mat
-    elseif size(mat, 1) == expected_cols && size(mat, 2) == expected_rows
-        return permutedims(mat)
-    end
-    error("Unexpected sensor data shape $(size(mat)); expected ($expected_rows, $expected_cols) or ($expected_cols, $expected_rows).")
 end
 
 function _simulate_kwave(
@@ -135,7 +118,7 @@ function _simulate_kwave(
     )
     exec_opts = mods.execopts.SimulationExecutionOptions(
         is_gpu_simulation=use_gpu,
-        delete_data=false,
+        delete_data=true,
     )
 
     data = mods.kspace.kspaceFirstOrder2D(
@@ -162,6 +145,7 @@ function simulate_point_sources(
     sources::AbstractVector{<:EmissionSource2D},
     cfg::PAMConfig;
     use_gpu::Bool=false,
+    kwave_data_path::Union{Nothing, AbstractString}=nothing,
 )
     isempty(sources) && error("At least one emission source is required.")
 
@@ -230,30 +214,44 @@ function simulate_point_sources(
     sensor.mask = sensor_mask
     sensor.record = pc.pybuiltins.list(("p",))
 
+    sim_dir = mktempdir(isnothing(kwave_data_path) ? tempdir() : String(kwave_data_path))
     sim_opts = mods.simopts.SimulationOptions(
         pml_inside=false,
         pml_size=pml_guard,
         data_recast=false,
         save_to_disk=true,
+        data_path=sim_dir,
     )
     exec_opts = mods.execopts.SimulationExecutionOptions(
         is_gpu_simulation=use_gpu,
-        delete_data=false,
+        delete_data=true,
     )
 
-    data = mods.kspace.kspaceFirstOrder2D(
-        kgrid=deepcopy_py(py_kgrid),
-        medium=deepcopy_py(medium),
-        source=deepcopy_py(source),
-        sensor=deepcopy_py(sensor),
-        simulation_options=sim_opts,
-        execution_options=exec_opts,
-    )
-
-    sensor_data_py = np.array(data["p"], dtype=np.float64)
-    sensor_data = _as_sensor_matrix(pc.pyconvert(Array, sensor_data_py), length(col_range), nt)
+    sensor_data = let
+        data = mods.kspace.kspaceFirstOrder2D(
+            kgrid=deepcopy_py(py_kgrid),
+            medium=deepcopy_py(medium),
+            source=deepcopy_py(source),
+            sensor=deepcopy_py(sensor),
+            simulation_options=sim_opts,
+            execution_options=exec_opts,
+        )
+        raw = pc.pyconvert(Array, np.array(data["p"], dtype=np.float64))
+        _as_sensor_matrix(raw, length(col_range), nt)
+        # data and intermediate Python objects go out of scope here
+    end
     rf = zeros(Float64, ny, nt)
     rf[col_range, :] .= sensor_data
+    # Retry rm: Python's refcounting closes h5py handles as the let-scoped
+    # Py objects are finalized by Julia's natural GC between retries.
+    for attempt in 1:10
+        try
+            rm(sim_dir; recursive=true, force=true)
+            break
+        catch
+            attempt < 10 && sleep(0.5)
+        end
+    end
 
     info = Dict{Symbol, Any}(
         :receiver_row => row,
@@ -271,6 +269,7 @@ function simulate_point_sources_3d(
     sources::AbstractVector{<:EmissionSource3D},
     cfg::PAMConfig3D;
     use_gpu::Bool=false,
+    kwave_data_path::Union{Nothing, AbstractString}=nothing,
 )
     isempty(sources) && error("At least one emission source is required.")
 
@@ -345,29 +344,34 @@ function simulate_point_sources_3d(
     sensor.mask = sensor_mask
     sensor.record = pc.pybuiltins.list(("p",))
 
+    sim_dir = mktempdir(isnothing(kwave_data_path) ? tempdir() : String(kwave_data_path))
     sim_opts = mods.simopts.SimulationOptions(
         pml_inside=false,
         pml_size=pml_guard,
         data_recast=false,
         save_to_disk=true,
+        data_path=sim_dir,
     )
     exec_opts = mods.execopts.SimulationExecutionOptions(
         is_gpu_simulation=use_gpu,
-        delete_data=false,
+        delete_data=true,
     )
 
-    data = mods.kspace3d.kspaceFirstOrder3D(
-        kgrid=deepcopy_py(py_kgrid),
-        medium=deepcopy_py(medium),
-        source=deepcopy_py(source),
-        sensor=deepcopy_py(sensor),
-        simulation_options=sim_opts,
-        execution_options=exec_opts,
-    )
-
-    sensor_data_py = np.array(data["p"], dtype=np.float64)
-    # k-Wave returns (Nt, ny*nz) in Python (row-major). pyconvert gives (ny*nz, Nt) in Julia.
-    sensor_data_flat = pc.pyconvert(Matrix{Float64}, sensor_data_py)  # (ny*nz, Nt) or (Nt, ny*nz)
+    # Wrap in let so data/sensor_data_py go out of scope before GC, releasing h5py handles.
+    sensor_data_flat = let
+        data = mods.kspace3d.kspaceFirstOrder3D(
+            kgrid=deepcopy_py(py_kgrid),
+            medium=deepcopy_py(medium),
+            source=deepcopy_py(source),
+            sensor=deepcopy_py(sensor),
+            simulation_options=sim_opts,
+            execution_options=exec_opts,
+        )
+        # k-Wave returns (Nt, ny*nz) in Python (row-major). pyconvert gives (ny*nz, Nt) in Julia.
+        flat = pc.pyconvert(Matrix{Float64}, np.array(data["p"], dtype=np.float64))
+        # data and intermediate Python objects go out of scope here
+        flat
+    end
     # Normalise to (ny*nz, Nt) regardless of which axis k-Wave put time on.
     if size(sensor_data_flat, 1) == nt && size(sensor_data_flat, 2) == ny * nz
         sensor_data_flat = permutedims(sensor_data_flat)  # → (ny*nz, Nt)
@@ -376,6 +380,16 @@ function simulate_point_sources_3d(
     end
     # Julia reshape is column-major: ny varies fastest, matching k-Wave's Fortran-order enumeration.
     rf = reshape(sensor_data_flat, ny, nz, nt)
+    # Retry rm: Python's refcounting closes h5py handles as the let-scoped
+    # Py objects are finalized by Julia's natural GC between retries.
+    for attempt in 1:10
+        try
+            rm(sim_dir; recursive=true, force=true)
+            break
+        catch
+            attempt < 10 && sleep(0.5)
+        end
+    end
 
     info = Dict{Symbol, Any}(
         :receiver_row => row,
