@@ -1,3 +1,5 @@
+[![Tests](https://github.com/MagisV/hasa-pam/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/MagisV/hasa-pam/actions/workflows/tests.yml)
+
 ## TranscranialFUS
 
 This repository contains the Spring 2026 project for the ETH Zurich course [Solving PDEs in parallel on GPUs with Julia II](https://pde-on-gpu.vaw.ethz.ch/part2/) (`ETHZ 101-0250-01`).
