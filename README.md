@@ -1,4 +1,5 @@
 [![Tests](https://github.com/MagisV/hasa-pam/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/MagisV/hasa-pam/actions/workflows/tests.yml)
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-3f51b5)](https://magisv.github.io/hasa-pam/)
 
 # TranscranialFUS
 
