@@ -16,6 +16,7 @@ using Coverage
 const EXCLUDED_FILES = Set(
     normpath.([
         joinpath(ROOT, "src", "common", "kwave_wrapper.jl"),
+        joinpath(ROOT, "scripts", "run_pam.jl"),
     ]),
 )
 
@@ -90,7 +91,7 @@ mkpath(COVERAGE_DIR)
 coverage = Coverage.FileCoverage[]
 append!(coverage, process_folder(joinpath(ROOT, "src", "pam")))
 append!(coverage, process_folder(joinpath(ROOT, "src", "common")))
-push!(coverage, process_file(joinpath(ROOT, "scripts", "run_pam.jl")))
+push!(coverage, process_file(joinpath(ROOT, "scripts", "run_pam.jl"))) # filtered: covered by src/pam/setup/runner.jl
 _apply_coverage_policy!(coverage)
 
 covered_lines, total_lines = get_summary(coverage)

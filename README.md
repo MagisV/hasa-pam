@@ -26,14 +26,6 @@ julia --project=docs docs/make.jl
 The site is built and deployed automatically when changes land on `main`
 ([Deploy Documentation](https://github.com/MagisV/hasa-pam/actions/workflows/deploy-docs.yml)).
 
-Enable it once in the GitHub repository: **Settings → Pages → Build and deployment → Source → GitHub Actions**.
-
-For a public repository under `MagisV`, the published URL is typically:
-
-`https://magisv.github.io/hasa-pam/`
-
-GitHub Pages is free on public repositories. With [GitHub Education](https://education.github.com/), you may also get Pro benefits that help with private repositories or higher usage limits.
-
 ## Setup
 
 Instantiate the Julia environment:
