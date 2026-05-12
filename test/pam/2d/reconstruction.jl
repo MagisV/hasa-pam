@@ -155,4 +155,50 @@ end
     p2 = fill(-1.0 + 0.0im, 2, 2)
     @test all(abs2.(p1 .+ p2) .== 0.0)
     @test all(abs2.(p1) .+ abs2.(p2) .== 2.0)
+
+    @test TranscranialFUS._format_elapsed(5e-7) == "0.5 us"
+    @test TranscranialFUS._format_elapsed(5e-3) == "5.0 ms"
+    @test TranscranialFUS._format_elapsed(5.0) == "5.0 s"
+    @test TranscranialFUS._format_elapsed(65.0) == "1m 5.0s"
+    @test TranscranialFUS._format_frequency_list(Float64[]) == "none"
+    @test occursin("...", TranscranialFUS._format_frequency_list(collect(1.0:10.0) .* 1e6; max_items=4))
+end
+
+@testset "windowed reconstruction skips empty windows" begin
+    cfg = PAMConfig(
+        dx=1e-3,
+        dz=1e-3,
+        axial_dim=0.01,
+        transverse_dim=0.008,
+        t_max=8e-6,
+        dt=0.1e-6,
+        zero_pad_factor=1,
+        PML_GUARD=2,
+    )
+    c = fill(Float64(cfg.c0), pam_Nx(cfg), pam_Ny(cfg))
+    rf = zeros(Float64, pam_Ny(cfg), pam_Nt(cfg))
+    window_config = PAMWindowConfig(
+        enabled=true,
+        window_duration=2e-6,
+        hop=1e-6,
+        taper=:hann,
+        min_energy_ratio=0.5,
+    )
+
+    intensity, grid, info = reconstruct_pam_windowed(
+        rf,
+        c,
+        cfg;
+        frequencies=[0.5e6],
+        corrected=false,
+        window_config=window_config,
+        use_gpu=false,
+    )
+
+    @test all(iszero, intensity)
+    @test grid.Nt == pam_Nt(cfg)
+    @test info[:used_window_count] == 0
+    @test info[:skipped_window_count] == info[:total_window_count]
+    @test info[:energy_threshold] == 0.0
+    @test info[:backend] == :cpu
 end

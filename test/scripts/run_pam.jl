@@ -3,20 +3,25 @@
 
     mktempdir() do dir
         out2d = joinpath(dir, "out2d")
-        dry2d = main([
+        dry2d_args = [
             "--source-model=point",
             "--sources-mm=30:0",
             "--out-dir=$out2d",
             "--boundary-threshold-ratios=0.4,0.8",
-        ]; dry_run=true)
+        ]
+        dry2d = TranscranialFUS.run_pam_dry_plan(dry2d_args)
         @test dry2d[:branch] == :pam2d_simulation
         @test dry2d[:out_dir] == out2d
         @test dry2d[:source_model] == :point
         @test dry2d[:source_count] == 1
         @test dry2d[:threshold_ratios] == [0.4, 0.8]
+        @test main(dry2d_args; dry_run=true) == dry2d
+
+        medium_summary = TranscranialFUS.run_pam_medium_summary(Dict(:mask => trues(2, 2), :aberrator => :none, :rows => 2))
+        @test medium_summary == Dict("aberrator" => :none, "rows" => 2)
 
         out3d = joinpath(dir, "out3d")
-        dry3d = main([
+        dry3d = TranscranialFUS.run_pam_dry_plan([
             "--dimension=3",
             "--source-model=point",
             "--sources-mm=20:0:0",
@@ -25,7 +30,7 @@
             "--auto-threshold-min=0.2",
             "--auto-threshold-max=0.5",
             "--auto-threshold-step=0.2",
-        ]; dry_run=true)
+        ])
         @test dry3d[:branch] == :pam3d
         @test dry3d[:out_dir] == out3d
         @test dry3d[:source_model] == :point

@@ -45,3 +45,29 @@ jobs:
             coverage/lcov.info
             coverage/summary.txt
           if-no-files-found: error
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+
+      - name: Cache Julia artifacts
+        uses: julia-actions/cache@v2
+
+      - name: Build documentation
+        run: julia --project=docs --color=yes docs/make.jl
+
+      - name: Upload documentation site
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-site
+          path: docs/build/
+          if-no-files-found: error

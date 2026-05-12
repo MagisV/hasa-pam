@@ -23,6 +23,8 @@ import TranscranialFUS: parse_cli, parse_bool, parse_dimension, parse_float_list
     source_summary, string_key_dict, run_pam_case_3d
 
 function main(args::AbstractVector{<:AbstractString}=ARGS; dry_run::Bool=false)
+    dry_run && return TranscranialFUS.run_pam_dry_plan(args)
+
     opts, provided_keys = parse_cli(String.(args))
     dimension = parse_dimension(opts["dimension"])
     source_model = parse_source_model(opts["source-model"])
@@ -78,13 +80,6 @@ function main(args::AbstractVector{<:AbstractString}=ARGS; dry_run::Bool=false)
         else
             default_output_dir(opts, sources, cfg, emission_meta)
         end
-        dry_run && return Dict(
-            :branch => :pam3d,
-            :out_dir => out_dir,
-            :source_model => source_model,
-            :source_count => length(sources),
-            :threshold_score_ratios => threshold_score_ratios,
-        )
         mkpath(out_dir)
 
         c, rho, medium_info = make_pam_medium_3d(cfg;
@@ -136,11 +131,7 @@ function main(args::AbstractVector{<:AbstractString}=ARGS; dry_run::Bool=false)
             source_variability=source_variability,
         )
 
-        medium_summary = Dict{String, Any}()
-        for (key, value) in medium_info
-            key == :mask && continue
-            medium_summary[String(key)] = value
-        end
+        medium_summary = TranscranialFUS.run_pam_medium_summary(medium_info)
 
         activity_boundary_path = joinpath(out_dir, "activity_boundaries.png")
         activity_boundary_metrics = save_threshold_boundary_detection_3d(
@@ -293,13 +284,6 @@ function main(args::AbstractVector{<:AbstractString}=ARGS; dry_run::Bool=false)
         else
             default_output_dir(opts, sources, cfg, emission_meta)
         end
-        dry_run && return Dict(
-            :branch => :pam2d_simulation,
-            :out_dir => out_dir,
-            :source_model => source_model,
-            :source_count => length(sources),
-            :threshold_ratios => boundary_threshold_ratios,
-        )
         mkpath(out_dir)
 
         c, rho, medium_info = make_pam_medium(
@@ -385,23 +369,6 @@ function main(args::AbstractVector{<:AbstractString}=ARGS; dry_run::Bool=false)
         )
         cached_path = joinpath(from_run_dir, "result.jld2")
         isfile(cached_path) || error("--from-run-dir must contain result.jld2, missing: $cached_path")
-        if dry_run
-            out_dir = if haskey(opts, "out-dir") && !isempty(strip(opts["out-dir"]))
-                opts["out-dir"]
-            else
-                default_reconstruction_output_dir(from_run_dir)
-            end
-            return Dict(
-                :branch => :pam2d_cached,
-                :out_dir => out_dir,
-                :cached_path => cached_path,
-                :reconstruction_source => Dict(
-                    "mode" => "cached_rf",
-                    "from_run_dir" => abspath(from_run_dir),
-                    "from_result_jld2" => abspath(cached_path),
-                ),
-            )
-        end
         cached = load(cached_path)
         c = cached["c"]
         rho = haskey(cached, "rho") ? cached["rho"] : fill(Float32(cached["cfg"].rho0), size(c))
@@ -471,11 +438,7 @@ function main(args::AbstractVector{<:AbstractString}=ARGS; dry_run::Bool=false)
         )
     end
 
-    medium_summary = Dict{String, Any}()
-    for (key, value) in medium_info
-        key == :mask && continue
-        medium_summary[String(key)] = value
-    end
+    medium_summary = TranscranialFUS.run_pam_medium_summary(medium_info)
 
     save_overview(
         joinpath(out_dir, "overview.png"),

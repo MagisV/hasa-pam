@@ -30,29 +30,12 @@ function kwave_available()
     end
 end
 
-function _normalize_record(record::Union{Symbol, AbstractString})
-    symbol = record isa Symbol ? record : Symbol(record)
-    symbol in (:p_rms, :p) || error("Unsupported record mode: $record")
-    return symbol
-end
-
 function _py_bool_matrix(np, rows::Int, cols::Int)
     return np.zeros((rows, cols), dtype=PythonCall.pybuiltins.bool)
 end
 
 function _py_float_matrix(np, rows::Int, cols::Int)
     return np.zeros((rows, cols), dtype=np.float64)
-end
-
-function _as_sensor_matrix(array, expected_rows::Int, expected_cols::Int)
-    mat = Float64.(array)
-    ndims(mat) == 1 && return reshape(mat, :, 1)
-    if size(mat, 1) == expected_rows && size(mat, 2) == expected_cols
-        return mat
-    elseif size(mat, 1) == expected_cols && size(mat, 2) == expected_rows
-        return permutedims(mat)
-    end
-    error("Unexpected sensor data shape $(size(mat)); expected ($expected_rows, $expected_cols) or ($expected_cols, $expected_rows).")
 end
 
 function _simulate_kwave(
