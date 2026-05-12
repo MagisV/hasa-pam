@@ -112,6 +112,9 @@ end
     @test TranscranialFUS._unwrap_phase(wrapped) ≈ truth atol=1e-10
 end
 
+include("common/kwave_wrapper.jl")
+include("scripts/run_pam.jl")
+
 @testset "Focus analysis" begin
     cfg = SimulationConfig(z_focus=0.02, x_focus=0.0, dx=0.5e-3, dz=0.5e-3, transverse_dim=0.03, trans_aperture=0.01, axial_padding=2.5)
     cfg.trans_index = Nx(cfg) - cfg.PML_GUARD
