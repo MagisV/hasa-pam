@@ -1,5 +1,18 @@
+"""
+    EmissionSource2D
+
+Abstract supertype for 2D PAM acoustic emission source models.
+"""
 abstract type EmissionSource2D end
 
+"""
+    PointSource2D(; depth, lateral, frequency=8e5, amplitude=1.0, phase=0.0, delay=0.0, num_cycles=5)
+
+Single 2D tone-burst emitter.
+
+`depth` and `lateral` are in meters relative to the receiver coordinate system,
+`frequency` is in Hz, and `delay` is in seconds.
+"""
 Base.@kwdef struct PointSource2D <: EmissionSource2D
     depth::Float64
     lateral::Float64
@@ -10,6 +23,14 @@ Base.@kwdef struct PointSource2D <: EmissionSource2D
     num_cycles::Int = 5
 end
 
+"""
+    BubbleCluster2D(; depth, lateral, fundamental=5e5, kwargs...)
+
+Harmonic 2D bubble-cluster emitter used by squiggle source models.
+
+Coordinates are in meters, frequencies are in Hz, and `gate_duration` and
+`delay` are in seconds.
+"""
 Base.@kwdef struct BubbleCluster2D <: EmissionSource2D
     depth::Float64
     lateral::Float64
@@ -23,15 +44,41 @@ Base.@kwdef struct BubbleCluster2D <: EmissionSource2D
     delay::Float64 = 0.0
 end
 
+"""
+    SourceVariabilityConfig(; frequency_jitter_fraction=0.0)
+
+Per-window variability settings for expanding sources across temporal windows.
+"""
 Base.@kwdef struct SourceVariabilityConfig
     frequency_jitter_fraction::Float64 = 0.0
 end
 
+"""
+    _emission_frequencies(src::PointSource2D)
+
+Return the tone-burst frequency for a 2D point source in Hz.
+"""
 _emission_frequencies(src::PointSource2D) = Float64[src.frequency]
+
+"""
+    _emission_frequencies(src::BubbleCluster2D)
+
+Return all harmonic emission frequencies for a 2D bubble cluster in Hz.
+"""
 _emission_frequencies(src::BubbleCluster2D) = Float64[n * src.fundamental for n in src.harmonics]
 
+"""
+    emission_frequencies(src)
+
+Return the physical emission frequencies represented by a 2D source.
+"""
 emission_frequencies(src::EmissionSource2D) = _emission_frequencies(src)
 
+"""
+    _normalize_cluster_phase_mode(phase_mode)
+
+Normalize and validate the phase mode for generated bubble-cluster harmonics.
+"""
 function _normalize_cluster_phase_mode(phase_mode)
     mode = Symbol(replace(lowercase(string(phase_mode)), "-" => "_"))
     mode == :random_static_phase && return :random
@@ -40,6 +87,11 @@ function _normalize_cluster_phase_mode(phase_mode)
     return mode
 end
 
+"""
+    _normalize_source_phase_mode(source_phase_mode)
+
+Normalize and validate the per-window source phase mode.
+"""
 function _normalize_source_phase_mode(source_phase_mode)
     mode = Symbol(replace(lowercase(string(source_phase_mode)), "-" => "_"))
     mode in (:coherent, :random_static_phase, :random_phase_per_window) ||
@@ -50,6 +102,12 @@ function _normalize_source_phase_mode(source_phase_mode)
     return mode
 end
 
+"""
+    _geometric_drive_phase(depth, lateral, tx_depth, tx_lateral, harmonic, fundamental, c0)
+
+Compute the propagation phase, in radians, for a harmonic driven from a
+transducer point in meters at sound speed `c0` in m/s.
+"""
 function _geometric_drive_phase(
     depth::Real,
     lateral::Real,
@@ -63,6 +121,12 @@ function _geometric_drive_phase(
     return -2pi * Int(harmonic) * Float64(fundamental) * distance / Float64(c0)
 end
 
+"""
+    _cluster_harmonic_phases(depth, lateral, harmonics, fundamental, c0, phase_mode, tx_depth, tx_lateral, phase_jitter, rng)
+
+Generate one phase value, in radians, for each requested bubble-cluster
+harmonic.
+"""
 function _cluster_harmonic_phases(
     depth::Real,
     lateral::Real,
@@ -92,12 +156,22 @@ function _cluster_harmonic_phases(
     return phases
 end
 
+"""
+    _within_bounds(point, depth_bounds, lateral_bounds)
+
+Return whether a 2D point in meters lies inside the supplied physical bounds.
+"""
 function _within_bounds(point::Tuple{Float64, Float64}, depth_bounds, lateral_bounds)
     depth, lateral = point
     return depth_bounds[1] <= depth <= depth_bounds[2] &&
            lateral_bounds[1] <= lateral <= lateral_bounds[2]
 end
 
+"""
+    _far_enough(point, points, min_separation)
+
+Return whether `point` is at least `min_separation` meters from all existing points.
+"""
 function _far_enough(point::Tuple{Float64, Float64}, points::AbstractVector{<:Tuple}, min_separation::Real)
     sep = Float64(min_separation)
     sep <= 0 && return true
@@ -107,6 +181,11 @@ function _far_enough(point::Tuple{Float64, Float64}, points::AbstractVector{<:Tu
     return true
 end
 
+"""
+    _squiggle_centerline(anchor_depth, anchor_lateral; kwargs...)
+
+Construct a deterministic 2D squiggle centerline in physical coordinates.
+"""
 function _squiggle_centerline(
     anchor_depth::Real,
     anchor_lateral::Real;
@@ -134,6 +213,11 @@ function _squiggle_centerline(
     return points
 end
 
+"""
+    _interp_centerline_point(centerline, distance)
+
+Interpolate a 2D centerline by arclength and return position plus unit tangent.
+"""
 function _interp_centerline_point(centerline::AbstractVector{<:Tuple}, distance::Real)
     length(centerline) >= 2 || error("Centerline must contain at least two points.")
     remaining = Float64(distance)
@@ -158,6 +242,12 @@ function _interp_centerline_point(centerline::AbstractVector{<:Tuple}, distance:
     return d1, l1, (d1 - d0) / seg_len, (l1 - l0) / seg_len
 end
 
+"""
+    _sample_squiggle_centerlines(centerlines; kwargs...)
+
+Sample candidate source positions along 2D centerlines with optional jitter,
+bounds filtering, separation filtering, and count limiting.
+"""
 function _sample_squiggle_centerlines(
     centerlines::AbstractVector;
     source_spacing::Real,
@@ -211,6 +301,9 @@ end
 
 Generate harmonic bubble emitters along one deterministic squiggly centerline
 per `(depth, lateral)` anchor.
+
+Anchor coordinates and geometric keyword arguments are in meters, frequencies
+are in Hz, and durations/delays are in seconds. Returns `(sources, meta)`.
 """
 function make_squiggle_bubble_sources(
     anchors::AbstractVector{<:Tuple};
@@ -322,9 +415,25 @@ function make_squiggle_bubble_sources(
     return clusters, meta
 end
 
+"""
+    _source_duration(src::PointSource2D)
+
+Return the active tone-burst duration for a point source in seconds.
+"""
 _source_duration(src::PointSource2D) = src.num_cycles / src.frequency
+
+"""
+    _source_duration(src::BubbleCluster2D)
+
+Return the active gate duration for a bubble cluster in seconds.
+"""
 _source_duration(src::BubbleCluster2D) = src.gate_duration
 
+"""
+    _tukey_window(n, ratio)
+
+Return a length-`n` Tukey window with taper fraction `ratio`.
+"""
 function _tukey_window(n::Int, ratio::Real)
     n <= 0 && return Float64[]
     n == 1 && return ones(Float64, 1)
@@ -350,6 +459,12 @@ function _tukey_window(n::Int, ratio::Real)
     return w
 end
 
+"""
+    _tone_burst_signal(nt, dt, src; taper_ratio=0.25)
+
+Generate a 2D point-source tone burst with `nt` samples and sample spacing
+`dt` in seconds.
+"""
 function _tone_burst_signal(nt::Int, dt::Real, src::PointSource2D; taper_ratio::Real=0.25)
     signal = zeros(Float64, nt)
     duration = src.num_cycles / src.frequency
@@ -363,6 +478,11 @@ function _tone_burst_signal(nt::Int, dt::Real, src::PointSource2D; taper_ratio::
     return signal
 end
 
+"""
+    _cluster_emission_signal(nt, dt, src)
+
+Generate the time-domain emission signal for a harmonic 2D bubble cluster.
+"""
 function _cluster_emission_signal(nt::Int, dt::Real, src::BubbleCluster2D)
     length(src.harmonics) == length(src.harmonic_amplitudes) ||
         error("BubbleCluster2D: harmonics and harmonic_amplitudes must have equal length.")
@@ -389,9 +509,25 @@ function _cluster_emission_signal(nt::Int, dt::Real, src::BubbleCluster2D)
     return signal
 end
 
+"""
+    _source_signal(nt, dt, src::PointSource2D)
+
+Dispatch to the point-source signal generator.
+"""
 _source_signal(nt::Int, dt::Real, src::PointSource2D) = _tone_burst_signal(nt, dt, src)
+
+"""
+    _source_signal(nt, dt, src::BubbleCluster2D)
+
+Dispatch to the bubble-cluster signal generator.
+"""
 _source_signal(nt::Int, dt::Real, src::BubbleCluster2D) = _cluster_emission_signal(nt, dt, src)
 
+"""
+    _resample_source_phases(sources, rng)
+
+Return copies of sources with randomized phases for stochastic windowed runs.
+"""
 function _resample_source_phases(
     sources::AbstractVector{<:EmissionSource2D},
     rng::Random.AbstractRNG,
@@ -419,6 +555,12 @@ function _resample_source_phases(
     end
 end
 
+"""
+    _expand_sources_per_window(sources, window_duration, hop, t_max, rng; variability=SourceVariabilityConfig())
+
+Expand base sources into independently phased emissions for each temporal
+window over a recording of length `t_max` seconds.
+"""
 function _expand_sources_per_window(
     sources::AbstractVector{<:EmissionSource2D},
     window_duration::Real,

@@ -1,7 +1,17 @@
+"""
+    source_triples_mm(sources)
+
+Return `(depth_mm, y_mm, z_mm)` coordinate triples for 3D sources.
+"""
 function source_triples_mm(sources::AbstractVector{<:EmissionSource3D})
     return [(src.depth * 1e3, src.lateral_y * 1e3, src.lateral_z * 1e3) for src in sources]
 end
 
+"""
+    _c_slice_for_projection(c, projection)
+
+Project a 3D sound-speed volume to the 2D slice used for skull overlays.
+"""
 function _c_slice_for_projection(c::AbstractArray{<:Real, 3}, projection::Symbol)
     if projection == :depth_y
         return dropdims(maximum(c; dims=3), dims=3)
@@ -12,6 +22,11 @@ function _c_slice_for_projection(c::AbstractArray{<:Real, 3}, projection::Symbol
     end
 end
 
+"""
+    overlay_skull_3d_projection!(ax, c, xvals, yvals, projection)
+
+Overlay a projected skull mask inferred from a 3D sound-speed volume.
+"""
 function overlay_skull_3d_projection!(ax, c::AbstractArray{<:Real, 3}, xvals, yvals, projection::Symbol)
     c2d = _c_slice_for_projection(c, projection)
     # :y_z projection is not transposed (matches _projection_heatmap_matrix_3d convention).
@@ -19,6 +34,11 @@ function overlay_skull_3d_projection!(ax, c::AbstractArray{<:Real, 3}, xvals, yv
     return nothing
 end
 
+"""
+    _project3d_values(intensity, projection)
+
+Return a maximum-intensity projection for one supported 3D view.
+"""
 function _project3d_values(intensity::AbstractArray{<:Real, 3}, projection::Symbol)
     values = Float64.(intensity)
     if projection == :depth_y
@@ -31,6 +51,11 @@ function _project3d_values(intensity::AbstractArray{<:Real, 3}, projection::Symb
     error("Unknown 3D projection: $projection")
 end
 
+"""
+    _project3d_mask(mask, projection)
+
+Return a Boolean occupancy projection for one supported 3D view.
+"""
 function _project3d_mask(mask::AbstractArray{Bool, 3}, projection::Symbol)
     if projection == :depth_y
         return dropdims(any(mask; dims=3), dims=3)
@@ -42,6 +67,11 @@ function _project3d_mask(mask::AbstractArray{Bool, 3}, projection::Symbol)
     error("Unknown 3D projection: $projection")
 end
 
+"""
+    _projection_axes_3d(grid, cfg, projection)
+
+Return plot coordinates in millimeters and axis labels for a 3D projection.
+"""
 function _projection_axes_3d(grid, cfg::PAMConfig3D, projection::Symbol)
     depth_mm = depth_coordinates_3d(cfg) .* 1e3
     y_mm = collect(grid.y) .* 1e3
@@ -56,11 +86,21 @@ function _projection_axes_3d(grid, cfg::PAMConfig3D, projection::Symbol)
     error("Unknown 3D projection: $projection")
 end
 
+"""
+    _projection_heatmap_matrix_3d(values, projection)
+
+Orient a projected 2D matrix for Makie heatmap plotting.
+"""
 function _projection_heatmap_matrix_3d(values::AbstractMatrix, projection::Symbol)
     projection == :y_z && return values
     return values'
 end
 
+"""
+    scatter_sources_3d_projection!(ax, sources, projection; color=...)
+
+Add projected 3D source markers, in millimeters, to a Makie axis.
+"""
 function scatter_sources_3d_projection!(ax, sources, projection::Symbol; color=(:white, 0.75))
     truth = source_triples_mm(sources)
     if projection == :depth_y
@@ -73,6 +113,11 @@ function scatter_sources_3d_projection!(ax, sources, projection::Symbol; color=(
     return nothing
 end
 
+"""
+    add_projection_panel_3d!(fig, row, col, title, intensity, truth_mask, grid, cfg, sources; kwargs...)
+
+Add one projected 3D threshold-contour panel to a Makie figure.
+"""
 function add_projection_panel_3d!(
     fig,
     row,
@@ -133,6 +178,11 @@ function add_projection_panel_3d!(
     return hm
 end
 
+"""
+    add_threshold_table_3d!(fig, row, col, title, stats; outline_entries=nothing)
+
+Add a compact 3D threshold metric table to a Makie figure.
+"""
 function add_threshold_table_3d!(fig, row, col, title, stats; outline_entries=nothing)
     rows_data = isnothing(outline_entries) ? [(label="", entry=entry) for entry in stats] :
         [(label=outline.label, entry=outline.entry) for outline in outline_entries]
@@ -161,6 +211,11 @@ function add_threshold_table_3d!(fig, row, col, title, stats; outline_entries=no
     rowgap!(gl, 2)
 end
 
+"""
+    add_threshold_curve_panel_3d!(fig, row, col, title, stats; outline_entries)
+
+Add F1, precision, and recall curves for a 3D threshold sweep.
+"""
 function add_threshold_curve_panel_3d!(fig, row, col, title, stats; outline_entries)
     thresholds = [Float64(entry[:threshold_ratio]) for entry in stats]
     f1 = [Float64(get(entry, :source_f1, entry[:f1])) for entry in stats]
@@ -179,6 +234,12 @@ function add_threshold_curve_panel_3d!(fig, row, col, title, stats; outline_entr
     return nothing
 end
 
+"""
+    save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg, sources; kwargs...)
+
+Save the 3D threshold-boundary detection comparison figure and return its
+serializable metric summary.
+"""
 function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg, sources; threshold_ratios, truth_radius, c=nothing)
     truth_mask = pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius)
     geo_stats = threshold_detection_stats_3d(pam_geo, grid, cfg, sources; threshold_ratios=threshold_ratios, truth_radius=truth_radius, truth_mask=truth_mask)
@@ -251,6 +312,11 @@ function save_threshold_boundary_detection_3d(path, pam_geo, pam_hasa, grid, cfg
     )
 end
 
+"""
+    _voxel_points_3d(mask, grid, cfg)
+
+Return physical coordinates in millimeters for true voxels in a 3D mask.
+"""
 function _voxel_points_3d(mask::AbstractArray{Bool, 3}, grid, cfg::PAMConfig3D)
     depth_mm = depth_coordinates_3d(cfg) .* 1e3
     y_mm = collect(grid.y) .* 1e3
@@ -264,6 +330,11 @@ function _voxel_points_3d(mask::AbstractArray{Bool, 3}, grid, cfg::PAMConfig3D)
     )
 end
 
+"""
+    save_best_threshold_volume_3d(path, intensity, grid, cfg, sources; threshold, truth_radius)
+
+Save a 3D scatter visualization of the best thresholded HASA volume.
+"""
 function save_best_threshold_volume_3d(path, intensity, grid, cfg, sources; threshold::Real, truth_radius::Real)
     local_ref = max(maximum(Float64.(intensity)), eps(Float64))
     pred_mask = intensity .>= Float64(threshold) * local_ref
@@ -340,6 +411,11 @@ function save_best_threshold_volume_3d(path, intensity, grid, cfg, sources; thre
     )
 end
 
+"""
+    save_napari_npz_3d(out_dir, pam_geo, pam_hasa, c, rho, grid, cfg, sources; truth_radius)
+
+Export 3D PAM volumes, medium data, source markers, and a napari launcher script.
+"""
 function save_napari_npz_3d(out_dir, pam_geo, pam_hasa, c, rho, grid, cfg, sources; truth_radius)
     np = PythonCall.pyimport("numpy")
 

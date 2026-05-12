@@ -1,3 +1,9 @@
+"""
+    _pam_reference_sound_speed(c, cfg, sources; margin=10e-3)
+
+Estimate a representative 3D sound speed in m/s over the receiver-to-source
+depth range used by reconstruction.
+"""
 function _pam_reference_sound_speed(
     c::AbstractArray{<:Real, 3},
     cfg::PAMConfig3D,
@@ -12,6 +18,11 @@ function _pam_reference_sound_speed(
     return mean(Float64.(view(c, row_start:row_stop, :, :)))
 end
 
+"""
+    _zero_pad_receiver_rf_3d(rf, target_ny, target_nz)
+
+Center-pad 3D receiver RF data laterally and return Y/Z crop ranges.
+"""
 function _zero_pad_receiver_rf_3d(rf::AbstractArray{<:Real, 3}, target_ny::Int, target_nz::Int)
     ny, nz, nt = size(rf)
     target_ny >= ny || error("target_ny must be >= current Ny.")
@@ -27,6 +38,11 @@ function _zero_pad_receiver_rf_3d(rf::AbstractArray{<:Real, 3}, target_ny::Int, 
     return out, range_y, range_z
 end
 
+"""
+    _edge_pad_lateral_3d(a, target_ny, target_nz)
+
+Pad a 3D field laterally by repeating edge planes and return crop ranges.
+"""
 function _edge_pad_lateral_3d(a::AbstractArray{<:Real, 3}, target_ny::Int, target_nz::Int)
     nx, ny, nz = size(a)
     target_ny >= ny || error("target_ny must be >= current Ny.")
@@ -58,6 +74,11 @@ function _edge_pad_lateral_3d(a::AbstractArray{<:Real, 3}, target_ny::Int, targe
     return out, range_y, range_z
 end
 
+"""
+    _ifftshift_2d!(a)
+
+In-place 2D inverse FFT shift used for lateral spectral operators.
+"""
 function _ifftshift_2d!(a::AbstractMatrix)
     ny, nz = size(a)
     sy = -fld(ny, 2)
@@ -65,11 +86,21 @@ function _ifftshift_2d!(a::AbstractMatrix)
     circshift!(similar(a), a, (sy, sz))
 end
 
+"""
+    _ifftshift_2d(a)
+
+Return a 2D inverse FFT shift of a lateral spectral operator.
+"""
 function _ifftshift_2d(a::AbstractMatrix)
     ny, nz = size(a)
     return circshift(a, (-fld(ny, 2), -fld(nz, 2)))
 end
 
+"""
+    _tukey_radial(k_radii, k_max, ratio)
+
+Return a radial Tukey taper for 3D lateral wavenumber magnitudes.
+"""
 function _tukey_radial(k_radii::AbstractMatrix, k_max::Real, ratio::Real)
     w = ones(Float64, size(k_radii))
     k_max > 0 || return w
@@ -87,6 +118,11 @@ function _tukey_radial(k_radii::AbstractMatrix, k_max::Real, ratio::Real)
     return w
 end
 
+"""
+    _select_frequency_bins_3d(rf, dt, frequencies; bandwidth=0.0)
+
+Resolve reconstruction frequencies in Hz and FFT bin indices for 3D RF data.
+"""
 function _select_frequency_bins_3d(
     rf::AbstractArray{<:Real, 3},
     dt::Real,
@@ -97,6 +133,11 @@ function _select_frequency_bins_3d(
     return _select_frequency_bins(reshape(rf, :, nt), dt, frequencies; bandwidth=bandwidth)
 end
 
+"""
+    _apply_axial_gain_3d!(intensity, cfg)
+
+Apply the configured depth-dependent axial gain to a 3D PAM intensity volume.
+"""
 function _apply_axial_gain_3d!(intensity::AbstractArray{<:Real, 3}, cfg::PAMConfig3D)
     power = Float64(cfg.axial_gain_power)
     power == 0.0 && return intensity
@@ -108,6 +149,12 @@ function _apply_axial_gain_3d!(intensity::AbstractArray{<:Real, 3}, cfg::PAMConf
     return intensity
 end
 
+"""
+    PAMCUDASetup3D
+
+Precomputed 3D CUDA arrays and reconstruction metadata shared across one or
+more PAM GPU window batches.
+"""
 struct PAMCUDASetup3D
     eta_yznx_d         # (padded_ny, padded_nz, nx) Float32 — speed-contrast field
     prop_d1            # (padded_ny, padded_nz, nfreq) ComplexF32 — propagator, un-tiled
@@ -129,6 +176,11 @@ struct PAMCUDASetup3D
     setup_s::Float64
 end
 
+"""
+    _pam_cuda_setup_3d(c_padded, cfg, selected_freqs, selected_bins, crop_range_y, crop_range_z, nx, padded_ny, padded_nz, rr, row_stop, c0, effective_axial_step, axial_substeps)
+
+Precompute 3D CUDA propagation operators for the selected frequencies.
+"""
 function _pam_cuda_setup_3d(
     c_padded::AbstractArray{<:Real, 3},
     cfg::PAMConfig3D,
@@ -210,9 +262,12 @@ function _pam_cuda_setup_3d(
     )
 end
 
-# Each thread handles one (iy, iz) lateral index.
-# intensity: (ny, nz, W, nx); src: (padded_ny, padded_nz, nfreq, W)
-# row: axial row index (1-based) into intensity
+"""
+    _accum_abs2_sum_batched_3d!(intensity, src, nfreq_per_w, row, crop_y0, crop_z0)
+
+CUDA kernel that accumulates batched 3D frequency-plane `abs2` sums into one
+axial row of the cropped intensity volume.
+"""
 function _accum_abs2_sum_batched_3d!(intensity, src, nfreq_per_w, row, crop_y0, crop_z0)
     i = CUDA.threadIdx().x + (CUDA.blockIdx().x - 1) * CUDA.blockDim().x
     ny = size(intensity, 1)
@@ -234,6 +289,12 @@ function _accum_abs2_sum_batched_3d!(intensity, src, nfreq_per_w, row, crop_y0, 
     return
 end
 
+"""
+    _reconstruct_pam_cuda_3d(setup, rf_windows, t0_windows, corrected, recon_label, show_progress, benchmark)
+
+Run one 3D CUDA reconstruction batch and return raw intensity volumes plus
+timing metadata.
+"""
 function _reconstruct_pam_cuda_3d(
     setup::PAMCUDASetup3D,
     rf_windows::AbstractVector{<:AbstractArray{<:Real, 3}},
@@ -435,6 +496,11 @@ function _reconstruct_pam_cuda_3d(
     return raws, timing
 end
 
+"""
+    _reconstruct_pam_cpu_3d(c_padded, rf, cfg, selected_freqs, selected_bins, crop_range_y, crop_range_z, padded_ny, padded_nz, rr, row_stop, c0, effective_axial_step, axial_substeps, corrected, t0, recon_label, show_progress)
+
+Run the CPU fallback for a single 3D PAM reconstruction window.
+"""
 function _reconstruct_pam_cpu_3d(
     c_padded::AbstractArray{<:Real, 3},
     rf::AbstractArray{<:Real, 3},
@@ -571,6 +637,15 @@ function _reconstruct_pam_cpu_3d(
     return [intensity], timing
 end
 
+"""
+    reconstruct_pam_3d(rf, c, cfg; kwargs...)
+
+Reconstruct a 3D PAM intensity volume from receiver RF data and a sound-speed
+volume.
+
+`rf` has shape `(Ny, Nz, Nt)`, `c` is in m/s, frequencies are in Hz, and
+`time_origin` is in seconds. Returns `(intensity, grid, info)`.
+"""
 function reconstruct_pam_3d(
     rf::AbstractArray{<:Real, 3},
     c::AbstractArray{<:Real, 3},
@@ -670,6 +745,12 @@ function reconstruct_pam_3d(
     return intensity, grid, info
 end
 
+"""
+    reconstruct_pam_windowed_3d(rf, c, cfg; kwargs...)
+
+Run CUDA-backed 3D PAM reconstruction over temporal RF windows and average
+qualifying window intensities.
+"""
 function reconstruct_pam_windowed_3d(
     rf::AbstractArray{<:Real, 3},
     c::AbstractArray{<:Real, 3},

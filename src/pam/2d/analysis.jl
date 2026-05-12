@@ -1,3 +1,8 @@
+"""
+    _connected_component(mask, seed)
+
+Return the 4-connected true pixels reachable from `seed` in a `BitMatrix`.
+"""
 function _connected_component(mask::BitMatrix, seed::Tuple{Int, Int})
     mask[seed...] || return Tuple{Int, Int}[]
     rows, cols = size(mask)
@@ -23,6 +28,11 @@ function _connected_component(mask::BitMatrix, seed::Tuple{Int, Int})
     return component
 end
 
+"""
+    _peak_fwhm_mm(intensity, kgrid, cfg, idx)
+
+Estimate axial and lateral full width at half maximum around a peak, in mm.
+"""
 function _peak_fwhm_mm(intensity::AbstractMatrix{<:Real}, kgrid::KGrid2D, cfg::PAMConfig, idx::Tuple{Int, Int})
     peak = Float64(intensity[idx...])
     peak <= 0.0 && return 0.0, 0.0
@@ -40,6 +50,11 @@ function _peak_fwhm_mm(intensity::AbstractMatrix{<:Real}, kgrid::KGrid2D, cfg::P
     return axial_fwhm, lateral_fwhm
 end
 
+"""
+    _best_assignment(cost)
+
+Solve a small square assignment problem by exhaustive branch-and-bound search.
+"""
 function _best_assignment(cost::AbstractMatrix{<:Real})
     n_rows, n_cols = size(cost)
     n_rows == n_cols || error("Cost matrix must be square for assignment.")
@@ -49,6 +64,11 @@ function _best_assignment(cost::AbstractMatrix{<:Real})
     used = falses(n_cols)
     current = Vector{Int}(undef, n_rows)
 
+    """
+        recurse(row, running)
+
+    Search remaining assignment rows while pruning branches above the best cost.
+    """
     function recurse(row::Int, running::Float64)
         if row > n_rows
             if running < best_cost[]
@@ -73,6 +93,12 @@ function _best_assignment(cost::AbstractMatrix{<:Real})
     return best_perm, best_cost[]
 end
 
+"""
+    find_pam_peaks(intensity, kgrid, cfg; n_peaks, suppression_radius=cfg.peak_suppression_radius)
+
+Find the strongest 2D PAM peaks below the receiver row while suppressing
+nearby detections within a physical radius in meters.
+"""
 function find_pam_peaks(
     intensity::AbstractMatrix{<:Real},
     kgrid::KGrid2D,
@@ -108,6 +134,11 @@ function find_pam_peaks(
     return peaks
 end
 
+"""
+    _default_psf_widths(cfg, kgrid, frequencies; characteristic_depth=30e-3)
+
+Estimate default axial and lateral Gaussian PSF widths in meters.
+"""
 function _default_psf_widths(
     cfg::PAMConfig,
     kgrid::KGrid2D,
@@ -139,6 +170,11 @@ function _default_psf_widths(
     return max(axial, 2 * cfg.dx), max(lateral, 2 * cfg.dz)
 end
 
+"""
+    pam_truth_mask(sources, kgrid, cfg; radius=cfg.success_tolerance)
+
+Rasterize circular 2D truth regions around sources using `radius` in meters.
+"""
 function pam_truth_mask(
     sources::AbstractVector{<:EmissionSource2D},
     kgrid::KGrid2D,
@@ -175,6 +211,11 @@ function pam_truth_mask(
     return mask
 end
 
+"""
+    _mark_centerline_segment!(mask, depth, lateral, cfg, d0, l0, d1, l1, radius_m)
+
+Mark all cells within `radius_m` meters of one 2D centerline segment.
+"""
 function _mark_centerline_segment!(
     mask::BitMatrix,
     depth::AbstractVector{<:Real},
@@ -212,6 +253,11 @@ function _mark_centerline_segment!(
     return mask
 end
 
+"""
+    pam_centerline_truth_mask(centerlines, kgrid, cfg; radius=cfg.success_tolerance)
+
+Rasterize 2D tubular truth regions around centerline polylines.
+"""
 function pam_centerline_truth_mask(
     centerlines::AbstractVector,
     kgrid::KGrid2D,
@@ -235,7 +281,18 @@ function pam_centerline_truth_mask(
     return mask
 end
 
+"""
+    _source_activity_weight(src::PointSource2D)
+
+Return the nonnegative activity weight for a 2D point source.
+"""
 _source_activity_weight(src::PointSource2D) = abs(src.amplitude)
+
+"""
+    _source_activity_weight(src::BubbleCluster2D)
+
+Return the nonnegative activity weight for a 2D bubble cluster.
+"""
 _source_activity_weight(src::BubbleCluster2D) = abs(src.amplitude)
 
 """
@@ -262,6 +319,11 @@ function pam_source_map(
     return source_map
 end
 
+"""
+    _gaussian_kernel_cells(sigma)
+
+Return a normalized one-dimensional Gaussian kernel with `sigma` in cells.
+"""
 function _gaussian_kernel_cells(σ::Real)
     sigma = Float64(σ)
     sigma > 0 || return [1.0]
@@ -271,6 +333,11 @@ function _gaussian_kernel_cells(σ::Real)
     return kernel
 end
 
+"""
+    _convolve_axis_zero(a, kernel, axis)
+
+Convolve a matrix along one axis using zero padding outside the array.
+"""
 function _convolve_axis_zero(a::AbstractMatrix{<:Real}, kernel::AbstractVector{<:Real}, axis::Int)
     axis in (1, 2) || error("axis must be 1 or 2.")
     out = zeros(Float64, size(a))
@@ -338,6 +405,11 @@ function pam_psf_blur(
     return blurred
 end
 
+"""
+    pam_psf_blurred_truth_map(sources, kgrid, cfg; kwargs...)
+
+Build a source activity map and blur it by the estimated or supplied 2D PSF.
+"""
 function pam_psf_blurred_truth_map(
     sources::AbstractVector{<:EmissionSource2D},
     kgrid::KGrid2D,
@@ -358,6 +430,11 @@ function pam_psf_blurred_truth_map(
     )
 end
 
+"""
+    threshold_pam_map(intensity, cfg; threshold_ratio=0.2)
+
+Return a 2D Boolean activity mask thresholded relative to the map maximum.
+"""
 function threshold_pam_map(
     intensity::AbstractMatrix{<:Real},
     cfg::PAMConfig;
@@ -374,6 +451,12 @@ function threshold_pam_map(
     return mask
 end
 
+"""
+    pam_intensity_metrics(intensity, kgrid, cfg; threshold_ratio=0.2, reference_intensity=nothing)
+
+Compute scalar 2D PAM intensity metrics, including peak, area, and centroid
+values in physical units.
+"""
 function pam_intensity_metrics(
     intensity::AbstractMatrix{<:Real},
     kgrid::KGrid2D,
@@ -427,6 +510,11 @@ function pam_intensity_metrics(
     )
 end
 
+"""
+    _component_overlap_counts(mask, reference)
+
+Count connected components in `mask` and how many overlap `reference`.
+"""
 function _component_overlap_counts(mask::BitMatrix, reference::BitMatrix)
     size(mask) == size(reference) || error("Component masks must have the same size.")
     rows, cols = size(mask)
@@ -461,14 +549,29 @@ function _component_overlap_counts(mask::BitMatrix, reference::BitMatrix)
     return total, overlapping, total - overlapping
 end
 
+"""
+    _safe_fraction(num, den)
+
+Return `num / den` as `Float64`, or zero for nonpositive denominators.
+"""
 _safe_fraction(num::Real, den::Real) = den > 0 ? Float64(num) / Float64(den) : 0.0
 
+"""
+    _valid_reconstruction_mask(kgrid, cfg)
+
+Return a Boolean mask for 2D reconstruction cells below the receiver row.
+"""
 function _valid_reconstruction_mask(kgrid::KGrid2D, cfg::PAMConfig)
     valid = trues(kgrid.Nx, kgrid.Ny)
     valid[1:receiver_row(cfg), :] .= false
     return valid
 end
 
+"""
+    _weighted_centroid_spread_mm(weights, kgrid, cfg; valid_mask=nothing)
+
+Compute weighted centroid and spread values in millimeters over valid cells.
+"""
 function _weighted_centroid_spread_mm(
     weights::AbstractMatrix{<:Real},
     kgrid::KGrid2D,
@@ -512,6 +615,11 @@ function _weighted_centroid_spread_mm(
     return centroid_depth * 1e3, centroid_lateral * 1e3, axial_spread_mm, lateral_spread_mm
 end
 
+"""
+    _unit_sum_map(a, valid_mask)
+
+Clamp a map to nonnegative values, zero invalid cells, and normalize to unit sum.
+"""
 function _unit_sum_map(a::AbstractMatrix{<:Real}, valid_mask::AbstractMatrix{Bool})
     size(a) == size(valid_mask) || error("map and valid_mask must have the same size.")
     out = max.(Float64.(a), 0.0)
@@ -521,6 +629,11 @@ function _unit_sum_map(a::AbstractMatrix{<:Real}, valid_mask::AbstractMatrix{Boo
     return out
 end
 
+"""
+    _pearson_correlation(a, b)
+
+Return the Pearson correlation of equal-length vectors, or `NaN` if undefined.
+"""
 function _pearson_correlation(a::AbstractVector{<:Real}, b::AbstractVector{<:Real})
     length(a) == length(b) || error("correlation vectors must have the same length.")
     isempty(a) && return NaN
@@ -533,6 +646,11 @@ function _pearson_correlation(a::AbstractVector{<:Real}, b::AbstractVector{<:Rea
     return sum(da .* db) / den
 end
 
+"""
+    _global_ssim_like(a, b)
+
+Return a global SSIM-like similarity score for equal-length vectors.
+"""
 function _global_ssim_like(a::AbstractVector{<:Real}, b::AbstractVector{<:Real})
     length(a) == length(b) || error("SSIM vectors must have the same length.")
     isempty(a) && return NaN
@@ -551,6 +669,11 @@ function _global_ssim_like(a::AbstractVector{<:Real}, b::AbstractVector{<:Real})
            ((μa^2 + μb^2 + c1) * (σa2 + σb2 + c2))
 end
 
+"""
+    _psf_target_similarity_metrics(intensity, target, kgrid, cfg)
+
+Compare a 2D PAM intensity map with a PSF-blurred target map over valid cells.
+"""
 function _psf_target_similarity_metrics(
     intensity::AbstractMatrix{<:Real},
     target::AbstractMatrix{<:Real},
@@ -574,6 +697,12 @@ function _psf_target_similarity_metrics(
     )
 end
 
+"""
+    analyse_pam_detection_2d(intensity, kgrid, cfg, sources; kwargs...)
+
+Compute 2D activity-region detection metrics against source or supplied truth
+masks.
+"""
 function analyse_pam_detection_2d(
     intensity::AbstractMatrix{<:Real},
     kgrid::KGrid2D,
@@ -706,6 +835,11 @@ function analyse_pam_detection_2d(
     )
 end
 
+"""
+    threshold_detection_stats(intensity, kgrid, cfg, sources; threshold_ratios, truth_radius, truth_mask, frequencies)
+
+Run 2D detection analysis for each threshold ratio and return metric entries.
+"""
 function threshold_detection_stats(intensity, kgrid, cfg, sources; threshold_ratios, truth_radius, truth_mask, frequencies)
     return [
         merge(
@@ -725,6 +859,12 @@ function threshold_detection_stats(intensity, kgrid, cfg, sources; threshold_rat
     ]
 end
 
+"""
+    analyse_pam_2d(intensity, kgrid, cfg, sources; kwargs...)
+
+Match reconstructed 2D PAM peaks to source locations and report localization
+errors in millimeters.
+"""
 function analyse_pam_2d(
     intensity::AbstractMatrix{<:Real},
     kgrid::KGrid2D,
@@ -798,4 +938,3 @@ function analyse_pam_2d(
         :mean_lateral_fwhm_mm => mean(lateral_fwhm_mm),
     )
 end
-

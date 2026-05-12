@@ -1,5 +1,10 @@
 # CLI/config parsing helpers for PAM runner scripts.
 
+"""
+    CLIOption(; name, default, value="string", category="General", applies_to="PAM", choices=String[], description="")
+
+Metadata entry for one `scripts/run_pam.jl` command-line option.
+"""
 Base.@kwdef struct CLIOption
     name::String
     default::String
@@ -10,6 +15,11 @@ Base.@kwdef struct CLIOption
     description::String = ""
 end
 
+"""
+    _cli_option(name, default, value, category, applies_to, description; choices=String[])
+
+Construct a `CLIOption` with compact positional metadata arguments.
+"""
 function _cli_option(name, default, value, category, applies_to, description; choices=String[])
     return CLIOption(
         name=name,
@@ -22,6 +32,11 @@ function _cli_option(name, default, value, category, applies_to, description; ch
     )
 end
 
+"""
+    pam_cli_options()
+
+Return ordered metadata for all PAM CLI options.
+"""
 function pam_cli_options()
     return CLIOption[
         _cli_option("dimension", "2", "2|3", "General", "PAM", "Selects the 2D or 3D PAM workflow."; choices=["2", "3"]),
@@ -125,10 +140,20 @@ function pam_cli_options()
     ]
 end
 
+"""
+    pam_cli_defaults()
+
+Return a dictionary of PAM CLI option names to their default string values.
+"""
 function pam_cli_defaults()
     return Dict(option.name => option.default for option in pam_cli_options())
 end
 
+"""
+    parse_cli(args)
+
+Parse `--name=value` PAM CLI arguments and return `(opts, provided_keys)`.
+"""
 function parse_cli(args)
     opts = pam_cli_defaults()
 
@@ -144,9 +169,25 @@ function parse_cli(args)
     return opts, provided_keys
 end
 
+"""
+    slug_value(x; digits=1)
+
+Format a numeric value for use in filesystem-safe output directory names.
+"""
 slug_value(x; digits::Int=1) = replace(string(round(Float64(x); digits=digits)), "-" => "m", "." => "p")
+
+"""
+    parse_bool(s)
+
+Parse common truthy strings used by PAM CLI boolean options.
+"""
 parse_bool(s::AbstractString) = lowercase(strip(s)) in ("1", "true", "yes", "on")
 
+"""
+    parse_dimension(s)
+
+Parse the PAM CLI dimension selector as integer `2` or `3`.
+"""
 function parse_dimension(s::AbstractString)
     value = strip(s)
     value in ("2", "2d", "2D") && return 2
@@ -154,16 +195,31 @@ function parse_dimension(s::AbstractString)
     error("--dimension must be 2 or 3, got: $s")
 end
 
+"""
+    parse_float_list(spec)
+
+Parse a comma-separated list of floating-point values.
+"""
 function parse_float_list(spec::AbstractString)
     isempty(strip(spec)) && return Float64[]
     return [parse(Float64, strip(item)) for item in split(spec, ",") if !isempty(strip(item))]
 end
 
+"""
+    parse_int_list(spec)
+
+Parse a comma-separated list of integer values.
+"""
 function parse_int_list(spec::AbstractString)
     isempty(strip(spec)) && return Int[]
     return [parse(Int, strip(item)) for item in split(spec, ",") if !isempty(strip(item))]
 end
 
+"""
+    parse_threshold_ratios(spec)
+
+Parse, validate, de-duplicate, and sort positive threshold ratios.
+"""
 function parse_threshold_ratios(spec::AbstractString)
     ratios = parse_float_list(spec)
     isempty(ratios) && error("At least one threshold ratio is required.")
@@ -171,6 +227,11 @@ function parse_threshold_ratios(spec::AbstractString)
     return sort(unique(ratios))
 end
 
+"""
+    parse_threshold_search_ratios(opts)
+
+Build the automatic dense threshold-search grid from CLI options.
+"""
 function parse_threshold_search_ratios(opts)
     min_ratio = parse(Float64, opts["auto-threshold-min"])
     max_ratio = parse(Float64, opts["auto-threshold-max"])
@@ -186,12 +247,22 @@ function parse_threshold_search_ratios(opts)
     return sort(unique(ratios))
 end
 
+"""
+    parse_source_model(s)
+
+Parse and validate the PAM source-model selector.
+"""
 function parse_source_model(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
     value in (:point, :squiggle, :network) || error("--source-model must be point, squiggle, or network, got: $s")
     return value
 end
 
+"""
+    apply_model_defaults!(opts, provided_keys)
+
+Apply dimension- and source-model-specific CLI defaults to `opts` in place.
+"""
 function apply_model_defaults!(opts, provided_keys::Set{String})
     dimension = parse_dimension(opts["dimension"])
     if dimension == 3
@@ -237,18 +308,33 @@ function apply_model_defaults!(opts, provided_keys::Set{String})
     return opts
 end
 
+"""
+    parse_aberrator(s)
+
+Parse and validate the PAM medium aberrator selector.
+"""
 function parse_aberrator(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
     value in (:none, :water, :skull) || error("Unknown aberrator: $s")
     return value
 end
 
+"""
+    parse_simulation_backend(s)
+
+Parse and validate the PAM forward-simulation backend selector.
+"""
 function parse_simulation_backend(s::AbstractString)
     value = Symbol(lowercase(strip(s)))
     value in (:analytic, :kwave) || error("Unknown --simulation-backend: $s (must be analytic or kwave)")
     return value
 end
 
+"""
+    parse_source_phase_mode(s)
+
+Parse and validate source phase behavior across reconstruction windows.
+"""
 function parse_source_phase_mode(s::AbstractString)
     value = Symbol(replace(lowercase(strip(s)), "-" => "_"))
     value in (:coherent, :random_static_phase, :random_phase_per_window) ||
@@ -256,10 +342,20 @@ function parse_source_phase_mode(s::AbstractString)
     return value
 end
 
+"""
+    parse_source_variability(opts)
+
+Parse source variability settings from CLI options.
+"""
 parse_source_variability(opts) = SourceVariabilityConfig(
     frequency_jitter_fraction=parse(Float64, opts["frequency-jitter-percent"]) / 100.0,
 )
 
+"""
+    source_variability_from_summary(summary)
+
+Recover source variability settings from a cached run summary.
+"""
 function source_variability_from_summary(summary)
     if isnothing(summary) || !hasproperty(summary, :source_variability)
         return SourceVariabilityConfig()
@@ -271,6 +367,11 @@ function source_variability_from_summary(summary)
     return SourceVariabilityConfig()
 end
 
+"""
+    parse_analysis_mode(s, source_model)
+
+Resolve `auto`, localization, or detection analysis mode for a source model.
+"""
 function parse_analysis_mode(s::AbstractString, source_model::Symbol)
     value = Symbol(lowercase(strip(s)))
     value == :auto && return source_model in (:squiggle, :network) ? :detection : :localization
@@ -278,9 +379,19 @@ function parse_analysis_mode(s::AbstractString, source_model::Symbol)
     return value
 end
 
+"""
+    resolve_reconstruction_mode(s, source_model)
+
+Resolve the CLI reconstruction mode using the package PAM mode rules.
+"""
 resolve_reconstruction_mode(s::AbstractString, source_model::Symbol) =
     TranscranialFUS.pam_reconstruction_mode(s, source_model)
 
+"""
+    parse_window_taper(s)
+
+Parse and validate the CLI temporal-window taper selector.
+"""
 function parse_window_taper(s::AbstractString)
     value = Symbol(replace(lowercase(strip(s)), "-" => "_"))
     value in (:hann, :none, :rect, :rectangular, :tukey) ||
@@ -288,6 +399,11 @@ function parse_window_taper(s::AbstractString)
     return value
 end
 
+"""
+    make_window_config(opts, reconstruction_mode)
+
+Build a `PAMWindowConfig` from parsed CLI options.
+"""
 function make_window_config(opts, reconstruction_mode::Symbol)
     return PAMWindowConfig(
         enabled=reconstruction_mode == :windowed,
@@ -299,18 +415,33 @@ function make_window_config(opts, reconstruction_mode::Symbol)
     )
 end
 
+"""
+    parse_receiver_aperture_mm(s)
+
+Parse a receiver aperture in millimeters, or return `nothing` for full aperture.
+"""
 function parse_receiver_aperture_mm(s::AbstractString)
     value = lowercase(strip(s))
     value in ("none", "full", "all") && return nothing
     return parse(Float64, value) * 1e-3
 end
 
+"""
+    parse_transducer_mm(s)
+
+Parse a 2D transducer coordinate `depth_mm:lateral_mm` into meters.
+"""
 function parse_transducer_mm(s::AbstractString)
     parts = split(strip(s), ":"; limit=2)
     length(parts) == 2 || error("--transducer-mm must be depth_mm:lateral_mm, got: $s")
     return parse(Float64, strip(parts[1])) * 1e-3, parse(Float64, strip(parts[2])) * 1e-3
 end
 
+"""
+    default_output_dir(opts, sources, cfg, emission_meta)
+
+Construct the default output directory path for a new PAM run.
+"""
 function default_output_dir(opts, sources, cfg, emission_meta)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     source_model = lowercase(String(emission_meta["source_model"]))
@@ -346,12 +477,22 @@ function default_output_dir(opts, sources, cfg, emission_meta)
     return joinpath(pwd(), "outputs", join(parts, "_"))
 end
 
+"""
+    default_reconstruction_output_dir(source_dir)
+
+Construct the default output directory path for a cached reconstruction run.
+"""
 function default_reconstruction_output_dir(source_dir::AbstractString)
     timestamp = Dates.format(Dates.now(), "yyyymmdd_HHMMSS")
     source_name = basename(normpath(source_dir))
     return joinpath(pwd(), "outputs", "$(timestamp)_reconstruct_$(source_name)")
 end
 
+"""
+    reject_cached_simulation_options!(provided_keys, blocked_keys)
+
+Reject CLI options that would invalidate cached simulation inputs.
+"""
 function reject_cached_simulation_options!(provided_keys::Set{String}, blocked_keys)
     illegal = sort(collect(intersect(provided_keys, Set(blocked_keys))))
     isempty(illegal) && return nothing

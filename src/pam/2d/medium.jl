@@ -1,3 +1,8 @@
+"""
+    _resample_pam_slice(slice, spacing_row_mm, spacing_col_mm, new_row_mm, new_col_mm)
+
+Resample a 2D CT slice from millimeter pixel spacing to PAM grid spacing.
+"""
 function _resample_pam_slice(
     slice::AbstractMatrix{<:Real},
     spacing_row_mm::Float64,
@@ -21,6 +26,12 @@ function _resample_pam_slice(
     return out
 end
 
+"""
+    _load_pam_ct(hu_vol, spacing_m, ct_path)
+
+Return CT Hounsfield data and voxel spacing, loading from `ct_path` when no
+preloaded volume is supplied.
+"""
 function _load_pam_ct(
     hu_vol::Union{Nothing, AbstractArray{<:Real, 3}},
     spacing_m::Union{Nothing, NTuple{3, <:Real}},
@@ -34,6 +45,14 @@ function _load_pam_ct(
     return hu_vol, spacing_m
 end
 
+"""
+    make_pam_medium(cfg; aberrator=:none, kwargs...)
+
+Build 2D sound-speed and density maps for a PAM configuration.
+
+Returns `(c, rho, info)`, where `c` is in m/s, `rho` is in kg/m^3, and `info`
+describes the homogeneous or skull-backed medium construction.
+"""
 function make_pam_medium(
     cfg::PAMConfig;
     aberrator::Symbol=:none,
@@ -131,4 +150,3 @@ function make_pam_medium(
 
     error("Unknown PAM medium aberrator: $aberrator")
 end
-

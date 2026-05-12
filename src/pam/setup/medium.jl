@@ -1,5 +1,10 @@
 # Simulation defaults and lightweight analytic helpers for PAM runner scripts.
 
+"""
+    default_simulation_info(cfg::PAMConfig)
+
+Return default 2D simulation metadata for workflows without k-Wave output.
+"""
 function default_simulation_info(cfg::PAMConfig)
     return Dict{Symbol, Any}(
         :receiver_row => receiver_row(cfg),
@@ -8,6 +13,11 @@ function default_simulation_info(cfg::PAMConfig)
     )
 end
 
+"""
+    default_simulation_info(cfg::PAMConfig3D)
+
+Return default 3D simulation metadata for workflows without k-Wave output.
+"""
 function default_simulation_info(cfg::PAMConfig3D)
     return Dict{Symbol, Any}(
         :receiver_row => receiver_row(cfg),
@@ -17,6 +27,11 @@ function default_simulation_info(cfg::PAMConfig3D)
     )
 end
 
+"""
+    default_recon_frequencies(sources)
+
+Return sorted unique emission frequencies in Hz for a source collection.
+"""
 function default_recon_frequencies(sources)
     freqs = Float64[]
     for src in sources
@@ -25,6 +40,11 @@ function default_recon_frequencies(sources)
     return sort(unique(freqs))
 end
 
+"""
+    _sample_source_signal(signal, t, dt)
+
+Linearly sample a discrete source signal at physical time `t` seconds.
+"""
 function _sample_source_signal(signal::AbstractVector{<:Real}, t::Real, dt::Real)
     u = Float64(t) / Float64(dt) + 1.0
     i0 = floor(Int, u)
@@ -35,6 +55,11 @@ function _sample_source_signal(signal::AbstractVector{<:Real}, t::Real, dt::Real
     return (1.0 - frac) * Float64(signal[i0]) + frac * Float64(signal[i0 + 1])
 end
 
+"""
+    analytic_rf_for_point_sources_3d(cfg, sources)
+
+Generate a lightweight analytic 3D receiver RF field for point-like sources.
+"""
 function analytic_rf_for_point_sources_3d(cfg::PAMConfig3D, sources::AbstractVector{<:EmissionSource3D})
     grid = pam_grid_3d(cfg)
     ny, nz, nt = pam_Ny(cfg), pam_Nz(cfg), pam_Nt(cfg)

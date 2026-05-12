@@ -1,5 +1,17 @@
+"""
+    EmissionSource3D
+
+Abstract supertype for 3D PAM acoustic emission source models.
+"""
 abstract type EmissionSource3D end
 
+"""
+    PointSource3D(; depth, lateral_y=0.0, lateral_z=0.0, frequency=0.5e6, kwargs...)
+
+Single 3D tone-burst emitter.
+
+Coordinates are in meters, `frequency` is in Hz, and `delay` is in seconds.
+"""
 Base.@kwdef struct PointSource3D <: EmissionSource3D
     depth::Float64
     lateral_y::Float64 = 0.0
@@ -11,6 +23,14 @@ Base.@kwdef struct PointSource3D <: EmissionSource3D
     num_cycles::Float64 = 5.0
 end
 
+"""
+    BubbleCluster3D(; depth, lateral_y=0.0, lateral_z=0.0, fundamental=5e5, kwargs...)
+
+Harmonic 3D bubble-cluster emitter used by squiggle and network source models.
+
+Coordinates are in meters, frequencies are in Hz, and `gate_duration` and
+`delay` are in seconds.
+"""
 Base.@kwdef struct BubbleCluster3D <: EmissionSource3D
     depth::Float64
     lateral_y::Float64 = 0.0
@@ -25,13 +45,46 @@ Base.@kwdef struct BubbleCluster3D <: EmissionSource3D
     delay::Float64 = 0.0
 end
 
+"""
+    _emission_frequencies(src::PointSource3D)
+
+Return the tone-burst frequency for a 3D point source in Hz.
+"""
 _emission_frequencies(src::PointSource3D) = [src.frequency]
+
+"""
+    _emission_frequencies(src::BubbleCluster3D)
+
+Return all harmonic emission frequencies for a 3D bubble cluster in Hz.
+"""
 _emission_frequencies(src::BubbleCluster3D) = Float64[n * src.fundamental for n in src.harmonics]
+
+"""
+    emission_frequencies(src::EmissionSource3D)
+
+Return the physical emission frequencies represented by a 3D source.
+"""
 emission_frequencies(src::EmissionSource3D) = _emission_frequencies(src)
 
+"""
+    _source_duration(src::PointSource3D)
+
+Return the active tone-burst duration for a 3D point source in seconds.
+"""
 _source_duration(src::PointSource3D) = src.num_cycles / src.frequency
+
+"""
+    _source_duration(src::BubbleCluster3D)
+
+Return the active gate duration for a 3D bubble cluster in seconds.
+"""
 _source_duration(src::BubbleCluster3D) = src.gate_duration
 
+"""
+    _source_signal(nt, dt, src::PointSource3D; taper_ratio=0.25)
+
+Generate a 3D point-source tone burst with `nt` samples and `dt` seconds.
+"""
 function _source_signal(nt::Int, dt::Real, src::PointSource3D; taper_ratio::Real=0.25)
     signal = zeros(Float64, nt)
     duration = src.num_cycles / src.frequency
@@ -43,6 +96,11 @@ function _source_signal(nt::Int, dt::Real, src::PointSource3D; taper_ratio::Real
     return signal
 end
 
+"""
+    _source_signal(nt, dt, src::BubbleCluster3D)
+
+Generate the time-domain emission signal for a harmonic 3D bubble cluster.
+"""
 function _source_signal(nt::Int, dt::Real, src::BubbleCluster3D)
     length(src.harmonics) == length(src.harmonic_amplitudes) ||
         error("BubbleCluster3D: harmonics and harmonic_amplitudes must have equal length.")
@@ -62,8 +120,11 @@ function _source_signal(nt::Int, dt::Real, src::BubbleCluster3D)
     return signal
 end
 
-# ── 3D centerline ─────────────────────────────────────────────────────────────
+"""
+    _squiggle_centerline_3d(anchor_depth, anchor_y, anchor_z; kwargs...)
 
+Construct a deterministic 3D squiggle centerline in physical coordinates.
+"""
 function _squiggle_centerline_3d(
     anchor_depth::Real,
     anchor_y::Real,
@@ -98,8 +159,11 @@ function _squiggle_centerline_3d(
     return points
 end
 
-# ── arc-length interpolation on a 3D polyline ────────────────────────────────
+"""
+    _interp_centerline_point_3d(centerline, distance)
 
+Interpolate a 3D centerline by arclength and return position plus unit tangent.
+"""
 function _interp_centerline_point_3d(centerline::AbstractVector{NTuple{3, Float64}}, distance::Real)
     length(centerline) >= 2 || error("Centerline must contain at least two points.")
     remaining = Float64(distance)
@@ -127,8 +191,11 @@ function _interp_centerline_point_3d(centerline::AbstractVector{NTuple{3, Float6
     return (d1, y1, z1, (d1 - d0) / seg_len, (y1 - y0) / seg_len, (z1 - z0) / seg_len)
 end
 
-# ── 3D sampler ────────────────────────────────────────────────────────────────
+"""
+    _within_bounds_3d(point, depth_bounds, y_bounds, z_bounds)
 
+Return whether a 3D point in meters lies inside the supplied physical bounds.
+"""
 function _within_bounds_3d(point::NTuple{3, Float64}, depth_bounds, y_bounds, z_bounds)
     depth, y, z = point
     return depth_bounds[1] <= depth <= depth_bounds[2] &&
@@ -136,6 +203,11 @@ function _within_bounds_3d(point::NTuple{3, Float64}, depth_bounds, y_bounds, z_
            z_bounds[1] <= z <= z_bounds[2]
 end
 
+"""
+    _far_enough_3d(point, points, min_separation)
+
+Return whether `point` is at least `min_separation` meters from all existing points.
+"""
 function _far_enough_3d(point::NTuple{3, Float64}, points::AbstractVector{NTuple{3, Float64}}, min_separation::Real)
     sep = Float64(min_separation)
     sep <= 0 && return true
@@ -146,6 +218,12 @@ function _far_enough_3d(point::NTuple{3, Float64}, points::AbstractVector{NTuple
     return true
 end
 
+"""
+    _sample_squiggle_centerlines_3d(centerlines; kwargs...)
+
+Sample candidate source positions along 3D centerlines with optional jitter,
+bounds filtering, separation filtering, and count limiting.
+"""
 function _sample_squiggle_centerlines_3d(
     centerlines::AbstractVector;
     source_spacing::Real,
@@ -211,8 +289,12 @@ function _sample_squiggle_centerlines_3d(
     return points
 end
 
-# ── geometric phase for 3D ────────────────────────────────────────────────────
+"""
+    _geometric_drive_phase_3d(depth, y, z, tx_depth, tx_y, tx_z, harmonic, fundamental, c0)
 
+Compute the propagation phase, in radians, for a 3D harmonic driven from a
+transducer point in meters at sound speed `c0` in m/s.
+"""
 function _geometric_drive_phase_3d(
     depth::Real, y::Real, z::Real,
     tx_depth::Real, tx_y::Real, tx_z::Real,
@@ -224,6 +306,12 @@ function _geometric_drive_phase_3d(
     return -2pi * Int(harmonic) * Float64(fundamental) * distance / Float64(c0)
 end
 
+"""
+    _cluster_harmonic_phases_3d(depth, y, z, harmonics, fundamental, c0, phase_mode, tx_depth, tx_y, tx_z, phase_jitter, rng)
+
+Generate one phase value, in radians, for each requested 3D bubble-cluster
+harmonic.
+"""
 function _cluster_harmonic_phases_3d(
     depth::Real, y::Real, z::Real,
     harmonics::AbstractVector{<:Integer},
@@ -250,8 +338,11 @@ function _cluster_harmonic_phases_3d(
     return phases
 end
 
-# ── phase resampling for per-window mode ─────────────────────────────────────
+"""
+    _resample_source_phases_3d(sources, rng)
 
+Return copies of 3D sources with randomized phases for stochastic windowed runs.
+"""
 function _resample_source_phases_3d(
     sources::AbstractVector{<:EmissionSource3D},
     rng::Random.AbstractRNG,
@@ -279,6 +370,12 @@ function _resample_source_phases_3d(
     end
 end
 
+"""
+    _expand_sources_per_window(sources, window_duration, hop, t_max, rng; variability=SourceVariabilityConfig())
+
+Expand 3D base sources into independently phased emissions for each temporal
+window over a recording of length `t_max` seconds.
+"""
 function _expand_sources_per_window(
     sources::AbstractVector{<:EmissionSource3D},
     window_duration::Real,
@@ -327,8 +424,6 @@ function _expand_sources_per_window(
     return expanded, n_frames
 end
 
-# ── factory ───────────────────────────────────────────────────────────────────
-
 """
     make_squiggle_bubble_sources_3d(anchors; kwargs...)
 
@@ -337,6 +432,9 @@ Generate harmonic bubble emitters along one 3D squiggly centerline per
 oscillates simultaneously in Y (squiggle_amplitude_y) and depth/X
 (squiggle_amplitude_x), with squiggle_phase_x offsetting the two oscillations
 so the path has genuine 3D curvature.
+
+Anchor coordinates and geometric keyword arguments are in meters, frequencies
+are in Hz, and durations/delays are in seconds. Returns `(sources, meta)`.
 """
 function make_squiggle_bubble_sources_3d(
     anchors::AbstractVector;
@@ -454,8 +552,11 @@ function make_squiggle_bubble_sources_3d(
     return clusters, meta
 end
 
-# ── Synthetic 3D vascular network ─────────────────────────────────────────────
+"""
+    _random_unit_vector_3d(rng)
 
+Draw a random unit vector in 3D.
+"""
 function _random_unit_vector_3d(rng::Random.AbstractRNG)
     v = randn(rng, 3)
     n = sqrt(v[1]^2 + v[2]^2 + v[3]^2)
@@ -463,21 +564,41 @@ function _random_unit_vector_3d(rng::Random.AbstractRNG)
     return (v[1] / n, v[2] / n, v[3] / n)
 end
 
+"""
+    _random_ellipsoid_direction_3d(rng, radii)
+
+Draw a random direction biased by ellipsoid radii in meters.
+"""
 function _random_ellipsoid_direction_3d(rng::Random.AbstractRNG, radii::NTuple{3, Float64})
     v = _random_unit_vector_3d(rng)
     return _normalize3((radii[1] * v[1], radii[2] * v[2], radii[3] * v[3]))
 end
 
+"""
+    _random_horizontal_direction_3d(rng)
+
+Draw a random direction biased toward lateral motion.
+"""
 function _random_horizontal_direction_3d(rng::Random.AbstractRNG)
     return _normalize3((0.2 * randn(rng), randn(rng), randn(rng)))
 end
 
+"""
+    _normalize3(v)
+
+Normalize a 3D vector, falling back to the axial unit vector for near-zero input.
+"""
 function _normalize3(v::NTuple{3, Float64})
     n = sqrt(v[1]^2 + v[2]^2 + v[3]^2)
     n > eps(Float64) || return (1.0, 0.0, 0.0)
     return (v[1] / n, v[2] / n, v[3] / n)
 end
 
+"""
+    _normalize_network_orientation(orientation)
+
+Normalize and validate the synthetic network orientation selector.
+"""
 function _normalize_network_orientation(orientation)
     value = Symbol(replace(lowercase(string(orientation)), "-" => "_"))
     value == :lateral && return :horizontal
@@ -487,6 +608,11 @@ function _normalize_network_orientation(orientation)
     return value
 end
 
+"""
+    _random_network_direction_3d(rng, radii, orientation)
+
+Draw a random branch direction for a synthetic 3D network.
+"""
 function _random_network_direction_3d(
     rng::Random.AbstractRNG,
     radii::NTuple{3, Float64},
@@ -497,6 +623,11 @@ function _random_network_direction_3d(
     return _random_unit_vector_3d(rng)
 end
 
+"""
+    _orthogonal_unit3(v, rng)
+
+Return a random unit vector orthogonal to `v`.
+"""
 function _orthogonal_unit3(v::NTuple{3, Float64}, rng::Random.AbstractRNG)
     ref = _random_unit_vector_3d(rng)
     cross = (
@@ -515,6 +646,11 @@ function _orthogonal_unit3(v::NTuple{3, Float64}, rng::Random.AbstractRNG)
     return _normalize3((Float64(cross[1]), Float64(cross[2]), Float64(cross[3])))
 end
 
+"""
+    _blend_direction3(direction, perturbation, amount)
+
+Blend and renormalize two 3D directions.
+"""
 function _blend_direction3(
     direction::NTuple{3, Float64},
     perturbation::NTuple{3, Float64},
@@ -528,6 +664,11 @@ function _blend_direction3(
     ))
 end
 
+"""
+    _within_network_ellipsoid(point, center, radii)
+
+Return whether a 3D point lies inside the network ellipsoid.
+"""
 function _within_network_ellipsoid(
     point::NTuple{3, Float64},
     center::NTuple{3, Float64},
@@ -539,6 +680,11 @@ function _within_network_ellipsoid(
     return (dx / radii[1])^2 + (dy / radii[2])^2 + (dz / radii[3])^2 <= 1.0
 end
 
+"""
+    _network_child_direction(parent_dir, angle_rad, sign, rng)
+
+Generate a child branch direction at an angle from the parent direction.
+"""
 function _network_child_direction(
     parent_dir::NTuple{3, Float64},
     angle_rad::Real,
@@ -554,6 +700,11 @@ function _network_child_direction(
     ))
 end
 
+"""
+    _grow_network_branch_3d(start, direction, center; kwargs...)
+
+Trace one synthetic vascular branch inside physical bounds and the ellipsoid.
+"""
 function _grow_network_branch_3d(
     start::NTuple{3, Float64},
     direction::NTuple{3, Float64},
@@ -595,6 +746,11 @@ function _grow_network_branch_3d(
     return points, dir
 end
 
+"""
+    _generate_ellipsoid_network_centerlines_3d(center; kwargs...)
+
+Generate branching 3D centerlines inside an ellipsoid around `center`.
+"""
 function _generate_ellipsoid_network_centerlines_3d(
     center::NTuple{3, Float64};
     ellipsoid_radii::NTuple{3, Float64},
@@ -651,6 +807,12 @@ function _generate_ellipsoid_network_centerlines_3d(
     return centerlines
 end
 
+"""
+    _sample_network_sources_3d(centerlines; kwargs...)
+
+Sample bubble source points from synthetic network centerlines with a Gaussian
+density profile around the network center.
+"""
 function _sample_network_sources_3d(
     centerlines::AbstractVector;
     center::NTuple{3, Float64},
@@ -711,6 +873,9 @@ Generate a synthetic branching vascular network inside an ellipsoid around each
 network centerlines with anisotropic Gaussian density around the center, so the
 source population is highest at the geometric focus and tapers toward the focal
 volume edge.
+
+Centers and geometric keyword arguments are in meters, frequencies are in Hz,
+and durations/delays are in seconds. Returns `(sources, meta)`.
 """
 function make_network_bubble_sources_3d(
     centers::AbstractVector;

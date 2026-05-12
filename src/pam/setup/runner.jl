@@ -1,5 +1,10 @@
 # Testable runner planning helpers for scripts/run_pam.jl.
 
+"""
+    run_pam_medium_summary(medium_info)
+
+Convert PAM medium metadata into a JSON-friendly summary, omitting mask arrays.
+"""
 function run_pam_medium_summary(medium_info)
     medium_summary = Dict{String, Any}()
     for (key, value) in medium_info
@@ -9,6 +14,11 @@ function run_pam_medium_summary(medium_info)
     return medium_summary
 end
 
+"""
+    run_pam_dry_plan(args)
+
+Parse PAM CLI arguments and return the branch/output plan without running a simulation.
+"""
 function run_pam_dry_plan(args::AbstractVector{<:AbstractString})
     opts, provided_keys = parse_cli(String.(args))
     dimension = parse_dimension(opts["dimension"])

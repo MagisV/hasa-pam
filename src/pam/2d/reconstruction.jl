@@ -1,3 +1,8 @@
+"""
+    _zero_pad_receiver_rf(rf, target_ny)
+
+Center-pad RF receiver data laterally to `target_ny` rows and return the crop range.
+"""
 function _zero_pad_receiver_rf(rf::AbstractMatrix, target_ny::Int)
     ny, nt = size(rf)
     target_ny >= ny || error("target_ny must be >= current Ny.")
@@ -9,6 +14,11 @@ function _zero_pad_receiver_rf(rf::AbstractMatrix, target_ny::Int)
     return out, range
 end
 
+"""
+    _edge_pad_lateral(a, target_ny)
+
+Pad a 2D field laterally by repeating edge columns and return the crop range.
+"""
 function _edge_pad_lateral(a::AbstractMatrix{<:Real}, target_ny::Int)
     nx, ny = size(a)
     target_ny >= ny || error("target_ny must be >= current Ny.")
@@ -28,6 +38,11 @@ function _edge_pad_lateral(a::AbstractMatrix{<:Real}, target_ny::Int)
     return out, range
 end
 
+"""
+    _format_elapsed(seconds)
+
+Format an elapsed duration in seconds for progress output.
+"""
 function _format_elapsed(seconds::Real)
     s = Float64(seconds)
     if s < 1e-3
@@ -42,10 +57,20 @@ function _format_elapsed(seconds::Real)
     return "$(minutes)m $(round(rem_s; digits=1))s"
 end
 
+"""
+    _format_frequency_mhz(freq)
+
+Format a frequency in Hz as a MHz label.
+"""
 function _format_frequency_mhz(freq::Real)
     return "$(round(Float64(freq) / 1e6; digits=4)) MHz"
 end
 
+"""
+    _format_frequency_list(freqs; max_items=8)
+
+Format a frequency list in Hz for concise progress output.
+"""
 function _format_frequency_list(freqs::AbstractVector{<:Real}; max_items::Int=8)
     isempty(freqs) && return "none"
     labels = [_format_frequency_mhz(freq) for freq in freqs]
@@ -54,6 +79,11 @@ function _format_frequency_list(freqs::AbstractVector{<:Real}; max_items::Int=8)
     return join(vcat(labels[1:head_count], ["...", labels[end]]), ", ")
 end
 
+"""
+    _pam_progress(show, msg)
+
+Print a PAM progress message to stderr when `show` is true.
+"""
 function _pam_progress(show::Bool, msg::AbstractString)
     show || return nothing
     println(stderr, msg)
@@ -61,6 +91,11 @@ function _pam_progress(show::Bool, msg::AbstractString)
     return nothing
 end
 
+"""
+    _fft_wavenumbers(n, spacing)
+
+Return centered FFT wavenumbers for `n` samples with physical spacing in meters.
+"""
 function _fft_wavenumbers(n::Int, spacing::Real)
     dk = 2π / Float64(spacing)
     start_val = -fld(n, 2)
@@ -68,6 +103,11 @@ function _fft_wavenumbers(n::Int, spacing::Real)
     return collect(start_val:end_val) .* dk ./ n
 end
 
+"""
+    _select_frequency_bins(rf, dt, frequencies; bandwidth=0.0)
+
+Resolve reconstruction frequencies in Hz and FFT bin indices for RF data.
+"""
 function _select_frequency_bins(
     rf::AbstractMatrix{<:Real},
     dt::Real,
@@ -113,6 +153,11 @@ end
 const _PAM_CUDA_PRECISION = Float32
 const _PAM_CUDA_COMPLEX = ComplexF32
 
+"""
+    _pam_cuda_functional()
+
+Return whether CUDA.jl currently reports a functional CUDA backend for PAM.
+"""
 function _pam_cuda_functional()
     try
         return CUDA.functional()
@@ -121,6 +166,11 @@ function _pam_cuda_functional()
     end
 end
 
+"""
+    _assert_pam_cuda_available()
+
+Throw a user-facing error unless CUDA is functional for PAM reconstruction.
+"""
 function _assert_pam_cuda_available()
     _pam_cuda_functional() && return nothing
     error(
@@ -130,8 +180,11 @@ function _assert_pam_cuda_available()
     )
 end
 
-# Each thread handles one lateral index; reduces abs2 over the freq dimension and
-# accumulates into dst. Reads src once, no temporaries.
+"""
+    _accum_abs2_sum!(dst, src)
+
+CUDA kernel that accumulates `abs2` over frequency columns into one lateral row.
+"""
 function _accum_abs2_sum!(dst, src)
     i = CUDA.threadIdx().x + (CUDA.blockIdx().x - 1) * CUDA.blockDim().x
     i > size(src, 1) && return
@@ -144,8 +197,12 @@ function _accum_abs2_sum!(dst, src)
     return
 end
 
-# Batched variant: src is (padded_ny, nfreq*W); dst is (padded_ny, W).
-# Each thread handles one lateral index and accumulates into all W windows in one pass.
+"""
+    _accum_abs2_sum_batched!(dst, src, nfreq_per_w)
+
+CUDA kernel that accumulates batched `abs2` sums from `(padded_ny, nfreq * W)`
+frequency data into `(padded_ny, W)` intensity rows.
+"""
 function _accum_abs2_sum_batched!(dst, src, nfreq_per_w)
     i = CUDA.threadIdx().x + (CUDA.blockIdx().x - 1) * CUDA.blockDim().x
     i > size(src, 1) && return
@@ -162,8 +219,12 @@ function _accum_abs2_sum_batched!(dst, src, nfreq_per_w)
     return
 end
 
-# Precomputed GPU arrays shared across all window batches of a single reconstruction.
-# Built once by _pam_cuda_setup; passed into every _reconstruct_pam_cuda call.
+"""
+    PAMCUDASetup
+
+Precomputed 2D CUDA arrays and reconstruction metadata shared across one or
+more PAM GPU window batches.
+"""
 struct PAMCUDASetup
     eta_yx_d          # (padded_ny, nx) Float32 — speed-contrast field
     prop_d1           # (padded_ny, nfreq) ComplexF32 — propagator, un-tiled
@@ -183,6 +244,11 @@ struct PAMCUDASetup
     setup_s::Float64
 end
 
+"""
+    _pam_cuda_setup(c_padded, cfg, selected_freqs, selected_bins, crop_range, nx, padded_ny, rr, row_stop, c0, effective_axial_step, axial_substeps)
+
+Precompute 2D CUDA propagation operators for the selected frequencies.
+"""
 function _pam_cuda_setup(
     c_padded::AbstractMatrix{<:Real},
     cfg::PAMConfig,
@@ -250,8 +316,12 @@ function _pam_cuda_setup(
     )
 end
 
-# Runs one batch of W windows using a pre-built PAMCUDASetup.
-# Returns a length-W vector of intensity matrices and one timing dict.
+"""
+    _reconstruct_pam_cuda(setup, rf_windows, t0_windows, corrected, recon_label, show_progress, benchmark)
+
+Run one 2D CUDA reconstruction batch and return raw intensity maps plus timing
+metadata.
+"""
 function _reconstruct_pam_cuda(
     setup::PAMCUDASetup,
     rf_windows::AbstractVector{<:AbstractMatrix{<:Real}},
@@ -417,6 +487,14 @@ function _reconstruct_pam_cuda(
     return raws, timing
 end
 
+"""
+    reconstruct_pam(rf, c, cfg; kwargs...)
+
+Reconstruct a 2D PAM intensity image from receiver RF data and a sound-speed map.
+
+`rf` has shape `(Ny, Nt)`, `c` is in m/s, frequencies are in Hz, and
+`time_origin` is in seconds. Returns `(intensity, kgrid, info)`.
+"""
 function reconstruct_pam(
     rf::AbstractMatrix{<:Real},
     c::AbstractMatrix{<:Real},
@@ -570,6 +648,12 @@ function reconstruct_pam(
     return intensity, kgrid, info
 end
 
+"""
+    reconstruct_pam_windowed(rf, c, cfg; kwargs...)
+
+Run 2D PAM reconstruction over temporal RF windows and average qualifying
+window intensities.
+"""
 function reconstruct_pam_windowed(
     rf::AbstractMatrix{<:Real},
     c::AbstractMatrix{<:Real},

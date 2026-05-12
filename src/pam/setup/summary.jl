@@ -1,3 +1,8 @@
+"""
+    json3_to_any(x)
+
+Recursively convert JSON3 objects and arrays into standard Julia containers.
+"""
 function json3_to_any(x)
     if x isa JSON3.Object
         return Dict{String, Any}(String(k) => json3_to_any(v) for (k, v) in pairs(x))
@@ -8,6 +13,11 @@ function json3_to_any(x)
     end
 end
 
+"""
+    source_model_from_meta(meta, sources)
+
+Resolve the source-model symbol from run metadata with fallbacks for old keys.
+"""
 function source_model_from_meta(meta, sources)
     if haskey(meta, "source_model")
         model = Symbol(String(meta["source_model"]))
@@ -23,6 +33,11 @@ function source_model_from_meta(meta, sources)
     return any(src -> src isa Union{BubbleCluster2D, BubbleCluster3D}, sources) ? :squiggle : :point
 end
 
+"""
+    centerlines_from_emission_meta(meta)
+
+Extract 2D centerlines in meters from emission metadata when available.
+"""
 function centerlines_from_emission_meta(meta)
     key = haskey(meta, "squiggle") ? "squiggle" : (haskey(meta, "network") ? "network" : (haskey(meta, "vascular") ? "vascular" : ""))
     isempty(key) && return nothing
@@ -39,16 +54,36 @@ function centerlines_from_emission_meta(meta)
     return isempty(centerlines) ? nothing : centerlines
 end
 
+"""
+    detection_truth_mask_from_meta(meta, kgrid, cfg, radius)
+
+Build a 2D centerline truth mask from emission metadata, or return `nothing`.
+"""
 function detection_truth_mask_from_meta(meta, kgrid, cfg, radius::Real)
     centerlines = centerlines_from_emission_meta(meta)
     isnothing(centerlines) && return nothing
     return pam_centerline_truth_mask(centerlines, kgrid, cfg; radius=radius)
 end
 
+"""
+    string_key_dict(d)
+
+Return a copy of a dictionary with all keys converted to strings.
+"""
 string_key_dict(d::AbstractDict) = Dict(String(k) => v for (k, v) in d)
 
+"""
+    compact_window_info(info)
+
+Extract JSON-friendly windowed-reconstruction metadata from an info dictionary.
+"""
 function compact_window_info(info)
     haskey(info, :used_window_count) || return nothing
+    """
+        range_pairs(ranges)
+
+    Convert Julia sample ranges into `[first, last]` pairs for JSON output.
+    """
     range_pairs(ranges) = [[first(range), last(range)] for range in ranges]
     return Dict(
         "total_window_count" => info[:total_window_count],
@@ -65,6 +100,11 @@ function compact_window_info(info)
     )
 end
 
+"""
+    source_summary(src::PointSource2D)
+
+Return a JSON-friendly summary of a 2D point source.
+"""
 function source_summary(src::PointSource2D)
     return Dict(
         "kind" => "point",
@@ -78,6 +118,11 @@ function source_summary(src::PointSource2D)
     )
 end
 
+"""
+    source_summary(src::BubbleCluster2D)
+
+Return a JSON-friendly summary of a 2D bubble-cluster source.
+"""
 function source_summary(src::BubbleCluster2D)
     return Dict(
         "kind" => "bubble_cluster",
@@ -93,6 +138,11 @@ function source_summary(src::BubbleCluster2D)
     )
 end
 
+"""
+    source_summary(src::PointSource3D)
+
+Return a JSON-friendly summary of a 3D point source.
+"""
 function source_summary(src::PointSource3D)
     return Dict(
         "kind" => "point3d",
@@ -107,6 +157,11 @@ function source_summary(src::PointSource3D)
     )
 end
 
+"""
+    source_summary(src::BubbleCluster3D)
+
+Return a JSON-friendly summary of a 3D bubble-cluster source.
+"""
 function source_summary(src::BubbleCluster3D)
     return Dict(
         "kind" => "bubble3d",

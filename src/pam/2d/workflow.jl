@@ -1,3 +1,8 @@
+"""
+    _default_recon_frequencies(sources)
+
+Return the sorted unique 2D source emission frequencies in Hz.
+"""
 function _default_recon_frequencies(sources::AbstractVector{<:EmissionSource2D})
     all_freqs = Float64[]
     for src in sources
@@ -6,6 +11,12 @@ function _default_recon_frequencies(sources::AbstractVector{<:EmissionSource2D})
     return sort(unique(all_freqs))
 end
 
+"""
+    _pam_reference_sound_speed(c, cfg, sources; margin=10e-3)
+
+Estimate a representative sound speed in m/s over the receiver-to-source depth
+range used by 2D reconstruction.
+"""
 function _pam_reference_sound_speed(
     c::AbstractMatrix{<:Real},
     cfg::PAMConfig,
@@ -20,7 +31,12 @@ function _pam_reference_sound_speed(
     return mean(Float64.(view(c, row_start:row_stop, :)))
 end
 
+"""
+    _run_pam_per_window(c, rho, sources, cfg; kwargs...)
 
+Simulate independently phased source emissions per temporal window and run the
+2D windowed PAM workflow.
+"""
 function _run_pam_per_window(
     c::AbstractMatrix{<:Real},
     rho::AbstractMatrix{<:Real},
@@ -62,6 +78,12 @@ function _run_pam_per_window(
     return results
 end
 
+"""
+    run_pam_case(c, rho, sources, cfg; kwargs...)
+
+Simulate RF data for 2D sources, reconstruct geometric and HASA PAM images, and
+return a result dictionary with reconstruction and analysis outputs.
+"""
 function run_pam_case(
     c::AbstractMatrix{<:Real},
     rho::AbstractMatrix{<:Real},
@@ -120,6 +142,12 @@ function run_pam_case(
     return results
 end
 
+"""
+    reconstruct_pam_case(rf, c, sources, cfg; kwargs...)
+
+Reconstruct and analyze an existing 2D RF data set with both geometric ASA and
+HASA correction paths.
+"""
 function reconstruct_pam_case(
     rf::AbstractMatrix{<:Real},
     c::AbstractMatrix{<:Real},

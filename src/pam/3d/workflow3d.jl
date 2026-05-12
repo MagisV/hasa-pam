@@ -1,3 +1,9 @@
+"""
+    run_pam_case_3d(c, rho, sources, cfg; kwargs...)
+
+Simulate 3D RF data, reconstruct geometric and HASA PAM volumes, and return a
+result dictionary with reconstruction and analysis metadata.
+"""
 function run_pam_case_3d(
     c::AbstractArray{<:Real, 3},
     rho::AbstractArray{<:Real, 3},

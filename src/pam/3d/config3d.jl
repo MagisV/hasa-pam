@@ -1,3 +1,11 @@
+"""
+    PAMConfig3D(; kwargs...)
+
+Configuration for 3D PAM simulation, reconstruction, and analysis.
+
+All spatial dimensions and spacings are in meters, `dt` and `t_max` are in
+seconds, `c0` is in m/s, and `rho0` is in kg/m^3.
+"""
 Base.@kwdef struct PAMConfig3D
     dx::Float64 = 0.2e-3
     dy::Float64 = 0.2e-3
@@ -20,17 +28,56 @@ Base.@kwdef struct PAMConfig3D
     axial_gain_power::Float64 = 1.5
 end
 
+"""
+    _pam_pml_guard_3d(cfg)
+
+Resolve the effective 3D PML guard-cell count for `cfg`.
+"""
 function _pam_pml_guard_3d(cfg::PAMConfig3D)
     cfg.PML_GUARD == 20 && return _default_pam_pml_guard(cfg.dx)
     return cfg.PML_GUARD
 end
 
+"""
+    pam_Nx(cfg::PAMConfig3D)
+
+Return the number of axial grid rows in a 3D PAM configuration.
+"""
 pam_Nx(cfg::PAMConfig3D) = round(Int, cfg.axial_dim / cfg.dx)
+
+"""
+    pam_Ny(cfg::PAMConfig3D)
+
+Return the number of Y-lateral grid columns in a 3D PAM configuration.
+"""
 pam_Ny(cfg::PAMConfig3D) = round(Int, cfg.transverse_dim_y / cfg.dy)
+
+"""
+    pam_Nz(cfg::PAMConfig3D)
+
+Return the number of Z-lateral grid columns in a 3D PAM configuration.
+"""
 pam_Nz(cfg::PAMConfig3D) = round(Int, cfg.transverse_dim_z / cfg.dz)
+
+"""
+    pam_Nt(cfg::PAMConfig3D)
+
+Return the number of temporal samples in a 3D PAM configuration.
+"""
 pam_Nt(cfg::PAMConfig3D) = round(Int, cfg.t_max / cfg.dt)
+
+"""
+    receiver_row(cfg::PAMConfig3D)
+
+Return the 1-based axial receiver row, defaulting to the first row.
+"""
 receiver_row(cfg::PAMConfig3D) = something(cfg.receiver_row, 1)
 
+"""
+    receiver_col_range_y(cfg)
+
+Return the active receiver aperture range along the 3D Y axis.
+"""
 function receiver_col_range_y(cfg::PAMConfig3D)
     ny = pam_Ny(cfg)
     isnothing(cfg.receiver_aperture_y) && return 1:ny
@@ -41,6 +88,11 @@ function receiver_col_range_y(cfg::PAMConfig3D)
     return start_col:(start_col + n_active - 1)
 end
 
+"""
+    receiver_col_range_z(cfg)
+
+Return the active receiver aperture range along the 3D Z axis.
+"""
 function receiver_col_range_z(cfg::PAMConfig3D)
     nz = pam_Nz(cfg)
     isnothing(cfg.receiver_aperture_z) && return 1:nz
@@ -51,6 +103,11 @@ function receiver_col_range_z(cfg::PAMConfig3D)
     return start_col:(start_col + n_active - 1)
 end
 
+"""
+    pam_grid_3d(cfg)
+
+Construct named 3D coordinate ranges `(x, y, z, t)` for `cfg`.
+"""
 function pam_grid_3d(cfg::PAMConfig3D)
     return (
         x = range(0.0; step=cfg.dx, length=pam_Nx(cfg)),
@@ -60,11 +117,22 @@ function pam_grid_3d(cfg::PAMConfig3D)
     )
 end
 
+"""
+    depth_coordinates_3d(cfg)
+
+Return axial coordinates, in meters relative to the receiver row, for `cfg`.
+"""
 function depth_coordinates_3d(cfg::PAMConfig3D)
     rr = receiver_row(cfg)
     return [(i - rr) * cfg.dx for i in 1:pam_Nx(cfg)]
 end
 
+"""
+    _required_pam_t_max_3d(cfg, sources; time_margin=10e-6)
+
+Estimate the RF recording duration, in seconds, needed to include all 3D
+source emissions and latest receiver-plane arrivals.
+"""
 function _required_pam_t_max_3d(
     cfg::PAMConfig3D,
     sources::AbstractVector;
@@ -84,6 +152,12 @@ function _required_pam_t_max_3d(
     return required_t + Float64(time_margin)
 end
 
+"""
+    fit_pam_config_3d(cfg, sources; min_bottom_margin=10e-3, reference_depth=nothing, time_margin=10e-6)
+
+Return a copy of `cfg` expanded, if needed, so all 3D sources fit in depth and
+the recording duration covers their emissions.
+"""
 function fit_pam_config_3d(
     cfg::PAMConfig3D,
     sources::AbstractVector;
@@ -124,6 +198,11 @@ function fit_pam_config_3d(
     )
 end
 
+"""
+    source_grid_index_3d(src, cfg)
+
+Map a 3D emission source from physical coordinates in meters to grid indices.
+"""
 function source_grid_index_3d(src, cfg::PAMConfig3D)
     src.depth >= 0.0 || error("Source depth must be >= 0.")
     grid = pam_grid_3d(cfg)

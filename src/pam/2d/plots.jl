@@ -1,17 +1,37 @@
+"""
+    map_db(map, ref)
+
+Convert a nonnegative PAM intensity map to decibels relative to `ref`.
+"""
 function map_db(map::AbstractMatrix{<:Real}, ref::Real)
     safe_ref = max(Float64(ref), eps(Float64))
     return 10 .* log10.(max.(Float64.(map), eps(Float64)) ./ safe_ref)
 end
 
+"""
+    map_norm(map, ref)
+
+Normalize a PAM intensity map by `ref` with an epsilon-protected denominator.
+"""
 function map_norm(map::AbstractMatrix{<:Real}, ref::Real)
     safe_ref = max(Float64(ref), eps(Float64))
     return Float64.(map) ./ safe_ref
 end
 
+"""
+    source_pairs_mm(sources)
+
+Return `(depth_mm, lateral_mm)` coordinate pairs for 2D sources.
+"""
 function source_pairs_mm(sources)
     return [(src.depth * 1e3, src.lateral * 1e3) for src in sources]
 end
 
+"""
+    scatter_sources!(ax, sources; kwargs...)
+
+Add 2D source markers, in millimeters, to a Makie axis.
+"""
 function scatter_sources!(ax, sources; color=:red, marker=nothing, markersize=nothing, strokewidth=2)
     truth = source_pairs_mm(sources)
     marker = isnothing(marker) ? (length(sources) > 20 ? :circle : :x) : marker
@@ -27,6 +47,11 @@ function scatter_sources!(ax, sources; color=:red, marker=nothing, markersize=no
     )
 end
 
+"""
+    summary_line(stats)
+
+Format localization or detection statistics as one compact plot label.
+"""
 function summary_line(stats)
     if haskey(stats, :mean_radial_error_mm)
         return "mean err=$(round(stats[:mean_radial_error_mm]; digits=2)) mm, success=$(get(stats, :num_success, 0))/$(get(stats, :num_truth_sources, 0))"
@@ -36,6 +61,11 @@ function summary_line(stats)
     return string(stats)
 end
 
+"""
+    overlay_skull_2d!(ax, c, xvals, yvals; transpose_matrix=true)
+
+Overlay a semi-transparent skull mask inferred from a 2D sound-speed map.
+"""
 function overlay_skull_2d!(ax, c, xvals, yvals; transpose_matrix=true)
     skull_mask = skull_mask_from_c_columnwise(c; mask_outside=false)
     any(skull_mask) || return nothing
@@ -47,6 +77,11 @@ function overlay_skull_2d!(ax, c, xvals, yvals; transpose_matrix=true)
     return nothing
 end
 
+"""
+    lines_centerlines!(ax, centerlines; kwargs...)
+
+Draw 2D centerline polylines, converting coordinates from meters to millimeters.
+"""
 function lines_centerlines!(ax, centerlines; color=(:black, 0.45), linewidth=2)
     isnothing(centerlines) && return nothing
     for line in centerlines
@@ -56,6 +91,11 @@ function lines_centerlines!(ax, centerlines; color=(:black, 0.45), linewidth=2)
     return nothing
 end
 
+"""
+    save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, sources, stats_geo, stats_hasa)
+
+Save the standard 2D PAM overview figure to `path`.
+"""
 function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, sources, stats_geo, stats_hasa)
     depth_mm = depth_coordinates(kgrid, cfg) .* 1e3
     lateral_mm = kgrid.y_vec .* 1e3
@@ -94,6 +134,11 @@ function save_overview(path, c, rf, pam_geo, pam_hasa, kgrid, cfg, sources, stat
     save(path, fig)
 end
 
+"""
+    add_threshold_panel!(fig, row, title, intensity, kgrid, cfg, sources; kwargs...)
+
+Add one 2D threshold-contour panel to a Makie figure and return its heatmap.
+"""
 function add_threshold_panel!(
     fig,
     row,
@@ -126,6 +171,11 @@ function add_threshold_panel!(
     return hm
 end
 
+"""
+    add_threshold_table!(fig, row, col, title, stats)
+
+Add a compact threshold metric table to a Makie figure.
+"""
 function add_threshold_table!(fig, row, col, title, stats)
     gl = GridLayout(fig[row, col]; tellwidth=false, tellheight=true)
     Label(gl[1, 1:4], title; font="DejaVu Sans Mono", fontsize=13, halign=:left, tellwidth=false)
@@ -148,6 +198,12 @@ function add_threshold_table!(fig, row, col, title, stats)
     rowgap!(gl, 2)
 end
 
+"""
+    save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, sources; kwargs...)
+
+Save the 2D threshold-boundary detection comparison figure and return its
+serializable metric summary.
+"""
 function save_threshold_boundary_detection(path, pam_geo, pam_hasa, kgrid, cfg, sources; threshold_ratios, truth_radius, truth_mask, truth_centerlines, frequencies, c=nothing)
     global_ref = max(maximum(Float64.(pam_geo)), maximum(Float64.(pam_hasa)), eps(Float64))
     colors = [:red, :orange, :cyan, :magenta, :lime]

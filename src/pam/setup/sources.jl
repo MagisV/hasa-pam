@@ -1,8 +1,24 @@
 # Source parsing and source metadata helpers for PAM runner scripts.
 
+"""
+    point_pairs_m(points)
+
+Convert 2D point tuples in meters to JSON-friendly nested arrays.
+"""
 point_pairs_m(points) = [[point[1], point[2]] for point in points]
+
+"""
+    centerlines_m(centerlines)
+
+Convert 2D centerline tuples in meters to JSON-friendly nested arrays.
+"""
 centerlines_m(centerlines) = [point_pairs_m(line) for line in centerlines]
 
+"""
+    expand_source_values(values, n, default)
+
+Expand an empty, scalar, or per-source CLI value list to length `n`.
+"""
 function expand_source_values(values::Vector{Float64}, n::Int, default::Float64)
     isempty(values) && return fill(default, n)
     length(values) == 1 && return fill(values[1], n)
@@ -10,6 +26,11 @@ function expand_source_values(values::Vector{Float64}, n::Int, default::Float64)
     error("Per-source parameter list must have length 1 or match the number of sources ($n).")
 end
 
+"""
+    parse_coordinate_pairs_mm(spec, option_name)
+
+Parse comma-separated `depth:lateral` coordinates in millimeters into meters.
+"""
 function parse_coordinate_pairs_mm(spec::AbstractString, option_name::AbstractString)
     coord_tokens = [strip(token) for token in split(spec, ",") if !isempty(strip(token))]
     1 <= length(coord_tokens) <= 20 || error("Provide between 1 and 20 coordinates via --$option_name=depth:lateral,...")
@@ -22,6 +43,11 @@ function parse_coordinate_pairs_mm(spec::AbstractString, option_name::AbstractSt
     return pairs
 end
 
+"""
+    parse_coordinate_triples_mm(spec, option_name)
+
+Parse comma-separated `depth:y:z` coordinates in millimeters into meters.
+"""
 function parse_coordinate_triples_mm(spec::AbstractString, option_name::AbstractString)
     coord_tokens = [strip(token) for token in split(spec, ",") if !isempty(strip(token))]
     1 <= length(coord_tokens) <= 20 || error("Provide between 1 and 20 coordinates via --$option_name=depth:y:z,...")
@@ -38,6 +64,11 @@ function parse_coordinate_triples_mm(spec::AbstractString, option_name::Abstract
     return triples
 end
 
+"""
+    parse_point_sources(opts)
+
+Parse 2D point-source CLI options into sources and emission metadata.
+"""
 function parse_point_sources(opts)
     coordinates = parse_coordinate_pairs_mm(opts["sources-mm"], "sources-mm")
     n_sources = length(coordinates)
@@ -95,6 +126,11 @@ function parse_point_sources(opts)
     )
 end
 
+"""
+    parse_point_sources_3d(opts)
+
+Parse 3D point-source CLI options into sources and emission metadata.
+"""
 function parse_point_sources_3d(opts)
     coordinates = parse_coordinate_triples_mm(opts["sources-mm"], "sources-mm")
     n_sources = length(coordinates)
@@ -153,8 +189,18 @@ function parse_point_sources_3d(opts)
     )
 end
 
+"""
+    centerlines_m_3d(centerlines)
+
+Convert 3D centerline tuples in meters to JSON-friendly nested arrays.
+"""
 centerlines_m_3d(centerlines) = [[[p[1], p[2], p[3]] for p in line] for line in centerlines]
 
+"""
+    parse_squiggle_sources_3d(opts, cfg)
+
+Parse 3D squiggle-source CLI options into sources and emission metadata.
+"""
 function parse_squiggle_sources_3d(opts, cfg::PAMConfig3D)
     anchors = parse_coordinate_triples_mm(opts["anchors-mm"], "anchors-mm")
     f0 = parse(Float64, opts["fundamental-mhz"]) * 1e6
@@ -253,6 +299,11 @@ function parse_squiggle_sources_3d(opts, cfg::PAMConfig3D)
     )
 end
 
+"""
+    parse_network_sources_3d(opts, cfg)
+
+Parse 3D network-source CLI options into sources and emission metadata.
+"""
 function parse_network_sources_3d(opts, cfg::PAMConfig3D)
     centers = parse_coordinate_triples_mm(opts["anchors-mm"], "anchors-mm")
     f0 = parse(Float64, opts["fundamental-mhz"]) * 1e6
@@ -375,6 +426,11 @@ function parse_network_sources_3d(opts, cfg::PAMConfig3D)
     )
 end
 
+"""
+    parse_squiggle_sources(opts, cfg)
+
+Parse 2D squiggle-source CLI options into sources and emission metadata.
+"""
 function parse_squiggle_sources(opts, cfg::PAMConfig)
     anchors = parse_coordinate_pairs_mm(opts["anchors-mm"], "anchors-mm")
     f0 = parse(Float64, opts["fundamental-mhz"]) * 1e6
@@ -465,10 +521,14 @@ function parse_squiggle_sources(opts, cfg::PAMConfig)
     )
 end
 
+"""
+    parse_sources(opts, cfg)
+
+Dispatch 2D PAM CLI source parsing based on `--source-model`.
+"""
 function parse_sources(opts, cfg::PAMConfig)
     source_model = parse_source_model(opts["source-model"])
     source_model == :point && return parse_point_sources(opts)
     source_model == :squiggle && return parse_squiggle_sources(opts, cfg)
     error("2D PAM CLI supports --source-model=point or --source-model=squiggle.")
 end
-

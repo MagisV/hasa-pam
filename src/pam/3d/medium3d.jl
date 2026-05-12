@@ -1,3 +1,8 @@
+"""
+    _resample_pam_volume_z(hu_3d, spacing_z_m, target_dz_m, target_nz)
+
+Linearly resample a PAM CT volume along Z from CT slice spacing to grid spacing.
+"""
 function _resample_pam_volume_z(
     hu_3d::AbstractArray{Float32, 3},
     spacing_z_m::Float64,
@@ -30,6 +35,14 @@ function _resample_pam_volume_z(
     return out
 end
 
+"""
+    make_pam_medium_3d(cfg; aberrator=:none, kwargs...)
+
+Build 3D sound-speed and density volumes for a PAM configuration.
+
+Returns `(c, rho, info)`, where `c` is in m/s, `rho` is in kg/m^3, and `info`
+describes the homogeneous, water, or skull-backed medium construction.
+"""
 function make_pam_medium_3d(
     cfg::PAMConfig3D;
     aberrator::Symbol = :none,

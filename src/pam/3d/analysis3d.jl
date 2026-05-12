@@ -1,3 +1,9 @@
+"""
+    find_pam_peaks_3d(intensity, grid, cfg; n_peaks, suppression_radius=cfg.peak_suppression_radius)
+
+Find the strongest 3D PAM peaks below the receiver row while suppressing
+nearby detections within a physical radius in meters.
+"""
 function find_pam_peaks_3d(
     intensity::AbstractArray{<:Real, 3},
     ::NamedTuple,
@@ -38,6 +44,11 @@ function find_pam_peaks_3d(
     return peaks
 end
 
+"""
+    pam_truth_mask_3d(sources, grid, cfg; radius=cfg.success_tolerance)
+
+Rasterize spherical 3D truth regions around sources using `radius` in meters.
+"""
 function pam_truth_mask_3d(
     sources::AbstractVector{<:EmissionSource3D},
     grid::NamedTuple,
@@ -79,6 +90,12 @@ function pam_truth_mask_3d(
     return mask
 end
 
+"""
+    source_detection_stats_3d(pred, grid, cfg, sources; radius)
+
+Measure how many 3D sources have at least one predicted voxel within `radius`
+meters.
+"""
 function source_detection_stats_3d(pred, grid, cfg::PAMConfig3D, sources; radius::Real)
     radius_m = Float64(radius)
     radius_m >= 0 || error("source detection radius must be non-negative.")
@@ -134,6 +151,11 @@ function source_detection_stats_3d(pred, grid, cfg::PAMConfig3D, sources; radius
     )
 end
 
+"""
+    threshold_detection_stats_3d(intensity, grid, cfg, sources; threshold_ratios, truth_radius, truth_mask)
+
+Run 3D source and voxel detection analysis for each threshold ratio.
+"""
 function threshold_detection_stats_3d(intensity, grid, cfg, sources; threshold_ratios, truth_radius, truth_mask)
     truth = isnothing(truth_mask) ? pam_truth_mask_3d(sources, grid, cfg; radius=truth_radius) : truth_mask
     local_ref = max(maximum(Float64.(intensity)), eps(Float64))
@@ -168,6 +190,12 @@ function threshold_detection_stats_3d(intensity, grid, cfg, sources; threshold_r
     ]
 end
 
+"""
+    best_threshold_entry_3d(stats)
+
+Select the 3D threshold entry with the best source F1, breaking ties by
+precision and threshold ratio.
+"""
 function best_threshold_entry_3d(stats)
     isempty(stats) && error("No 3D threshold stats available.")
     best = first(stats)
@@ -183,8 +211,18 @@ function best_threshold_entry_3d(stats)
     return best
 end
 
+"""
+    _metric_value(entry, key, fallback=key)
+
+Read a metric from a threshold-stat entry and convert it to `Float64`.
+"""
 _metric_value(entry, key::Symbol, fallback::Symbol=key) = Float64(get(entry, key, entry[fallback]))
 
+"""
+    _argmax_by(entries, scorefn)
+
+Return the entry with the lexicographically largest score from `scorefn`.
+"""
 function _argmax_by(entries, scorefn)
     best = first(entries)
     best_score = scorefn(best)
@@ -198,6 +236,12 @@ function _argmax_by(entries, scorefn)
     return best
 end
 
+"""
+    _threshold_tradeoff_entry_3d(stats, best, target)
+
+Choose a threshold entry that improves recall or precision while preserving as
+much of the best F1 score as possible.
+"""
 function _threshold_tradeoff_entry_3d(stats, best, target::Symbol)
     best_f1 = _metric_value(best, :source_f1, :f1)
     best_value = _metric_value(best, target, target == :source_recall ? :recall : target)
@@ -224,6 +268,12 @@ function _threshold_tradeoff_entry_3d(stats, best, target::Symbol)
     return best
 end
 
+"""
+    threshold_outline_entries_3d(stats)
+
+Return labeled 3D threshold entries for best-F1, recall-biased, and
+precision-biased plot outlines.
+"""
 function threshold_outline_entries_3d(stats)
     best = best_threshold_entry_3d(stats)
     recall = _threshold_tradeoff_entry_3d(stats, best, :source_recall)
@@ -235,6 +285,12 @@ function threshold_outline_entries_3d(stats)
     ]
 end
 
+"""
+    analyse_pam_3d(intensity, grid, cfg, sources; kwargs...)
+
+Match reconstructed 3D PAM peaks to source locations and report localization
+errors in millimeters.
+"""
 function analyse_pam_3d(
     intensity::AbstractArray{<:Real, 3},
     grid::NamedTuple,
