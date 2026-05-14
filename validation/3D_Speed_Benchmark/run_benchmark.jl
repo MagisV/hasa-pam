@@ -17,7 +17,7 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
 using TranscranialFUS
-using JLD2, Printf, Dates
+using JLD2, Printf, Dates, Statistics
 
 # ── Configuration (identical to 3D_PAM_Accuracy) ──────────────────────────────
 
@@ -69,7 +69,9 @@ println("  outer skull row : $(med_info[:outer_row])")
 println("  inner skull row : $(med_info[:inner_row])")
 println()
 
-# ── Single centre source ───────────────────────────────────────────────────────
+# ── k-Wave simulation (cached) ────────────────────────────────────────────────
+
+const RF_CACHE = joinpath(@__DIR__, "rf_cache.jld2")
 
 src = PointSource3D(
     depth      = 50e-3,
@@ -79,19 +81,25 @@ src = PointSource3D(
     num_cycles = NUM_CYCLES,
 )
 
-# ── k-Wave simulation ─────────────────────────────────────────────────────────
+if isfile(RF_CACHE)
+    println("Loading cached RF data from rf_cache.jld2…\n")
+    rf = load(RF_CACHE, "rf")
+else
+    println("Running k-Wave (GPU)…")
+    t_sim = @elapsed begin
+        rf_full, _, _ = simulate_point_sources_3d(c, rho, [src], sim_cfg; use_gpu=true)
+    end
+    @printf("  k-Wave wall-clock : %.1f s\n\n", t_sim)
 
-println("Running k-Wave (GPU)…")
-t_sim = @elapsed begin
-    rf_full, kgrid, _ = simulate_point_sources_3d(c, rho, [src], sim_cfg; use_gpu=true)
+    apt_range_y = receiver_col_range_y(sim_cfg)
+    apt_range_z = receiver_col_range_z(sim_cfg)
+    rf = zeros(eltype(rf_full), size(rf_full))
+    rf[apt_range_y, apt_range_z, :] .= rf_full[apt_range_y, apt_range_z, :]
+    rf_full = nothing
+
+    jldsave(RF_CACHE; rf)
+    println("  RF data cached → rf_cache.jld2\n")
 end
-@printf("  k-Wave wall-clock : %.1f s\n\n", t_sim)
-
-apt_range_y = receiver_col_range_y(sim_cfg)
-apt_range_z = receiver_col_range_z(sim_cfg)
-rf = zeros(eltype(rf_full), size(rf_full))
-rf[apt_range_y, apt_range_z, :] .= rf_full[apt_range_y, apt_range_z, :]
-rf_full = nothing
 
 # ── Four reconstructions ──────────────────────────────────────────────────────
 
@@ -128,6 +136,7 @@ for m in MODES
     for r in 1:N_RUNS
         @printf("  %-10s  run %d/%d … ", m.label, r, N_RUNS)
         flush(stdout)
+        local info
         t = @elapsed begin
             I, _, info = reconstruct_pam_3d(
                 rf, c, sim_cfg;
@@ -137,6 +146,7 @@ for m in MODES
                 axial_step    = AXIAL_STEP,
                 use_gpu       = m.use_gpu,
                 show_progress = false,
+                benchmark     = true,
             )
             if r == N_RUNS
                 intensities[m.label] = I
@@ -144,7 +154,10 @@ for m in MODES
             end
         end
         times[r] = t
-        @printf("%.2f s\n", t)
+        gt = info[:gpu_timing]
+        setup_s = something(gt[:setup_s], NaN)
+        march_s = m.use_gpu ? something(gt[:march_gpu_s], NaN) : something(gt[:march_wall_s], NaN)
+        @printf("%.2f s  (setup=%.2f s  march=%.2f s)\n", t, setup_s, march_s)
     end
     wall_times_all[m.label] = times
     wall_times[m.label]     = sum(times) / N_RUNS
@@ -153,24 +166,29 @@ end
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 println()
-println("="^62)
+println("="^78)
 println("3D PAM Speed Benchmark — $(round(Int, APERTURE*1e3)) mm aperture, source at 50 mm")
-println("(mean ± std over $N_RUNS runs, after 1 warm-up run)")
-println("="^62)
+println("(median over $N_RUNS runs, after 1 warm-up run)")
+println("="^78)
 println()
-println("  Mode       │  Mean (s)  │  Std (s)")
-println("  ───────────┼────────────┼──────────")
+println("  Mode       │  Wall (s)  │  Setup (s)  │  March (s)  │  March/Wall")
+println("  ───────────┼────────────┼─────────────┼─────────────┼────────────")
 for m in MODES
-    ts = wall_times_all[m.label]
-    μ  = wall_times[m.label]
-    σ  = length(ts) > 1 ? sqrt(sum((t - μ)^2 for t in ts) / (length(ts) - 1)) : 0.0
-    @printf("  %-10s │  %8.2f  │  %6.2f\n", m.label, μ, σ)
+    ts    = wall_times_all[m.label]
+    wall  = median(ts)
+    info  = info_dicts[m.label]
+    gt    = info[:gpu_timing]
+    setup = something(gt[:setup_s], NaN)
+    march = m.use_gpu ? something(gt[:march_gpu_s], NaN) : something(gt[:march_wall_s], NaN)
+    @printf("  %-10s │  %8.2f  │  %9.2f  │  %9.2f  │  %6.1f%%\n",
+            m.label, wall, setup, march, 100 * march / wall)
 end
 println()
-@printf("  GPU/CPU speedup (HASA): %.1f×\n",
-        wall_times["CPU_HASA"] / wall_times["GPU_HASA"])
-@printf("  GPU/CPU speedup (ASA) : %.1f×\n",
-        wall_times["CPU_ASA"]  / wall_times["GPU_ASA"])
+@printf("  GPU/CPU speedup — wall  (HASA): %.1f×\n",
+        median(wall_times_all["CPU_HASA"]) / median(wall_times_all["GPU_HASA"]))
+@printf("  GPU/CPU speedup — march (HASA): %.1f×\n",
+        something(info_dicts["CPU_HASA"][:gpu_timing][:march_wall_s], NaN) /
+        something(info_dicts["GPU_HASA"][:gpu_timing][:march_gpu_s],  NaN))
 println()
 
 # ── Save ──────────────────────────────────────────────────────────────────────
