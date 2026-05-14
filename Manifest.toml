@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12.6"
+julia_version = "1.12.2"
 manifest_format = "2.0"
-project_hash = "00244827d5ea9d4acca804f08b2c3fbcb7e954d0"
+project_hash = "24446f29591bbc15a7a25026a446738be8a67088"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -1118,7 +1118,7 @@ version = "0.3.4"
 
 [[deps.MozillaCACerts_jll]]
 uuid = "14a3606d-f60d-562e-9121-12d972cd8159"
-version = "2025.11.4"
+version = "2025.5.20"
 
 [[deps.MuladdMacro]]
 git-tree-sha1 = "cac9cc5499c25554cba55cd3c30543cff5ca4fab"
@@ -1293,7 +1293,7 @@ version = "0.44.2+0"
 [[deps.Pkg]]
 deps = ["Artifacts", "Dates", "Downloads", "FileWatching", "LibGit2", "Libdl", "Logging", "Markdown", "Printf", "Random", "SHA", "TOML", "Tar", "UUIDs", "p7zip_jll"]
 uuid = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
-version = "1.12.1"
+version = "1.12.0"
 weakdeps = ["REPL"]
 
     [deps.Pkg.extensions]
@@ -1708,7 +1708,7 @@ uuid = "3bb67fe8-82b1-5028-8e26-92a6c54297fa"
 version = "0.11.3"
 
 [[deps.TranscranialFUS]]
-deps = ["CUDA", "CairoMakie", "CondaPkg", "DICOM", "FFTW", "Interpolations", "JLD2", "JSON3", "PythonCall", "Random", "Statistics"]
+deps = ["CUDA", "CairoMakie", "CondaPkg", "DICOM", "Dates", "FFTW", "HDF5", "Interpolations", "JLD2", "JSON3", "Printf", "PythonCall", "Random", "Statistics"]
 path = "."
 uuid = "a2de8f33-df8e-4198-bbcc-8a183cd2f9f0"
 version = "0.1.0"

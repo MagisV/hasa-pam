@@ -5,6 +5,7 @@ LocalPreferences.toml
 *.jl.cov
 *.jl.*.cov
 *.jl.mem
+coverage/
 
 .tmp_pdfenv
 
@@ -13,6 +14,7 @@ LocalPreferences.toml
 
 # Generated outputs from the project scripts
 outputs/
+docs/build/
 
 # *.jld2
 

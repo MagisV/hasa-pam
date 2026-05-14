@@ -1,0 +1,73 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Julia 1.12
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+
+      - name: Cache Julia artifacts
+        uses: julia-actions/cache@v2
+
+      - name: Instantiate project
+        run: julia --project=. --color=yes -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Run test suite
+        run: julia --project=. --color=yes -e 'using Pkg; Pkg.test(; coverage=true)'
+
+      - name: Generate coverage file
+        run: julia --color=yes coverage.jl
+
+      - name: Upload coverage file
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: |
+            coverage/lcov.info
+            coverage/summary.txt
+          if-no-files-found: error
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+
+      - name: Cache Julia artifacts
+        uses: julia-actions/cache@v2
+
+      - name: Build documentation
+        run: julia --project=docs --color=yes docs/make.jl
+
+      - name: Upload documentation site
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-site
+          path: docs/build/
+          if-no-files-found: error
