@@ -59,7 +59,7 @@ println()
 
 # ── Error colour / size helpers ───────────────────────────────────────────────
 
-MAX_ERR = 6.0
+MAX_ERR = ceil(maximum(filter(!isnan, [geo_errors_mm; hasa_errors_mm])))
 MIN_MS  = 2.5
 MAX_MS  = 15.0
 errcmap = :plasma
@@ -75,12 +75,15 @@ function plot_error_grid!(ax, errors_slice, axial_mm, lateral_mm)
             colorrange  = (0.0, MAX_ERR),
             colormap    = errcmap,
             markersize  = err_to_ms(e),
-            strokewidth = 0,
+            strokecolor = :black,
+            strokewidth = 0.5,
         )
     end
 end
 
-ax_lim_dep = (maximum(AXIAL_MM) + 5.0, minimum(AXIAL_MM) - 5.0)
+_pad = 3.0
+ax_lim_dep = (maximum(AXIAL_MM) + _pad, minimum(AXIAL_MM) - _pad)
+ax_lim_lat = (minimum(LATERAL_Y_MM) - _pad, maximum(LATERAL_Y_MM) + _pad)
 
 # ── Slice title colours (teal → green → red, extends with grey if needed) ─────
 
@@ -104,7 +107,7 @@ update_theme!(
     ),
 )
 
-fig = Figure(size = (300 * n_slices + 100, 420))
+fig = Figure(size = (80 * n_slices + 175, 300))
 
 # ── Error panels ──────────────────────────────────────────────────────────────
 
@@ -122,13 +125,13 @@ for (zi, lz_mm) in enumerate(LATERAL_Z_MM)
         yreversed          = true,
         aspect             = DataAspect(),
         title              = "z = $(round(Int, lz_mm)) mm",
-        titlecolor         = tcol,
         xticklabelsize     = 7,
         yticklabelsize     = 7,
         yticklabelsvisible = show_ylabel,
     )
     plot_error_grid!(ax_top, geo_errors_mm[:, :, zi], AXIAL_MM, LATERAL_Y_MM)
     ylims!(ax_top, ax_lim_dep...)
+    xlims!(ax_top, ax_lim_lat...)
 
     # Row 2: HASA (corrected)
     ax_bot = Axis(fig[2, zi];
@@ -142,6 +145,7 @@ for (zi, lz_mm) in enumerate(LATERAL_Z_MM)
     )
     plot_error_grid!(ax_bot, hasa_errors_mm[:, :, zi], AXIAL_MM, LATERAL_Y_MM)
     ylims!(ax_bot, ax_lim_dep...)
+    xlims!(ax_bot, ax_lim_lat...)
 end
 
 # Row title labels
@@ -161,20 +165,52 @@ Label(fig[2, 1:n_slices, Top()], "HASA";
 
 # ── Shared error colorbar ─────────────────────────────────────────────────────
 
-Colorbar(fig[1:2, n_slices + 1];
+Colorbar(fig[1:2, n_slices + 2];
     colormap      = errcmap,
     colorrange    = (0.0, MAX_ERR),
     label         = "Error [mm]",
-    ticklabelsize = 7,
-    labelsize     = 8,
-    width         = 12,
-    ticks         = 0:1:Int(MAX_ERR),
+    ticklabelsize = 6,
+    labelsize     = 7,
+    width         = 8,
+    ticks         = 0:2:Int(MAX_ERR),
 )
+
+# ── Bubble size legend ────────────────────────────────────────────────────────
+
+_sz_ticks = range(0.0, MAX_ERR; length = 5)
+_sz_ax = Axis(fig[1:2, n_slices + 1];
+    limits             = (0.0, 1.0, -0.5, MAX_ERR + 0.5),
+    yreversed          = false,
+    xticksvisible      = false,
+    xticklabelsvisible = false,
+    yticksvisible      = false,
+    yticklabelsvisible = false,
+    xlabelvisible      = false,
+    ylabelvisible      = false,
+)
+hidespines!(_sz_ax)
+
+for e in _sz_ticks
+    scatter!(_sz_ax, [0.5], [e];
+        color       = e,
+        colorrange  = (0.0, MAX_ERR),
+        colormap    = errcmap,
+        markersize  = err_to_ms(e),
+        strokecolor = :black,
+        strokewidth = 0.5,
+    )
+end
 
 # ── Spacing ───────────────────────────────────────────────────────────────────
 
-colgap!(fig.layout, 5)
-rowgap!(fig.layout, 3)
+colsize!(fig.layout, n_slices + 1, Fixed(Int(MAX_MS) + 4))
+
+for i in 1:(n_slices - 1)
+    colgap!(fig.layout, i, 1)
+end
+colgap!(fig.layout, n_slices,     10)
+colgap!(fig.layout, n_slices + 1, 10)
+rowgap!(fig.layout, 18)
 
 # ── Save ──────────────────────────────────────────────────────────────────────
 
