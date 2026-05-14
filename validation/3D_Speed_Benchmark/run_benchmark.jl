@@ -31,7 +31,9 @@ const BANDWIDTH  = 0.0
 
 const SKULL_DIST  = 20e-3
 const SLICE_INDEX = 250
-const APERTURE    = 64e-3
+const APERTURE    = 50e-3
+
+const N_RUNS = 5   # timed repetitions per mode (after warm-up)
 
 const AXIAL_DIM = 70e-3
 const TRANS_DIM = APERTURE
@@ -102,40 +104,67 @@ const MODES = [
 
 intensities = Dict{String,Array{Float32,3}}()
 info_dicts  = Dict{String,Any}()
-wall_times  = Dict{String,Float64}()
+wall_times  = Dict{String,Float64}()   # mean over N_RUNS
+wall_times_all = Dict{String,Vector{Float64}}()
 
-println("Reconstructions:")
+println("Reconstructions (1 warm-up + $N_RUNS timed runs each):")
 for m in MODES
-    @printf("  %-10s … ", m.label)
+    # ── warm-up run (not timed) ────────────────────────────────────────────────
+    @printf("  %-10s  warm-up … ", m.label)
     flush(stdout)
-    t = @elapsed begin
-        I, _, info = reconstruct_pam_3d(
-            rf, c, sim_cfg;
-            frequencies   = [FREQ],
-            bandwidth     = BANDWIDTH,
-            corrected     = m.corrected,
-            axial_step    = AXIAL_STEP,
-            use_gpu       = m.use_gpu,
-            show_progress = false,
-        )
-        intensities[m.label] = I
-        info_dicts[m.label]  = info
+    reconstruct_pam_3d(
+        rf, c, sim_cfg;
+        frequencies   = [FREQ],
+        bandwidth     = BANDWIDTH,
+        corrected     = m.corrected,
+        axial_step    = AXIAL_STEP,
+        use_gpu       = m.use_gpu,
+        show_progress = false,
+    )
+    print("done\n")
+
+    # ── timed runs ────────────────────────────────────────────────────────────
+    times = Vector{Float64}(undef, N_RUNS)
+    for r in 1:N_RUNS
+        @printf("  %-10s  run %d/%d … ", m.label, r, N_RUNS)
+        flush(stdout)
+        t = @elapsed begin
+            I, _, info = reconstruct_pam_3d(
+                rf, c, sim_cfg;
+                frequencies   = [FREQ],
+                bandwidth     = BANDWIDTH,
+                corrected     = m.corrected,
+                axial_step    = AXIAL_STEP,
+                use_gpu       = m.use_gpu,
+                show_progress = false,
+            )
+            if r == N_RUNS
+                intensities[m.label] = I
+                info_dicts[m.label]  = info
+            end
+        end
+        times[r] = t
+        @printf("%.2f s\n", t)
     end
-    wall_times[m.label] = t
-    @printf("%.2f s\n", t)
+    wall_times_all[m.label] = times
+    wall_times[m.label]     = sum(times) / N_RUNS
 end
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 println()
-println("="^52)
+println("="^62)
 println("3D PAM Speed Benchmark — $(round(Int, APERTURE*1e3)) mm aperture, source at 50 mm")
-println("="^52)
+println("(mean ± std over $N_RUNS runs, after 1 warm-up run)")
+println("="^62)
 println()
-println("  Mode       │ Wall-clock")
-println("  ───────────┼───────────")
+println("  Mode       │  Mean (s)  │  Std (s)")
+println("  ───────────┼────────────┼──────────")
 for m in MODES
-    @printf("  %-10s │ %7.2f s\n", m.label, wall_times[m.label])
+    ts = wall_times_all[m.label]
+    μ  = wall_times[m.label]
+    σ  = length(ts) > 1 ? sqrt(sum((t - μ)^2 for t in ts) / (length(ts) - 1)) : 0.0
+    @printf("  %-10s │  %8.2f  │  %6.2f\n", m.label, μ, σ)
 end
 println()
 @printf("  GPU/CPU speedup (HASA): %.1f×\n",
@@ -153,8 +182,10 @@ outfile = joinpath(outdir, "results_$(ts).jld2")
 jldsave(outfile;
     intensities,
     wall_times,
+    wall_times_all,
     info_dicts,
     sim_time_s = t_sim,
+    N_RUNS,
     FREQ, NUM_CYCLES, DX, DT, T_MAX, AXIAL_STEP, BANDWIDTH,
     AXIAL_DIM, TRANS_DIM, APERTURE, SKULL_DIST, SLICE_INDEX,
     med_info,

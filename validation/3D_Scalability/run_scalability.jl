@@ -1,20 +1,26 @@
 """
-3D HASA GPU Scalability Study — reconstruction time vs aperture and depth.
+3D HASA GPU Scalability Study — synthetic RF, no k-Wave or DICOM required.
 
-One k-Wave simulation (64 mm aperture, source at 50 mm — same parameters as
-the speed benchmark) provides the base RF data.  The reconstruction config is
-then swept over all (depth, aperture) combinations to isolate the two
-independent GPU compute bottlenecks:
+RF data is synthetic (uninitialised Float32 noise of the correct shape) and the
+medium is a uniform homogeneous array (c = 1500 m/s everywhere).  HASA still
+executes its full GPU code path; the correction terms are just trivial with a
+homogeneous medium.  This avoids slow k-Wave simulations and allows sweeping
+large apertures to find the GPU memory limit.
 
-  Transverse grid size Ny×Nz  → FFT / memory-bandwidth bottleneck
-  Axial reconstruction depth  → marching-step count, scales linearly
+benchmark=true captures per-phase GPU timing:
+  march_gpu_s   — GPU-measured march time (CUDA.@elapsed)
+  fft_s         — FFT share of the march
+  elementwise_s — element-wise kernel share
+  setup_s       — one-time operator setup (pre-computed operator stack)
+  download_s    — GPU→CPU intensity transfer
 
-Aperture sweep uses crop / zero-pad of the base RF data so that no additional
-k-Wave simulations are required; only GPU HASA reconstruction is timed.
+Sweep:
+  APERTURES_MM  — extended until OOM; out-of-memory points are marked NaN
+  DEPTHS_MM     — depth below skull surface
 
-Inner-loop structure for a single call (nfreq=1, nwindows=1):
-  n_march_rows = depth_mm / (AXIAL_STEP*1e3)   (linear in depth)
-  ops per row  = 4 substeps (HASA) × 2D FFT on Ny×Nz
+All timing arrays (wall, setup, march_gpu, fft, ew, bandwidth) are saved to a
+timestamped JLD2 file.  The progress file is updated after every point so a
+crash loses at most one run.
 
 Run from the project root:
     julia --project=. validation/3D_Scalability/run_scalability.jl
@@ -26,28 +32,27 @@ Pkg.activate(joinpath(@__DIR__, "..", ".."))
 using TranscranialFUS
 using JLD2, Printf, Dates, CUDA, Statistics
 
-# ── Fixed parameters (consistent with 3D_PAM_Accuracy / 3D_Speed_Benchmark) ──
+# ── Fixed parameters ──────────────────────────────────────────────────────────
 
 const FREQ       = 1.0e6
-const NUM_CYCLES = 10.0
 const DX         = 0.2e-3
 const DT         = 40e-9
 const T_MAX      = 120e-6
 const AXIAL_STEP = 50e-6
 const BANDWIDTH  = 0.0
-const N_RUNS     = 3     # timed repetitions per (depth, aperture) point; median is stored
+const C0         = 1500f0   # homogeneous medium sound speed [m/s]
 
-const SKULL_DIST  = 20e-3
-const SLICE_INDEX = 250
+const SKULL_DIST = 20e-3    # kept so depth labelling matches the rest of the study
+const N_RUNS     = 3        # timed repetitions per point; median is stored
 
 # ── Sweep parameters ──────────────────────────────────────────────────────────
 
-const APERTURES_MM = [25, 50.0, 75.0]   # receiver aperture (y and z); 100 mm OOMs on RTX 3080
-const DEPTHS_MM    = [20.0, 40.0, 60.0, 80.0, 100.0]   # depth below skull surface
+const APERTURES_MM = [25.0, 50.0, 64.0, 75.0, 100.0, 125.0]
+const DEPTHS_MM    = [20.0, 40.0, 60.0, 80.0, 100.0]   # depth below skull
 
 let apts = round.(Int, APERTURES_MM .* 1e-3 ./ DX)
-    println("Aperture sweep: $(round.(Int, APERTURES_MM)) mm → Ny=Nz = $apts")
-    println("  voxels/plane  : $(apts .^ 2)")
+    println("Aperture sweep : $(round.(Int, APERTURES_MM)) mm  →  Ny=Nz = $apts")
+    println("  voxels/plane : $(apts .^ 2)")
 end
 let steps = round.(Int, DEPTHS_MM .* 1e-3 ./ AXIAL_STEP)
     println("Depth sweep    : $(round.(Int, DEPTHS_MM)) mm below skull")
@@ -55,156 +60,93 @@ let steps = round.(Int, DEPTHS_MM .* 1e-3 ./ AXIAL_STEP)
 end
 println()
 
-# ── Scalability sweep ─────────────────────────────────────────────────────────
+# ── Storage ───────────────────────────────────────────────────────────────────
 
 n_depths    = length(DEPTHS_MM)
 n_apertures = length(APERTURES_MM)
 
-timing_wall_s  = fill(NaN, n_depths, n_apertures)
-timing_march_s = fill(NaN, n_depths, n_apertures)
+timing_wall_s       = fill(NaN, n_depths, n_apertures)
+timing_setup_s      = fill(NaN, n_depths, n_apertures)
+timing_march_gpu_s  = fill(NaN, n_depths, n_apertures)
+timing_march_wall_s = fill(NaN, n_depths, n_apertures)
+timing_fft_s        = fill(NaN, n_depths, n_apertures)
+timing_ew_s         = fill(NaN, n_depths, n_apertures)
+timing_bw_GBps      = fill(NaN, n_depths, n_apertures)
+oom_flags           = fill(false, n_depths, n_apertures)   # true = OOM at this point
 
-# Progress file: written after every point so a crash loses at most one run.
+# ── Progress file ─────────────────────────────────────────────────────────────
+
 const PROGRESS_FILE = joinpath(@__DIR__, "progress.jld2")
+
+function save_progress()
+    jldsave(PROGRESS_FILE;
+        timing_wall_s, timing_setup_s,
+        timing_march_gpu_s, timing_march_wall_s,
+        timing_fft_s, timing_ew_s, timing_bw_GBps,
+        oom_flags,
+        APERTURES_MM, DEPTHS_MM,
+        FREQ, DX, DT, T_MAX, AXIAL_STEP, BANDWIDTH, C0, SKULL_DIST, N_RUNS,
+    )
+end
 
 if isfile(PROGRESS_FILE)
     prev      = load(PROGRESS_FILE)
-    prev_apts = prev["APERTURES_MM"]
-    prev_deps = prev["DEPTHS_MM"]
+    prev_apts = get(prev, "APERTURES_MM", Float64[])
+    prev_deps = get(prev, "DEPTHS_MM",    Float64[])
     ai_map = [findfirst(==(a), prev_apts) for a in APERTURES_MM]
     di_map = [findfirst(==(d), prev_deps) for d in DEPTHS_MM]
     for (di_new, di_old) in enumerate(di_map)
         di_old === nothing && continue
         for (ai_new, ai_old) in enumerate(ai_map)
             ai_old === nothing && continue
-            timing_wall_s[di_new,  ai_new] = prev["timing_wall_s"][di_old,  ai_old]
-            timing_march_s[di_new, ai_new] = prev["timing_march_s"][di_old, ai_old]
+            for field in (:timing_wall_s, :timing_setup_s, :timing_march_gpu_s,
+                          :timing_march_wall_s, :timing_fft_s, :timing_ew_s,
+                          :timing_bw_GBps, :oom_flags)
+                key = string(field)
+                haskey(prev, key) && (eval(field)[di_new, ai_new] = prev[key][di_old, ai_old])
+            end
         end
     end
-    n_done = count(!isnan, timing_wall_s)
-    println("Resuming from progress.jld2 — $n_done/$(n_depths*n_apertures) points already done.")
-    println()
+    n_done = count(!isnan, timing_wall_s) + count(identity, oom_flags)
+    println("Resuming from progress.jld2 — $n_done/$(n_depths*n_apertures) points already done.\n")
 end
 
-# ── RF resize helper (centre crop or zero-pad) ────────────────────────────────
+# ── Warm-up — one call per aperture size to trigger JIT compilation ───────────
 
-function resize_rf(rf::AbstractArray, Ny_target::Int, Nz_target::Int)
-    Ny_src, Nz_src, Nt = size(rf)
-    rf_out = zeros(eltype(rf), Ny_target, Nz_target, Nt)
-
-    if Ny_target <= Ny_src
-        y_src_lo = (Ny_src - Ny_target) ÷ 2 + 1
-        y_range_src = y_src_lo:(y_src_lo + Ny_target - 1)
-        y_range_dst = 1:Ny_target
-    else
-        y_dst_lo = (Ny_target - Ny_src) ÷ 2 + 1
-        y_range_src = 1:Ny_src
-        y_range_dst = y_dst_lo:(y_dst_lo + Ny_src - 1)
-    end
-
-    if Nz_target <= Nz_src
-        z_src_lo = (Nz_src - Nz_target) ÷ 2 + 1
-        z_range_src = z_src_lo:(z_src_lo + Nz_target - 1)
-        z_range_dst = 1:Nz_target
-    else
-        z_dst_lo = (Nz_target - Nz_src) ÷ 2 + 1
-        z_range_src = 1:Nz_src
-        z_range_dst = z_dst_lo:(z_dst_lo + Nz_src - 1)
-    end
-
-    rf_out[y_range_dst, z_range_dst, :] .= rf[y_range_src, z_range_src, :]
-    return rf_out
-end
-
-# ── k-Wave simulation (only if there are points left to run) ──────────────────
-
-const KW_APERTURE  = 64e-3
-const KW_AXIAL_DIM = 70e-3
-
-rf_base = nothing
-
-if any(isnan, timing_wall_s)
-
-    kw_cfg = PAMConfig3D(
-        dx               = DX,
-        dy               = DX,
-        dz               = DX,
-        axial_dim        = KW_AXIAL_DIM,
-        transverse_dim_y = KW_APERTURE,
-        transverse_dim_z = KW_APERTURE,
-        dt               = DT,
-        t_max            = T_MAX,
-        receiver_aperture_y = KW_APERTURE,
-        receiver_aperture_z = KW_APERTURE,
-    )
-
-    println("k-Wave grid : $(pam_Nx(kw_cfg))×$(pam_Ny(kw_cfg))×$(pam_Nz(kw_cfg)), Nt=$(pam_Nt(kw_cfg))")
-    println()
-
-    println("Building skull medium for k-Wave…")
-    c_kw, rho_kw, _ = make_pam_medium_3d(
-        kw_cfg;
-        aberrator           = :skull,
-        skull_to_transducer = SKULL_DIST,
-        slice_index_z       = SLICE_INDEX,
-    )
-
-    src = PointSource3D(
-        depth      = 50e-3,
-        lateral_y  = 0.0,
-        lateral_z  = 0.0,
-        frequency  = FREQ,
-        num_cycles = NUM_CYCLES,
-    )
-
-    println("Running k-Wave (GPU)…")
-    kwave_tmp = mktempdir()
-    t_sim = @elapsed begin
-        rf_base, _, _ = simulate_point_sources_3d(c_kw, rho_kw, [src], kw_cfg;
-            use_gpu=true, kwave_data_path=kwave_tmp)
-    end
-    @printf("  k-Wave wall-clock: %.1f s\n\n", t_sim)
-    GC.gc(true)
-    rm(kwave_tmp; recursive=true, force=true)
-
-    # GPU warm-up — one reconstruction per aperture size so JIT compilation for
-    # each (Ny, Nz) grid is not included in the sweep timing.
-    println("GPU warm-up (one call per aperture size)…")
+if any(isnan, timing_wall_s) && !all(identity, oom_flags)
+    println("GPU warm-up (one call per aperture size, axial_dim = 45 mm)…")
     for apt_mm in APERTURES_MM
-        print("  aperture = $(round(Int, apt_mm)) mm … ")
+        Ny = round(Int, apt_mm * 1e-3 / DX)
+        print("  aperture = $(round(Int, apt_mm)) mm (Ny=Nz=$Ny) … ")
         flush(stdout)
-        let
-            cfg_w = PAMConfig3D(
-                dx = DX, dy = DX, dz = DX,
-                axial_dim           = 25e-3,
-                transverse_dim_y    = apt_mm * 1e-3,
-                transverse_dim_z    = apt_mm * 1e-3,
-                dt = DT, t_max = T_MAX,
-                receiver_aperture_y = apt_mm * 1e-3,
-                receiver_aperture_z = apt_mm * 1e-3,
-            )
-            c_w, _, _ = make_pam_medium_3d(cfg_w;
-                aberrator=:skull, skull_to_transducer=SKULL_DIST, slice_index_z=SLICE_INDEX)
-            rf_w = zeros(Float32, pam_Ny(cfg_w), pam_Nz(cfg_w), pam_Nt(cfg_w))
+        cfg_w = PAMConfig3D(
+            dx = DX, dy = DX, dz = DX,
+            axial_dim           = 45e-3,
+            transverse_dim_y    = apt_mm * 1e-3,
+            transverse_dim_z    = apt_mm * 1e-3,
+            dt = DT, t_max = T_MAX,
+            receiver_aperture_y = apt_mm * 1e-3,
+            receiver_aperture_z = apt_mm * 1e-3,
+        )
+        Nx_w = pam_Nx(cfg_w)
+        Nt_w = pam_Nt(cfg_w)
+        c_w  = fill(C0, Nx_w, Ny, Ny)
+        rf_w = Array{Float32}(undef, Ny, Ny, Nt_w)
+        try
             reconstruct_pam_3d(rf_w, c_w, cfg_w;
                 frequencies=[FREQ], bandwidth=BANDWIDTH, corrected=true,
-                axial_step=AXIAL_STEP, use_gpu=true, show_progress=false)
+                axial_step=AXIAL_STEP, use_gpu=true, show_progress=false, benchmark=true)
+            println("done.")
+        catch e
+            isa(e, CUDA.OutOfGPUMemoryError) ? println("OOM — skipping this aperture.") : rethrow(e)
         end
-        println("done.")
+        c_w = nothing; rf_w = nothing
+        GC.gc(true); CUDA.reclaim()
     end
     println()
-
-else
-    println("All points already complete — skipping k-Wave and warm-up.\n")
 end
 
-function save_progress()
-    jldsave(PROGRESS_FILE;
-        timing_wall_s, timing_march_s,
-        APERTURES_MM, DEPTHS_MM,
-        FREQ, NUM_CYCLES, DX, DT, T_MAX, AXIAL_STEP, BANDWIDTH,
-        SKULL_DIST, SLICE_INDEX,
-    )
-end
+# ── Scalability sweep ─────────────────────────────────────────────────────────
 
 t_sweep_start = time()
 n_total = n_depths * n_apertures
@@ -213,134 +155,146 @@ n_run   = 0
 
 for (di, depth_mm) in enumerate(DEPTHS_MM)
 
-    recon_axial_dim = (depth_mm + SKULL_DIST * 1e3) * 1e-3   # skull + depth in metres
-
-    # Build medium for max aperture at this depth; crop for smaller apertures.
-    cfg_max = PAMConfig3D(
-        dx               = DX,
-        dy               = DX,
-        dz               = DX,
-        axial_dim        = recon_axial_dim,
-        transverse_dim_y = maximum(APERTURES_MM) * 1e-3,
-        transverse_dim_z = maximum(APERTURES_MM) * 1e-3,
-        dt               = DT,
-        t_max            = T_MAX,
-        receiver_aperture_y = maximum(APERTURES_MM) * 1e-3,
-        receiver_aperture_z = maximum(APERTURES_MM) * 1e-3,
-    )
-    c_max, _, _ = make_pam_medium_3d(cfg_max;
-        aberrator=:skull, skull_to_transducer=SKULL_DIST, slice_index_z=SLICE_INDEX)
-    Ny_max = pam_Ny(cfg_max)   # 500
+    recon_axial_dim = (depth_mm + SKULL_DIST * 1e3) * 1e-3
 
     for (ai, apt_mm) in enumerate(APERTURES_MM)
 
         global s_count += 1
 
-        if !isnan(timing_wall_s[di, ai])
-            @printf("[%2d/%d] depth=%3.0f mm, aperture=%3.0f mm  [skipped — already done]\n",
-                    s_count, n_total, depth_mm, apt_mm)
+        if !isnan(timing_wall_s[di, ai]) || oom_flags[di, ai]
+            status = oom_flags[di, ai] ? "OOM" : "done"
+            @printf("[%2d/%d] depth=%3.0f mm, aperture=%3.0f mm  [skipped — %s]\n",
+                    s_count, n_total, depth_mm, apt_mm, status)
             continue
         end
 
+        n_remaining = count(isnan, timing_wall_s) - count(identity, oom_flags)
+        elapsed     = time() - t_sweep_start
+        eta_s       = n_run > 0 ? elapsed / n_run * max(n_remaining - 1, 0) : NaN
+        eta_str     = isnan(eta_s) ? "?" : @sprintf("%.0f", eta_s / 60)
 
-        n_remaining = count(isnan, timing_wall_s)
-        elapsed = time() - t_sweep_start
-        eta_s = n_run > 0 ? elapsed / n_run * (n_remaining - 1) : NaN
-        eta_str = isnan(eta_s) ? "?" : @sprintf("%.0f", eta_s / 60)
-
-        Ny_tgt = round(Int, apt_mm * 1e-3 / DX)
+        Ny_tgt     = round(Int, apt_mm * 1e-3 / DX)
+        n_march    = round(Int, depth_mm * 1e-3 / AXIAL_STEP)
         @printf("[%2d/%d] depth=%3.0f mm, aperture=%3.0f mm (Ny=Nz=%d, %d march rows, ETA ~%s min)\n",
-                s_count, n_total, depth_mm, apt_mm, Ny_tgt,
-                round(Int, depth_mm * 1e-3 / AXIAL_STEP), eta_str)
+                s_count, n_total, depth_mm, apt_mm, Ny_tgt, n_march, eta_str)
         flush(stdout)
 
-        # Reconstruction config for this (depth, aperture)
         cfg_recon = PAMConfig3D(
-            dx               = DX,
-            dy               = DX,
-            dz               = DX,
-            axial_dim        = recon_axial_dim,
-            transverse_dim_y = apt_mm * 1e-3,
-            transverse_dim_z = apt_mm * 1e-3,
-            dt               = DT,
-            t_max            = T_MAX,
+            dx = DX, dy = DX, dz = DX,
+            axial_dim           = recon_axial_dim,
+            transverse_dim_y    = apt_mm * 1e-3,
+            transverse_dim_z    = apt_mm * 1e-3,
+            dt = DT, t_max = T_MAX,
             receiver_aperture_y = apt_mm * 1e-3,
             receiver_aperture_z = apt_mm * 1e-3,
         )
+        Nx_tgt = pam_Nx(cfg_recon)
+        Nt_tgt = pam_Nt(cfg_recon)
 
-        # Crop medium from the max-aperture build (centre slice)
-        y_lo = (Ny_max - Ny_tgt) ÷ 2 + 1
-        y_hi = y_lo + Ny_tgt - 1
-        c_recon = c_max[:, y_lo:y_hi, y_lo:y_hi]
+        c_recon = fill(C0, Nx_tgt, Ny_tgt, Ny_tgt)
+        rf_apt  = Array{Float32}(undef, Ny_tgt, Ny_tgt, Nt_tgt)
 
-        # RF resized to match aperture (crop or zero-pad from 64 mm base)
-        rf_apt = resize_rf(rf_base, Ny_tgt, Ny_tgt)
+        run_wall_s    = Float64[]
+        run_setup_s   = Float64[]
+        run_mgpu_s    = Float64[]
+        run_mwall_s   = Float64[]
+        run_fft_s     = Float64[]
+        run_ew_s      = Float64[]
+        run_bw_GBps   = Float64[]
 
-        # GPU HASA reconstruction — N_RUNS timed repetitions, store median.
-        run_wall_s  = Vector{Float64}(undef, N_RUNS)
-        run_march_s = Vector{Float64}(undef, N_RUNS)
+        point_oom = false
+
         for r in 1:N_RUNS
-            @printf("  run %d/%d … ", r, N_RUNS)
-            flush(stdout)
-            t = @elapsed begin
-                _, _, info = reconstruct_pam_3d(
-                    rf_apt, c_recon, cfg_recon;
-                    frequencies   = [FREQ],
-                    bandwidth     = BANDWIDTH,
-                    corrected     = true,
-                    axial_step    = AXIAL_STEP,
-                    use_gpu       = true,
-                    show_progress = false,
-                )
+            @printf("  run %d/%d … ", r, N_RUNS); flush(stdout)
+            try
+                local info
+                t = @elapsed begin
+                    _, _, info = reconstruct_pam_3d(
+                        rf_apt, c_recon, cfg_recon;
+                        frequencies=[FREQ], bandwidth=BANDWIDTH,
+                        corrected=true, axial_step=AXIAL_STEP,
+                        use_gpu=true, show_progress=false, benchmark=true,
+                    )
+                end
+                gt = info[:gpu_timing]
+                push!(run_wall_s,   t)
+                push!(run_setup_s,  something(gt[:setup_s],         NaN))
+                push!(run_mgpu_s,   something(gt[:march_gpu_s],     NaN))
+                push!(run_mwall_s,  something(gt[:march_wall_s],    NaN))
+                push!(run_fft_s,    something(gt[:fft_s],           NaN))
+                push!(run_ew_s,     something(gt[:elementwise_s],   NaN))
+                push!(run_bw_GBps,  something(gt[:bandwidth_GBps],  NaN))
+                @printf("%.2fs  (setup=%.2fs  march_gpu=%.2fs  fft=%.2fs  ew=%.2fs  BW=%.0f GB/s)\n",
+                        t, run_setup_s[end], run_mgpu_s[end],
+                        run_fft_s[end], run_ew_s[end], run_bw_GBps[end])
+            catch e
+                if isa(e, CUDA.OutOfGPUMemoryError)
+                    println("OOM")
+                    point_oom = true
+                    break
+                else
+                    rethrow(e)
+                end
             end
-            run_wall_s[r]  = t
-            run_march_s[r] = get(get(info, :gpu_timing, Dict()), :march_wall_s, NaN)
-            @printf("%.2f s  (march %.2f s)\n", t, run_march_s[r])
+            GC.gc(true); CUDA.reclaim()
         end
-        timing_wall_s[di, ai]  = median(run_wall_s)
-        timing_march_s[di, ai] = median(run_march_s)
-        @printf("  → median: %.2f s  (march %.2f s)\n", timing_wall_s[di, ai], timing_march_s[di, ai])
 
-        # Free CPU temporaries and flush GPU memory pool before the next (larger) run.
-        rf_apt  = nothing
-        c_recon = nothing
-        GC.gc(true)
-        CUDA.reclaim()
+        if point_oom
+            oom_flags[di, ai] = true
+            @printf("  → OOM at aperture=%g mm, depth=%g mm\n", apt_mm, depth_mm)
+        else
+            timing_wall_s[di, ai]       = median(run_wall_s)
+            timing_setup_s[di, ai]      = median(run_setup_s)
+            timing_march_gpu_s[di, ai]  = median(run_mgpu_s)
+            timing_march_wall_s[di, ai] = median(run_mwall_s)
+            timing_fft_s[di, ai]        = median(run_fft_s)
+            timing_ew_s[di, ai]         = median(run_ew_s)
+            timing_bw_GBps[di, ai]      = median(run_bw_GBps)
+            @printf("  → median  wall=%.2fs  setup=%.2fs  march_gpu=%.2fs  fft=%.2fs  ew=%.2fs  BW=%.0f GB/s\n",
+                    timing_wall_s[di, ai], timing_setup_s[di, ai],
+                    timing_march_gpu_s[di, ai], timing_fft_s[di, ai],
+                    timing_ew_s[di, ai], timing_bw_GBps[di, ai])
+        end
+
+        c_recon = nothing; rf_apt = nothing
+        GC.gc(true); CUDA.reclaim()
 
         global n_run += 1
-        n_done = count(!isnan, timing_wall_s)
+        n_done = count(!isnan, timing_wall_s) + count(identity, oom_flags)
         save_progress()
-        @printf("    [progress saved — %d/%d done]\n", n_done, n_total)
+        @printf("    [progress saved — %d/%d done]\n\n", n_done, n_total)
     end
 end
 
 total_min = (time() - t_sweep_start) / 60
 @printf("\nSweep complete in %.1f minutes.\n\n", total_min)
 
-# ── Summary table ─────────────────────────────────────────────────────────────
+# ── Summary tables ────────────────────────────────────────────────────────────
 
-println("Wall-clock GPU HASA [s]  (rows = depth from skull, cols = aperture)")
-@printf("  %10s │", "Depth \\ Apt")
-for apt_mm in APERTURES_MM
-    @printf("  %5.0f mm", apt_mm)
-end
-println()
-println("  " * "─"^11 * "┼" * "─"^(9 * n_apertures))
-for (di, depth_mm) in enumerate(DEPTHS_MM)
-    @printf("  %6.0f mm   │", depth_mm)
-    for (ai, _) in enumerate(APERTURES_MM)
-        @printf("  %7.2f s", timing_wall_s[di, ai])
+for (label, arr) in [
+        ("Wall-clock [s]",      timing_wall_s),
+        ("GPU march [s]",       timing_march_gpu_s),
+        ("Setup [s]",           timing_setup_s),
+        ("Bandwidth [GB/s]",    timing_bw_GBps),
+    ]
+    println(label, "  (rows = depth from skull, cols = aperture)")
+    @printf("  %10s │", "Depth\\Apt")
+    for apt_mm in APERTURES_MM; @printf("  %6.0f mm", apt_mm); end
+    println()
+    for (di, dep) in enumerate(DEPTHS_MM)
+        @printf("  %6.0f mm │", dep)
+        for ai in 1:n_apertures
+            oom_flags[di, ai] ? @printf("     OOM  ") : @printf("  %7.2f ", arr[di, ai])
+        end
+        println()
     end
     println()
 end
-println()
 
-# ── Save ──────────────────────────────────────────────────────────────────────
+# ── Save final results ────────────────────────────────────────────────────────
 
-outdir  = @__DIR__
 ts      = Dates.format(now(), "yyyymmdd_HHMMSS")
-outfile = joinpath(outdir, "results_$(ts).jld2")
-
+outfile = joinpath(@__DIR__, "results_$(ts).jld2")
 save_progress()
 mv(PROGRESS_FILE, outfile; force=true)
 println("Results saved → $outfile")
