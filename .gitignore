@@ -16,6 +16,6 @@ coverage/
 outputs/
 docs/build/
 
-# *.jld2
+*.jld2
 
 .claude/
