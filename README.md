@@ -99,4 +99,4 @@ TRANSCRANIALFUS_RUN_INTEGRATION=1 TRANSCRANIALFUS_RUN_KWAVE_TESTS=1 julia --proj
 
 ## AI Usage
 
-This project was developed with AI assistance. Generated code and text should be reviewed critically before use.
+This project was developed with AI assistance.

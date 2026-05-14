@@ -4,7 +4,7 @@ This note describes the high-level loop structure of the PAM reconstruction algo
 
 ## What PAM Does
 
-Starting from RF pressure data recorded at a receiver plane, PAM back-propagates the acoustic field one axial row at a time and accumulates the intensity `|p|^2` at each row to form an image. The heterogeneous sound-speed field is handled by the HASA correction. Without it, the method reduces to geometric ASA.
+Starting from RF pressure data recorded at a receiver plane, PAM back-propagates the acoustic field one axial row at a time and accumulates the intensity `|p|^2` at each row to form an image. The heterogeneous sound-speed field is handled by the HASA correction. Without it, the method reduces to ASA.
 
 ## CPU Path
 
